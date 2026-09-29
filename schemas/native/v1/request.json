@@ -200,7 +200,8 @@
         "roots",
         "crossFilesystems",
         "excludes",
-        "accounting"
+        "accounting",
+        "indexDirectory"
       ],
       "properties": {
         "roots": {
@@ -232,6 +233,18 @@
         },
         "maxDepth": {
           "$ref": "common.json#/$defs/decimalInteger"
+        },
+        "indexDirectory": {
+          "description": "Where the helper keeps its bounded index. Node owns the location; the helper is not told to guess it from the environment.",
+          "$ref": "common.json#/$defs/pathBytes"
+        },
+        "maxIndexBytes": {
+          "description": "Byte budget for the whole index file. Older scans are dropped, oldest first, until the file fits.",
+          "$ref": "common.json#/$defs/decimalInteger"
+        },
+        "keepScans": {
+          "description": "How many scans the index retains, newest first, including this one.",
+          "$ref": "common.json#/$defs/decimalInteger"
         }
       }
     },
@@ -261,6 +274,7 @@
       "additionalProperties": false,
       "required": [
         "scanId",
+        "indexDirectory",
         "sort",
         "order",
         "limit"
@@ -296,6 +310,9 @@
         },
         "includeTypeTotals": {
           "type": "boolean"
+        },
+        "indexDirectory": {
+          "$ref": "common.json#/$defs/pathBytes"
         }
       }
     }
