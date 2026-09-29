@@ -15,6 +15,7 @@ npm test
 npm run build
 npm run test:integration
 npm run test:pty
+npm run fixtures -- standard
 npm run check
 cargo fmt --manifest-path native/disktop-fs/Cargo.toml --all -- --check
 cargo clippy --manifest-path native/disktop-fs/Cargo.toml --all-targets -- -D warnings
@@ -30,7 +31,7 @@ Early scaffolding may implement only smoke coverage. Passing a smoke test is not
 - Providers detect findings and propose actions. They do not perform cleanup. All mutations go through a reviewed plan, confirmation, revalidation, and journaled result.
 - Surface unsupported tools, permissions, partial results, and filesystem uncertainty explicitly. Never convert missing evidence into a zero-byte claim.
 
-Do not add `rm -rf`, shell-built cleanup commands, or direct file mutation to a provider, CLI handler, or TUI view. Changes to a public CLI output or helper protocol require updated schemas and contract tests. Document reversibility, capability requirements, cancellation, and incomplete-result behavior for each new action.
+Do not add `rm -rf`, shell-built cleanup commands, or direct file mutation to a provider, CLI handler, or TUI view. Changes to a public CLI output or helper protocol require updated schemas in `schemas/cli/v1/` or `schemas/native/v1/`, a valid example, an invalid example where a new rule needs proving, and contract tests. The layering in `docs/architecture.md` is enforced by `eslint.config.mjs`; add a case to `tests/unit/dependency-rules.test.mjs` when you add a rule. Document reversibility, capability requirements, cancellation, and incomplete-result behavior for each new action.
 
 ## Test safety
 

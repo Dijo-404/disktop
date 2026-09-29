@@ -24,6 +24,7 @@
   "files": [
     "dist/",
     "vendor/bin/",
+    "schemas/",
     "docs/",
     "PLAN.md",
     "AGENTS.md",
@@ -47,6 +48,7 @@
     "test": "npm run build && node --test tests/unit/*.test.mjs tests/contract/*.test.mjs",
     "test:integration": "npm run build && npm run build:native && node --test tests/integration/*.test.mjs",
     "test:pty": "npm run build && node --test tests/pty/*.test.mjs",
+    "fixtures": "node scripts/generate-fixtures.mjs",
     "check": "npm run typecheck && npm run lint && npm test && npm run test:integration && npm run test:pty",
     "prepack": "npm run build"
   },

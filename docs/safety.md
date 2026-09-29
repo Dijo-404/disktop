@@ -1,6 +1,8 @@
 # Cleanup safety contract
 
-Status: design contract. No cleanup is implemented in the current scaffold. The rules here apply to all future generic and manager-backed actions and are expanded in [PLAN.md](../PLAN.md#action-and-safety-architecture).
+Status: design contract. No cleanup is implemented in the current scaffold. The rules here apply to all future generic and manager-backed actions and are expanded in [PLAN.md](../PLAN.md#action-and-safety-architecture). [threat-model.md](threat-model.md) states the attackers and residual risks these rules answer to; [adr/0004](adr/0004-reviewed-action-pipeline.md) records why there is one pipeline and one journal.
+
+The refusal policy is code, not only prose: `src/domain/protected-paths.ts` classifies a target against protected roots, the home directory itself, mount roots, Trash, Disktop state, and the allowed roots, and refuses an unnormalized or relative path rather than resolving it. The helper repeats these checks independently against live descriptors.
 
 ## Trust boundaries
 

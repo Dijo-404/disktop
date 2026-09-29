@@ -8,9 +8,13 @@ There will be **one initial public npm release, `1.0.0`**. Phases in this docume
 
 The user journey is: open a fast dashboard → identify a full filesystem → inspect the largest files, directories, apps, and caches → review an action with exact scope and estimates → apply it safely → see the actual result and undo when possible. Disktop itself makes no network calls and collects no telemetry. `npx` may contact the npm registry to install it.
 
-### Current scaffold boundary
+### Current implementation boundary
 
-The development package remains private at `0.0.0`. The CLI bootstrap implements `--help` and `--version` and explicitly reports planned commands as unavailable. The native helper implements only the versioned `hello` and `probe` requests; it reports all scan, index, and mutation operations as unsupported. No file discovery, cleanup, TUI, inventory, export, or alert feature is complete yet. Passing the current scaffold checks proves only that this starting boundary builds and behaves honestly. It does not complete Phase 0 or any feature acceptance row.
+The development package remains private at `0.0.0`. **Phase 0 is complete**; Phase 1 is the next gate.
+
+Phase 0 delivered the contracts, not features: normative JSON Schemas for CLI output (`schemas/cli/v1/`) and the helper protocol (`schemas/native/v1/`) with valid and invalid examples under contract test; byte-exact path handling and the protected-path refusal policy in `src/domain`; XDG locations, configuration defaults, and a strict TOML subset reader in `src/storage`; the source dependency rule enforced by `eslint.config.mjs` and proven by `tests/unit/dependency-rules.test.mjs`; the filesystem fixture generator in `tests/fixtures/generate.mjs`; the fixed kernel and architecture minimums in `docs/support-matrix.md`; the action threat model in `docs/threat-model.md`; and ADRs 0001 to 0005.
+
+The CLI bootstrap still implements `--help` and `--version` only and explicitly reports planned commands as unavailable. The native helper still implements only the versioned `hello` and `probe` requests; `cancel` and every other planned operation is recognized and refused as unsupported. No file discovery, cleanup, TUI, inventory, export, or alert feature exists, and no feature acceptance row passes yet.
 
 ## Supported environment and packaging
 
@@ -173,6 +177,7 @@ npm run lint                        lint current TypeScript sources
 npm test                            current unit and contract suites
 npm run test:integration            current Node/Rust handshake integration suite
 npm run test:pty                    current terminal bootstrap smoke suite
+npm run fixtures -- standard         build a throwaway fixture tree and print its path
 cargo test --manifest-path native/disktop-fs/Cargo.toml
 npm pack --dry-run                   inspect exactly what would be published
 ~~~
@@ -304,7 +309,7 @@ Each phase ends with a testable gate. No phase publishes to npm.
 
 | Phase | Build work | Gate before continuing |
 | --- | --- | --- |
-| 0. Contracts and threat model | Establish repository scaffold, schema v1, native IPC, supported kernel/architecture matrix, source dependency rule, config defaults, action threat model, fixture generator, ADRs for TUI/index/packaging. | Example CLI JSON validates against schemas; helper handshake and unsupported-state behavior are specified; safety review approves protected roots and action rules. |
+| 0. Contracts and threat model **(complete)** | Establish repository scaffold, schema v1, native IPC, supported kernel/architecture matrix, source dependency rule, config defaults, action threat model, fixture generator, ADRs for TUI/index/packaging. | Example CLI JSON validates against schemas; helper handshake and unsupported-state behavior are specified; safety review approves protected roots and action rules. |
 | 1. Vertical slice and inventory | Implement CLI bootstrap, Linux device/mount/capacity inventory, a minimal 80×24 dashboard, Node/Rust process lifecycle, progress/cancel plumbing, and low-space/inode warnings. | Device/partition/mount counts are correct on fixture and real layouts; TUI restores terminal; `disktop --json` works without TTY. |
 | 2. Scanner, index, search, history | Build fd-relative walk, allocated/apparent/hardlink accounting, bounded SQLite index, query filters, file-type totals, cached scan view, snapshot comparison and pruning. | Million-entry memory gate, `du -x` comparison where semantics match, invalid-byte names, bind mounts, inaccessible dirs, cancel/restart, and snapshot compatibility tests pass. |
 | 3. Findings and application inventory | Implement every dev, language, AI, browser, Electron, game, VM, package, and per-user detector plus SMART, open-deleted, snapshot, log, crash, swap, and WSL diagnostics. | Each provider passes fixtures; optional tools and permissions show capability states; no duplicate findings or unlabelled size estimates. |
