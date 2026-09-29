@@ -26,8 +26,6 @@ export interface StorageServices {
   readonly explore: ExploreService;
   readonly snapshots: SnapshotService;
   readonly defaults: ScanDefaults;
-  /** The filesystem identities holding these roots, for snapshot comparability. */
-  filesystemsUnder(roots: readonly RawPath[]): Promise<readonly string[]>;
 }
 
 /**

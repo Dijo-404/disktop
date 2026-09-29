@@ -21,6 +21,17 @@ pub const MAX_DEPTH: u32 = 512;
 const PROGRESS_ENTRIES: u64 = 4096;
 const PROGRESS_INTERVAL: Duration = Duration::from_millis(250);
 
+/// The most individual warnings one scan reports.
+///
+/// There is one warning per unreadable directory and one per entry that moved
+/// while the scan ran, each carrying a message and a full path. A scan of `/`
+/// as an ordinary user, or of a tree under an active build, produces tens of
+/// thousands of them, and an uncapped list would grow with the filesystem in
+/// memory, on the wire, in the index, and in every stored snapshot. Past this
+/// point the warnings are counted by code instead, and the counts are reported
+/// as their own warning, so nothing is ever hidden — only summarised.
+const MAX_WARNINGS: usize = 256;
+
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Accounting {
     Allocated,
@@ -90,6 +101,10 @@ pub struct ScanTotals {
     pub shared_bytes: u64,
     pub excluded_mounts: Vec<Vec<u8>>,
     pub warnings: Vec<ScanWarning>,
+    /// Device numbers the walk actually read, which is what makes two scans
+    /// comparable. Deriving them from the roots alone would miss every mount
+    /// a `crossFilesystems` scan descended into.
+    pub filesystems: Vec<u64>,
 }
 
 struct Frame {
@@ -109,6 +124,10 @@ struct Walk<'a> {
     /// function of how many hardlinks exist rather than of the tree's size.
     counted_inodes: HashSet<(u64, u64)>,
     processed_bytes: u64,
+    /// Counted per code once the warning list is full, so a summary can say
+    /// how much was left out.
+    suppressed: std::collections::BTreeMap<&'static str, u64>,
+    filesystems: HashSet<u64>,
     last_progress: Instant,
     since_progress: u64,
     started: Instant,
@@ -142,9 +161,12 @@ pub fn walk(
             shared_bytes: 0,
             excluded_mounts: Vec::new(),
             warnings: Vec::new(),
+            filesystems: Vec::new(),
         },
         counted_inodes: HashSet::new(),
         processed_bytes: 0,
+        suppressed: std::collections::BTreeMap::new(),
+        filesystems: HashSet::new(),
         last_progress: Instant::now(),
         since_progress: 0,
         started: Instant::now(),
@@ -160,6 +182,7 @@ pub fn walk(
 
     if walk.cancelled.load(Ordering::Relaxed) {
         walk.totals.complete = false;
+        // Cancellation is the one warning that is never dropped for being late.
         walk.totals.warnings.push(ScanWarning {
             code: "cancelled",
             message: "The scan stopped at a directory boundary when cancellation was requested."
@@ -168,21 +191,45 @@ pub fn walk(
         });
     }
 
+    for (code, count) in std::mem::take(&mut walk.suppressed) {
+        walk.totals.warnings.push(ScanWarning {
+            code: "warnings-truncated",
+            message: format!("{count} further '{code}' warnings were counted but not listed."),
+            path: None,
+        });
+    }
+    let mut filesystems: Vec<u64> = walk.filesystems.iter().copied().collect();
+    filesystems.sort_unstable();
+    walk.totals.filesystems = filesystems;
+
     Ok(walk.totals)
 }
 
 impl Walk<'_> {
+    /// Record a warning, or count it once the list is full.
+    fn warn(&mut self, code: &'static str, message: String, path: Option<Vec<u8>>) {
+        if self.totals.warnings.len() >= MAX_WARNINGS {
+            *self.suppressed.entry(code).or_insert(0) += 1;
+            return;
+        }
+        self.totals.warnings.push(ScanWarning {
+            code,
+            message,
+            path,
+        });
+    }
+
     fn stopped(&self) -> bool {
         self.cancelled.load(Ordering::Relaxed)
     }
 
     fn root(&mut self, path: &[u8]) -> io::Result<()> {
         if self.excluded(path) {
-            self.totals.warnings.push(ScanWarning {
-                code: "excluded-mount",
-                message: "The scan root is itself excluded.".to_owned(),
-                path: Some(path.to_vec()),
-            });
+            self.warn(
+                "excluded-mount",
+                "The scan root is itself excluded.".to_owned(),
+                Some(path.to_vec()),
+            );
             self.totals.complete = false;
             return Ok(());
         }
@@ -192,11 +239,11 @@ impl Walk<'_> {
             Err(error) => {
                 self.totals.complete = false;
                 self.totals.inaccessible_directories += 1;
-                self.totals.warnings.push(ScanWarning {
-                    code: "inaccessible-directory",
-                    message: format!("The scan root could not be opened: {error}"),
-                    path: Some(path.to_vec()),
-                });
+                self.warn(
+                    "inaccessible-directory",
+                    format!("The scan root could not be opened: {error}"),
+                    Some(path.to_vec()),
+                );
                 return Ok(());
             }
         };
@@ -207,11 +254,11 @@ impl Walk<'_> {
                 sys::close(descriptor);
                 self.totals.complete = false;
                 self.totals.inaccessible_directories += 1;
-                self.totals.warnings.push(ScanWarning {
-                    code: "inaccessible-directory",
-                    message: format!("The scan root could not be read: {error}"),
-                    path: Some(path.to_vec()),
-                });
+                self.warn(
+                    "inaccessible-directory",
+                    format!("The scan root could not be read: {error}"),
+                    Some(path.to_vec()),
+                );
                 return Ok(());
             }
         };
@@ -286,11 +333,11 @@ impl Walk<'_> {
                     // not a scan failure, but the result stops claiming to be
                     // a complete picture of the tree.
                     self.totals.complete = false;
-                    self.totals.warnings.push(ScanWarning {
-                        code: "changed-during-scan",
-                        message: format!("The entry could not be read: {error}"),
-                        path: Some(path),
-                    });
+                    self.warn(
+                        "changed-during-scan",
+                        format!("The entry could not be read: {error}"),
+                        Some(path),
+                    );
                     continue;
                 }
             };
@@ -344,11 +391,11 @@ impl Walk<'_> {
             self.totals.complete = false;
             if !self.warned_depth {
                 self.warned_depth = true;
-                self.totals.warnings.push(ScanWarning {
-                    code: "depth-limit-reached",
-                    message: format!("The walk stopped descending at depth {ceiling}."),
-                    path: Some(path),
-                });
+                self.warn(
+                    "depth-limit-reached",
+                    format!("The walk stopped descending at depth {ceiling}."),
+                    Some(path),
+                );
             }
             self.attribute_unentered(stack, &metadata);
             return Ok(());
@@ -446,11 +493,16 @@ impl Walk<'_> {
     fn account(&mut self, metadata: &Metadata, shared: bool) {
         self.totals.scanned_entries += 1;
         self.since_progress += 1;
+        self.filesystems.insert(metadata.device);
+        // Shared bytes are reported in the same unit as the totals they sit
+        // beside; two units in one object would make the smaller one read as
+        // negligible when it is not.
+        let counted = match self.options.accounting {
+            Accounting::Allocated => metadata.allocated_bytes,
+            Accounting::Apparent => metadata.apparent_bytes,
+        };
         if shared {
-            self.totals.shared_bytes = self
-                .totals
-                .shared_bytes
-                .saturating_add(metadata.allocated_bytes);
+            self.totals.shared_bytes = self.totals.shared_bytes.saturating_add(counted);
             return;
         }
         self.totals.allocated_bytes = self
@@ -517,17 +569,17 @@ impl Walk<'_> {
         match error.raw_os_error() {
             Some(libc::EXDEV) => {
                 self.totals.excluded_mounts.push(path.to_vec());
-                self.totals.warnings.push(ScanWarning {
-                    code: "crossed-filesystem-skipped",
-                    message: "A mount point was not descended into.".to_owned(),
-                    path: Some(path.to_vec()),
-                });
+                self.warn(
+                    "crossed-filesystem-skipped",
+                    "A mount point was not descended into.".to_owned(),
+                    Some(path.to_vec()),
+                );
             }
-            Some(libc::ELOOP) => self.totals.warnings.push(ScanWarning {
-                code: "symlink-not-followed",
-                message: "A symbolic link was not followed.".to_owned(),
-                path: Some(path.to_vec()),
-            }),
+            Some(libc::ELOOP) => self.warn(
+                "symlink-not-followed",
+                "A symbolic link was not followed.".to_owned(),
+                Some(path.to_vec()),
+            ),
             _ => self.note_inaccessible(path, error),
         }
     }
@@ -535,11 +587,11 @@ impl Walk<'_> {
     fn note_inaccessible(&mut self, path: &[u8], error: &io::Error) {
         self.totals.complete = false;
         self.totals.inaccessible_directories += 1;
-        self.totals.warnings.push(ScanWarning {
-            code: "inaccessible-directory",
-            message: format!("The directory could not be read: {error}"),
-            path: Some(path.to_vec()),
-        });
+        self.warn(
+            "inaccessible-directory",
+            format!("The directory could not be read: {error}"),
+            Some(path.to_vec()),
+        );
     }
 }
 
@@ -745,6 +797,72 @@ mod tests {
             .expect("the root is finished last");
         assert!(root.1 >= 65536);
         assert_eq!(root.2, 4);
+    }
+
+    #[test]
+    fn the_warning_list_is_capped_and_says_how_many_it_left_out() {
+        if unsafe { libc::geteuid() } == 0 {
+            return;
+        }
+        let sandbox = Sandbox::new("walk-warning-cap");
+        for index in 0..(MAX_WARNINGS + 40) {
+            let name = format!("locked-{index}");
+            sandbox.directory(name.as_bytes());
+            sandbox.chmod(name.as_bytes(), 0o000);
+        }
+
+        let mut sink = Collector::default();
+        let totals = walk(&options(sandbox.path()), &mut sink, &AtomicBool::new(false)).unwrap();
+
+        for index in 0..(MAX_WARNINGS + 40) {
+            sandbox.chmod(format!("locked-{index}").as_bytes(), 0o700);
+        }
+
+        // Every unreadable directory is still counted; only the per-path list
+        // is bounded, and the overflow is reported rather than dropped.
+        assert_eq!(totals.inaccessible_directories as usize, MAX_WARNINGS + 40);
+        assert!(totals.warnings.len() <= MAX_WARNINGS + 1);
+        let summary = totals
+            .warnings
+            .iter()
+            .find(|warning| warning.code == "warnings-truncated")
+            .expect("the suppressed warnings are summarised");
+        assert!(summary.message.contains("40"), "{}", summary.message);
+    }
+
+    #[test]
+    fn shared_bytes_are_reported_in_the_unit_the_scan_was_asked_for() {
+        let sandbox = Sandbox::new("walk-shared-unit");
+        sandbox.file(b"original.bin", 100_000);
+        sandbox.hardlink(b"original.bin", b"copy.bin");
+
+        let mut allocated = options(sandbox.path());
+        allocated.accounting = Accounting::Allocated;
+        let mut sink = Collector::default();
+        let by_blocks = walk(&allocated, &mut sink, &AtomicBool::new(false)).unwrap();
+
+        let mut apparent = options(sandbox.path());
+        apparent.accounting = Accounting::Apparent;
+        let mut sink = Collector::default();
+        let by_size = walk(&apparent, &mut sink, &AtomicBool::new(false)).unwrap();
+
+        // The second link's bytes must be comparable with the totals they sit
+        // beside, not silently in a different unit.
+        assert_eq!(by_size.shared_bytes, 100_000);
+        assert!(by_blocks.shared_bytes >= 100_000);
+        assert_eq!(by_blocks.shared_bytes % 512, 0);
+    }
+
+    #[test]
+    fn the_result_names_the_filesystems_the_walk_actually_read() {
+        let sandbox = Sandbox::new("walk-filesystems");
+        sandbox.file(b"a.txt", 16);
+
+        let mut sink = Collector::default();
+        let totals = walk(&options(sandbox.path()), &mut sink, &AtomicBool::new(false)).unwrap();
+
+        assert_eq!(totals.filesystems.len(), 1);
+        assert_ne!(totals.filesystems[0], 0);
     }
 
     #[test]

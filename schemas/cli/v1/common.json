@@ -458,6 +458,10 @@
           "items": {
             "$ref": "#/$defs/identifier"
           }
+        },
+        "maxDepth": {
+          "description": "The depth the scan stopped at, when it was limited. A depth-limited scan of an unchanged tree otherwise diffs as a large deletion.",
+          "$ref": "#/$defs/decimalInteger"
         }
       }
     },

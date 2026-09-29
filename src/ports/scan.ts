@@ -21,6 +21,7 @@ export interface ScanRequest {
 export interface ScanTotals {
   readonly allocatedBytes: Bytes;
   readonly apparentBytes: Bytes;
+  /** In the same unit as the totals above, so the two can be compared. */
   readonly sharedBytes: Bytes;
 }
 
@@ -40,6 +41,8 @@ export type ScanEvent =
       readonly roots: readonly RawPath[];
       readonly completeness: ScanCompleteness;
       readonly totals: ScanTotals;
+      /** The filesystems the walk actually read, as the helper observed them. */
+      readonly filesystems: readonly string[];
     };
 
 export interface ScanPort {
@@ -49,6 +52,8 @@ export interface ScanPort {
 export type EntryKindFilter = IndexedEntry["kind"];
 
 export interface EntryFilter {
+  /** Restrict the page to this path and everything below it. */
+  readonly underPath?: RawPath;
   readonly parentId?: string;
   readonly nameContains?: string;
   readonly extension?: string;

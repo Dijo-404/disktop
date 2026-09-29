@@ -16,6 +16,9 @@
     "apparentBytes": "90993422336",
     "sharedBytes": "2097152",
     "excludedMounts": [],
-    "warnings": []
+    "warnings": [],
+    "filesystems": [
+      "2049"
+    ]
   }
 }

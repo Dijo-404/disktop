@@ -54,6 +54,42 @@ All public changes will be recorded here when the first complete Linux release i
   not compared: `du --apparent-size` excludes directories' own `st_size` and Disktop
   includes it.
 
+After review, in the same phase:
+
+- `disktop explore PATH` now narrows the listing to that path and everything below it.
+  It previously used the path only to choose which scan to read, and then ranked the
+  whole scan — so exploring one directory after scanning a home directory answered about
+  the home directory while appearing to answer about the directory. The index records a
+  subtree's primary-key range as the depth-first walk closes each directory, so the
+  filter costs a key range rather than a descendant search.
+- A scan's warning list is capped. One unreadable directory produced one warning with a
+  full path, with no bound: 3,000 of them made a 1.7 MB JSON line and a 966 KB snapshot,
+  and scanning `/` as an ordinary user is worse. Every occurrence is still counted, and
+  the overflow is summarised per code as a `warnings-truncated` warning.
+- Growth history follows the accounting mode the scan used. It previously reported
+  allocated bytes whatever was asked for, so a sparse image growing 200 GiB of apparent
+  size showed as no growth at all — the question `--accounting apparent` exists to answer.
+- A scan's depth limit is part of a snapshot's scope. Without it, a depth-limited scan of
+  an unchanged tree compared against a full one as a large deletion.
+- A snapshot records the filesystems the walk actually read, reported by the helper,
+  rather than the ones the roots sit on. Under `--cross-filesystems` the two differ, and
+  two scans that traversed different mounts compared as though they had measured the same
+  thing.
+- `sharedBytes` is reported in the unit the scan was asked for. Under apparent accounting
+  it was still allocated bytes, putting two units in one totals object and making a
+  200 MiB second hardlink read as 4 KiB.
+- An unexpected failure now writes one error envelope and exits `2`. A mangled `--cursor`
+  previously printed a stack trace, wrote nothing to stdout, and exited `1` — which in
+  Disktop's own exit codes means an alert threshold was reached, so a script could not
+  tell a crash from a full disk. `--cursor` and `--limit` are validated before the helper
+  is reached.
+- A malformed `throttleBytesPerSecond`, `maxDepth`, `keepScans`, or filter integer is
+  refused as `invalid-arguments` instead of silently falling back to a default, which
+  would have run a different scan than the one asked for.
+- A panicking scan worker still emits a terminal event, and a poisoned writer lock no
+  longer swallows one. A client waits for a terminal event and has no timeout, so a
+  dropped one hung it for as long as the helper lived.
+
 ### Phase 1: vertical slice and inventory
 
 - The command surface is defined once in `src/cli/parser.ts` and drives parsing, option

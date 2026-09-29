@@ -90,7 +90,8 @@ CREATE TABLE IF NOT EXISTS entry (
   owner_id INTEGER NOT NULL,
   modified_ns INTEGER NOT NULL,
   shared INTEGER NOT NULL,
-  subtree_entries INTEGER NOT NULL DEFAULT 1
+  subtree_entries INTEGER NOT NULL DEFAULT 1,
+  subtree_max_id INTEGER NOT NULL DEFAULT 0
 );
 
 CREATE INDEX IF NOT EXISTS entry_allocated ON entry(scan_id, allocated_bytes DESC, id DESC);
@@ -242,10 +243,17 @@ impl ScanSink for IndexWriter {
         }
     }
 
+    /// The walk is depth-first, so everything inserted between a directory's
+    /// own row and the moment it is closed is one of its descendants and
+    /// nothing else is. Recording the last row ID at that moment turns "the
+    /// subtree under this directory" into a primary-key range, which a query
+    /// can apply without walking parent links or materialising a descendant
+    /// set.
     fn finish_directory(&mut self, id: i64, totals: &DirectoryTotals) -> io::Result<()> {
         self.connection
             .execute(
-                "UPDATE entry SET allocated_bytes = ?2, apparent_bytes = ?3, subtree_entries = ?4
+                "UPDATE entry SET allocated_bytes = ?2, apparent_bytes = ?3, subtree_entries = ?4,
+                        subtree_max_id = max(?1, last_insert_rowid())
                  WHERE id = ?1",
                 params![
                     id,
@@ -444,6 +452,63 @@ fn encode_warnings(warnings: &[ScanWarning]) -> Vec<serde_json::Value> {
             serde_json::Value::Object(object)
         })
         .collect()
+}
+
+/// The primary-key range covering one path and everything below it.
+///
+/// Returns `None` when the path is not in this scan, which a caller must
+/// report as such: an empty page would read as "there is nothing there".
+pub fn subtree_range(
+    connection: &Connection,
+    scan_id: &str,
+    path: &[u8],
+) -> rusqlite::Result<Option<(i64, i64)>> {
+    let mut best: Option<(i64, Vec<u8>)> = None;
+    {
+        let mut roots = connection
+            .prepare("SELECT id, name FROM entry WHERE scan_id = ?1 AND parent_id IS NULL")?;
+        let mut rows = roots.query(params![scan_id])?;
+        while let Some(row) = rows.next()? {
+            let id: i64 = row.get(0)?;
+            let name: Vec<u8> = row.get(1)?;
+            // The longest matching root wins, so nested roots resolve to the
+            // one that actually holds the path.
+            if crate::walk::is_within(&name, path)
+                && best
+                    .as_ref()
+                    .is_none_or(|(_, chosen)| name.len() > chosen.len())
+            {
+                best = Some((id, name));
+            }
+        }
+    }
+
+    let Some((mut current, root)) = best else {
+        return Ok(None);
+    };
+    for segment in path[root.len()..].split(|byte| *byte == b'/') {
+        if segment.is_empty() {
+            continue;
+        }
+        let found: Option<i64> = connection
+            .query_row(
+                "SELECT id FROM entry WHERE scan_id = ?1 AND parent_id = ?2 AND name = ?3",
+                params![scan_id, current, segment],
+                |row| row.get(0),
+            )
+            .optional()?;
+        let Some(next) = found else {
+            return Ok(None);
+        };
+        current = next;
+    }
+
+    let maximum: i64 = connection.query_row(
+        "SELECT max(?2, subtree_max_id) FROM entry WHERE id = ?1",
+        params![current, current],
+        |row| row.get(0),
+    )?;
+    Ok(Some((current, maximum)))
 }
 
 /// Whether the index still holds this scan. A pruned scan is a refusal, never

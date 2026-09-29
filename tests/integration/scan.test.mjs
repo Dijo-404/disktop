@@ -303,3 +303,63 @@ test("explore refuses a scan the index no longer holds", async () => {
     await fixture.cleanup();
   }
 });
+
+test("explore answers about the path it was given, not the whole scan", async () => {
+  const home = await disktopHome();
+  const fixture = await createLargeFixture({ entries: 4, fanOut: 2, bytesPerFile: 1024 });
+  const { mkdir, writeFile } = await import("node:fs/promises");
+  const inside = join(fixture.root, "inside");
+  await mkdir(inside);
+  await writeFile(join(inside, "small.bin"), "s".repeat(1024));
+  await writeFile(join(fixture.root, "huge-outside.bin"), "h".repeat(4 * 1024 * 1024));
+
+  try {
+    disktop(home, ["scan", fixture.root, "--json"]);
+    const page = envelope(disktop(home, ["explore", inside, "--limit", "100", "--json"]), "explore");
+    const paths = page.data.entries.map((entry) => entry.path.display);
+
+    assert.ok(paths.some((path) => path.endsWith("/inside/small.bin")));
+    // The largest file in the tree lives outside the requested directory. A
+    // listing that included it would answer a question nobody asked.
+    assert.equal(
+      paths.some((path) => path.endsWith("huge-outside.bin")),
+      false,
+      `a sibling outside the subtree was listed: ${JSON.stringify(paths)}`,
+    );
+  } finally {
+    await fixture.cleanup();
+  }
+});
+
+test("a tree full of unreadable directories does not produce an unbounded result", async () => {
+  if (process.getuid?.() === 0) {
+    return;
+  }
+  const home = await disktopHome();
+  const fixture = await createLargeFixture({ entries: 1, fanOut: 1 });
+  const { chmod, mkdir } = await import("node:fs/promises");
+  const locked = [];
+  for (let index = 0; index < 600; index += 1) {
+    const path = join(fixture.root, `locked-${index}`);
+    await mkdir(path);
+    await chmod(path, 0o000);
+    locked.push(path);
+  }
+
+  try {
+    const result = disktop(home, ["scan", fixture.root, "--json"]);
+    const scan = JSON.parse(result.stdout);
+
+    // Every unreadable directory is still counted; only the per-path list is
+    // bounded, and the overflow is reported rather than dropped.
+    assert.equal(scan.data.completeness.inaccessibleDirectories, "600");
+    assert.ok(scan.warnings.length <= 300, `warning list grew to ${scan.warnings.length}`);
+    assert.ok(scan.warnings.some((warning) => warning.code === "warnings-truncated"));
+    assert.ok(result.stdout.length < 256 * 1024, `the envelope grew to ${result.stdout.length} bytes`);
+  } finally {
+    for (const path of locked) {
+      await chmod(path, 0o700).catch(() => undefined);
+    }
+    await fixture.cleanup();
+  }
+});

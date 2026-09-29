@@ -16,6 +16,9 @@
     "apparentBytes": "0",
     "sharedBytes": "0",
     "excludedMounts": [],
-    "warnings": []
+    "warnings": [],
+    "filesystems": [
+      "2049"
+    ]
   }
 }

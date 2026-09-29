@@ -144,6 +144,7 @@ function toCompleteEvent(result: NativeScanResult): ScanEvent {
       apparentBytes: result.apparentBytes,
       sharedBytes: result.sharedBytes,
     },
+    filesystems: result.filesystems,
   };
 }
 
@@ -177,6 +178,7 @@ function refuseError(event: HelperEvent, client: NativeHelperClient): void {
 function encodeFilter(query: EntryQuery): Record<string, unknown> {
   const filter = query.filter;
   return {
+    ...(filter.underPath === undefined ? {} : { underPath: filter.underPath.bytesBase64 }),
     ...(filter.parentId === undefined ? {} : { parentId: filter.parentId }),
     ...(filter.nameContains === undefined ? {} : { nameContains: filter.nameContains }),
     ...(filter.extension === undefined ? {} : { extension: filter.extension }),

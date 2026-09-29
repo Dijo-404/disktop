@@ -4,7 +4,7 @@ import { createExploreService, type ExploreService } from "../application/explor
 import { createScanService, type ScanService } from "../application/scan.js";
 import { createSnapshotService, type SnapshotService } from "../application/snapshots.js";
 import type { RawPath, Warning } from "../domain/models.js";
-import { isWithin, pathBytes, rawPathFromUtf8 } from "../domain/paths.js";
+import { rawPathFromUtf8 } from "../domain/paths.js";
 import { createLinuxInventory } from "../platform/linux/inventory/index.js";
 import { createNativeScanner } from "../platform/linux/scan/index.js";
 import { NativeHelperClient } from "../native/client.js";
@@ -32,7 +32,6 @@ export interface Services {
     readonly excludes: readonly RawPath[];
     readonly retention: RetentionLimits;
   };
-  filesystemsUnder(roots: readonly RawPath[]): Promise<readonly string[]>;
   readonly settings: DashboardSettings;
   readonly startupWarnings: readonly Warning[];
 }
@@ -93,29 +92,6 @@ export async function createServices(options: CompositionOptions = {}): Promise<
       crossFilesystems: config.scan.crossFilesystems,
       excludes,
       retention: { keepLatest: config.snapshots.keepLatest },
-    },
-    async filesystemsUnder(roots) {
-      const view = await inventory.list();
-      const identities = new Set<string>();
-      for (const root of roots) {
-        const target = pathBytes(root);
-        // The filesystem holding a root is the one with the longest mount
-        // point that contains it; a shorter one is an ancestor, not the
-        // filesystem the scan actually walked.
-        let best: { id: string; length: number } | undefined;
-        for (const filesystem of view.filesystems) {
-          for (const mount of filesystem.mounts) {
-            const mountBytes = pathBytes(mount);
-            if (isWithin(mountBytes, target) && (best === undefined || mountBytes.length > best.length)) {
-              best = { id: filesystem.id, length: mountBytes.length };
-            }
-          }
-        }
-        if (best !== undefined) {
-          identities.add(best.id);
-        }
-      }
-      return [...identities].sort();
     },
     settings,
     startupWarnings,

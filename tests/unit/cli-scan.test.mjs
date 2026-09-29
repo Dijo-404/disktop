@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
+import { bootstrapCli } from "../../dist/cli/bootstrap.js";
 import { runCli } from "../../dist/cli/run.js";
 import { compileBundle } from "../support/schemas.mjs";
 import { FIXTURE_ENTRY, FIXTURE_SNAPSHOT, fakeContext } from "../support/cli-context.mjs";
@@ -243,4 +244,46 @@ test("the scan options a person types are the ones the scan runs with", async ()
     throttleBytesPerSecond: 52428800n,
     maxDepth: 6n,
   });
+});
+
+test("explore narrows the listing to the path it was given", async () => {
+  const asked = [];
+  const context = fakeContext();
+  context.storage.explore.page = async (query) => {
+    asked.push(query);
+    return { kind: "page", page: { entries: [] } };
+  };
+
+  await runCli(["explore", "/home/example/projects/api", "--json"], context);
+
+  // Without this the page ranks the whole scan and presents it as an answer
+  // about the directory the user named.
+  assert.equal(asked[0].filter.underPath.display, "/home/example/projects/api");
+});
+
+test("a mangled cursor or limit is refused in the envelope, not as a stack trace", async () => {
+  const cursor = fakeContext();
+  assert.equal(await runCli(["explore", "--cursor", "not a cursor!", "--json"], cursor), 2);
+  assert.equal(JSON.parse(cursor.captured.stdout).error.code, "invalid-input");
+
+  const limit = fakeContext();
+  assert.equal(await runCli(["explore", "--limit", "abc", "--json"], limit), 2);
+  assert.match(JSON.parse(limit.captured.stdout).error.message, /--limit/);
+});
+
+test("an unexpected failure still writes one envelope and exits 2", async () => {
+  const context = fakeContext();
+  context.storage.explore.page = async () => {
+    throw new Error("the helper said something unrepeatable");
+  };
+
+  const status = await bootstrapCli(["explore", "--json"], "26.10.0", context.output, async () => context);
+  const envelope = JSON.parse(context.captured.stdout);
+
+  // Exit 1 would mean "alert threshold reached", so a script could not tell a
+  // crash from a full disk.
+  assert.equal(status, 2);
+  assert.equal(envelope.status, "error");
+  assert.equal(envelope.error.code, "internal-error");
+  assert.match(envelope.error.message, /unrepeatable/);
 });

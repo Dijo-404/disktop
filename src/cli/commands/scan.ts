@@ -84,13 +84,13 @@ export async function runScan(context: CliContext, options: ScanOptions): Promis
   }
 
   const summary = outcome.summary;
+  // The scope the snapshot records comes from the scan itself: what it read,
+  // how deep it went, and which filesystems it touched. Deriving any of that
+  // from the roots would let two scans of different scope compare as if they
+  // had measured the same thing.
   const snapshot = await context.storage.snapshots.record(
     summary,
-    {
-      excludes: context.storage.defaults.excludes,
-      crossFilesystems: options.crossFilesystems || context.storage.defaults.crossFilesystems,
-      filesystems: await context.storage.filesystemsUnder([root]),
-    },
+    { excludes: context.storage.defaults.excludes },
     context.now(),
   );
   const pruned = await context.storage.snapshots.prune(context.storage.defaults.retention);

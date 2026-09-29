@@ -252,12 +252,92 @@ test("recording a scan stores the index's largest directories", async () => {
       roots: SCOPE.roots,
       completeness: { complete: true, scannedEntries: 4n, inaccessibleDirectories: 0n, excludedMounts: [], warnings: [] },
       totals: { allocatedBytes: 1000n, apparentBytes: 900n, sharedBytes: 0n },
+      filesystems: SCOPE.filesystems,
+      crossFilesystems: false,
     },
-    { excludes: SCOPE.excludes, crossFilesystems: false, filesystems: SCOPE.filesystems },
+    { excludes: SCOPE.excludes },
     new Date("2026-09-30T12:00:00.000Z"),
   );
 
   assert.deepEqual(asked[0].filter.kinds, ["directory"]);
   assert.equal(recorded.directories[0].allocatedBytes, 1000n);
   assert.equal((await store.get(recorded.id)).scanId, "scan-abcdef12");
+});
+
+test("an apparent-accounting history reports apparent bytes, not allocated ones", async () => {
+  const store = createSnapshotStore(await sandbox());
+  const service = createSnapshotService(store, { async query() { return { entries: [] }; } });
+  const apparentScope = { ...SCOPE, accounting: "apparent" };
+  // A sparse file: gigabytes of apparent growth, no change in blocks.
+  const sparse = (apparent) => ({
+    path: rawPathFromUtf8("/home/example/vm.qcow2"),
+    allocatedBytes: 1_052_672n,
+    apparentBytes: apparent,
+    entries: 0n,
+  });
+
+  await store.save(
+    snapshot("snap-01", "2026-09-01T00:00:00.000Z", [sparse(10_000_000_000n)], {
+      scope: apparentScope,
+      totals: { allocatedBytes: 1_052_672n, apparentBytes: 10_000_000_000n, sharedBytes: 0n },
+    }),
+  );
+  await store.save(
+    snapshot("snap-02", "2026-09-02T00:00:00.000Z", [sparse(210_000_000_000n)], {
+      scope: apparentScope,
+      totals: { allocatedBytes: 1_052_672n, apparentBytes: 210_000_000_000n, sharedBytes: 0n },
+    }),
+  );
+
+  const outcome = await service.diff("snap-01", "snap-02");
+
+  assert.equal(outcome.kind, "diff");
+  assert.equal(outcome.diff.totalDeltaBytes, 200_000_000_000n);
+  assert.equal(outcome.diff.directories[0].deltaBytes, 200_000_000_000n);
+  assert.equal(outcome.diff.directories[0].laterBytes, 210_000_000_000n);
+});
+
+test("a depth-limited scan is not comparable with a full one", async () => {
+  const store = createSnapshotStore(await sandbox());
+  const service = createSnapshotService(store, { async query() { return { entries: [] }; } });
+
+  await store.save(snapshot("snap-01", "2026-09-01T00:00:00.000Z", [directory("/home/example/a", 16_777_216n)]));
+  await store.save(
+    snapshot("snap-02", "2026-09-02T00:00:00.000Z", [], { scope: { ...SCOPE, maxDepth: "1" } }),
+  );
+
+  const outcome = await service.diff("snap-01", "snap-02");
+
+  // Nothing was deleted; the later scan simply did not look that far. Showing
+  // -16 MiB would be inventing a deletion.
+  assert.equal(outcome.kind, "incomparable");
+  assert.match(outcome.reasons[0], /depth/);
+  assert.deepEqual(incompatibilities({ ...SCOPE, maxDepth: "3" }, { ...SCOPE, maxDepth: "3" }), []);
+});
+
+test("a snapshot records the scope the scan actually used, not the one requested", async () => {
+  const store = createSnapshotStore(await sandbox());
+  const service = createSnapshotService(store, { async query() { return { entries: [] }; } });
+
+  const recorded = await service.record(
+    {
+      scanId: "scan-abcdef12",
+      accounting: "apparent",
+      roots: SCOPE.roots,
+      completeness: { complete: true, scannedEntries: 4n, inaccessibleDirectories: 0n, excludedMounts: [], warnings: [] },
+      totals: { allocatedBytes: 1000n, apparentBytes: 900n, sharedBytes: 0n },
+      // The walk crossed into a second filesystem the roots never named.
+      filesystems: ["2049", "66311"],
+      crossFilesystems: true,
+      maxDepth: 6n,
+    },
+    { excludes: SCOPE.excludes },
+    new Date("2026-09-30T12:00:00.000Z"),
+  );
+
+  assert.deepEqual(recorded.scope.filesystems, ["2049", "66311"]);
+  assert.equal(recorded.scope.crossFilesystems, true);
+  assert.equal(recorded.scope.maxDepth, "6");
+  assert.equal(recorded.scope.accounting, "apparent");
+  assert.equal((await store.get(recorded.id)).scope.maxDepth, "6");
 });

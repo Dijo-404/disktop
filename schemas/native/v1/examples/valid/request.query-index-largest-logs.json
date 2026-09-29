@@ -10,7 +10,8 @@
       "minAllocatedBytes": "1073741824",
       "kinds": [
         "file"
-      ]
+      ],
+      "underPath": "L2hvbWUvZXhhbXBsZS8uY2FjaGU="
     },
     "sort": "allocated",
     "order": "descending",

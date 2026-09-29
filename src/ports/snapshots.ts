@@ -17,6 +17,11 @@ export interface SnapshotScope {
   readonly excludes: readonly RawPath[];
   readonly accounting: Accounting;
   readonly crossFilesystems: boolean;
+  /**
+   * A depth limit changes what was measured as surely as an exclude does, so
+   * it is part of the scope rather than a detail of how the scan was run.
+   */
+  readonly maxDepth?: string;
   /** The filesystem identities the scan actually touched. */
   readonly filesystems: readonly string[];
 }

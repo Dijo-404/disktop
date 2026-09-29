@@ -84,6 +84,7 @@ const WARNING_CODES = new Set([
   "symlink-not-followed",
   "depth-limit-reached",
   "cancelled",
+  "warnings-truncated",
 ]);
 
 const ENTRY_KINDS = new Set(["file", "directory", "symlink", "other"]);
@@ -106,6 +107,7 @@ export interface NativeScanResult {
   readonly sharedBytes: bigint;
   readonly excludedMounts: readonly string[];
   readonly warnings: readonly NativeWarning[];
+  readonly filesystems: readonly string[];
 }
 
 export interface NativeProgress {
@@ -181,6 +183,7 @@ export function parseScanResult(result: unknown): NativeScanResult {
     sharedBytes: decimal(result.sharedBytes, "sharedBytes"),
     excludedMounts: parsePathList(result.excludedMounts, "excludedMounts"),
     warnings,
+    filesystems: parseDecimalList(result.filesystems, "filesystems"),
   };
 }
 
@@ -268,6 +271,17 @@ function parseWarnings(value: unknown): readonly NativeWarning[] {
       ...(typeof entry.path === "string" ? { path: entry.path } : {}),
     };
   });
+}
+
+/**
+ * A list of decimal strings, kept as strings: these are identities to compare,
+ * never numbers to do arithmetic on.
+ */
+function parseDecimalList(value: unknown, field: string): readonly string[] {
+  if (!Array.isArray(value) || value.some((entry: unknown) => typeof entry !== "string" || !/^(0|[1-9][0-9]*)$/.test(entry))) {
+    throw new Error(`The helper returned '${field}' without decimal identities`);
+  }
+  return value as readonly string[];
 }
 
 function parsePathList(value: unknown, field: string): readonly string[] {

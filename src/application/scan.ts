@@ -22,6 +22,10 @@ export interface ScanSummary {
   readonly roots: readonly RawPath[];
   readonly completeness: ScanCompleteness;
   readonly totals: ScanTotals;
+  /** What the walk actually read, not what the roots suggested it would. */
+  readonly filesystems: readonly string[];
+  readonly crossFilesystems: boolean;
+  readonly maxDepth?: bigint;
 }
 
 export type ScanOutcome =
@@ -67,9 +71,10 @@ export function createScanService(scanner: ScanPort, settings: ScanSettings): Sc
       }
 
       const throttle = overrides.throttleBytesPerSecond ?? settings.throttleBytesPerSecond;
+      const crossFilesystems = overrides.crossFilesystems ?? settings.crossFilesystems;
       const request: ScanRequest = {
         roots,
-        crossFilesystems: overrides.crossFilesystems ?? settings.crossFilesystems,
+        crossFilesystems,
         excludes: settings.excludes,
         accounting: overrides.accounting ?? settings.accounting,
         ...(throttle === undefined ? {} : { throttleBytesPerSecond: throttle }),
@@ -95,6 +100,9 @@ export function createScanService(scanner: ScanPort, settings: ScanSettings): Sc
               roots: event.roots,
               completeness: event.completeness,
               totals: event.totals,
+              filesystems: event.filesystems,
+              crossFilesystems,
+              ...(request.maxDepth === undefined ? {} : { maxDepth: request.maxDepth }),
             };
           }
         }
