@@ -1,0 +1,142 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/Dijo-404/disktop/schemas/native/v1/common.json",
+  "title": "disktop-fs protocol v1 shared definitions",
+  "$defs": {
+    "protocolVersion": { "const": 1 },
+    "requestId": {
+      "description": "Client-chosen correlation ID. The restricted alphabet keeps it safe to echo into logs.",
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 128,
+      "pattern": "^[A-Za-z0-9._-]+$"
+    },
+    "eventId": {
+      "description": "Monotonic per request, base-10, starting at 1.",
+      "type": "string",
+      "pattern": "^[1-9][0-9]*$"
+    },
+    "decimalInteger": {
+      "type": "string",
+      "pattern": "^(0|[1-9][0-9]*)$"
+    },
+    "pathBytes": {
+      "description": "Raw path bytes as base64. The helper never resolves a target from a display string.",
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 8192,
+      "pattern": "^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$"
+    },
+    "planId": {
+      "description": "Identifies the reviewed, stored plan this mutation was authorized by.",
+      "type": "string",
+      "minLength": 8,
+      "maxLength": 128,
+      "pattern": "^[A-Za-z0-9._-]+$"
+    },
+    "entryFingerprint": {
+      "description": "What the reviewed plan observed. The helper refuses an item whose live identity differs.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["device", "inode", "mountId", "kind", "apparentBytes", "modifiedNanoseconds"],
+      "properties": {
+        "device": { "$ref": "#/$defs/decimalInteger" },
+        "inode": { "$ref": "#/$defs/decimalInteger" },
+        "mountId": { "$ref": "#/$defs/decimalInteger" },
+        "kind": {
+          "type": "string",
+          "enum": ["file", "directory", "symlink"]
+        },
+        "apparentBytes": { "$ref": "#/$defs/decimalInteger" },
+        "modifiedNanoseconds": { "$ref": "#/$defs/decimalInteger" }
+      }
+    },
+    "mutationTarget": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["path", "expected"],
+      "properties": {
+        "path": { "$ref": "#/$defs/pathBytes" },
+        "expected": { "$ref": "#/$defs/entryFingerprint" }
+      }
+    },
+    "mutationArguments": {
+      "description": "Common shape of every request that changes a user file.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["planId", "targets"],
+      "properties": {
+        "planId": { "$ref": "#/$defs/planId" },
+        "targets": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 100000,
+          "items": { "$ref": "#/$defs/mutationTarget" }
+        }
+      }
+    },
+    "capabilityProbe": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["available", "reason"],
+      "properties": {
+        "available": { "type": "boolean" },
+        "reason": { "type": ["string", "null"] }
+      }
+    },
+    "helloResult": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "helperVersion",
+        "buildChecksum",
+        "platform",
+        "architecture",
+        "kernelCapabilities",
+        "supportedOperations"
+      ],
+      "properties": {
+        "helperVersion": { "type": "string", "minLength": 1 },
+        "buildChecksum": {
+          "description": "Null for a development build. A release binary must carry a real checksum.",
+          "type": ["string", "null"],
+          "pattern": "^[0-9a-f]{64}$"
+        },
+        "platform": { "type": "string" },
+        "architecture": { "type": "string" },
+        "kernelCapabilities": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["openat2"],
+          "properties": { "openat2": { "$ref": "#/$defs/capabilityProbe" } }
+        },
+        "supportedOperations": {
+          "type": "array",
+          "items": { "type": "string" }
+        }
+      }
+    },
+    "errorCode": {
+      "type": "string",
+      "enum": [
+        "invalid-request",
+        "invalid-request-id",
+        "invalid-arguments",
+        "request-too-large",
+        "unsupported-protocol-version",
+        "unsupported-operation",
+        "unknown-operation",
+        "unknown-request",
+        "protected-path",
+        "changed-target",
+        "permission-denied",
+        "unsupported-kernel",
+        "unsupported-filesystem",
+        "no-safe-trash",
+        "journal-write-failed",
+        "cancelled",
+        "internal-error"
+      ]
+    }
+  }
+}

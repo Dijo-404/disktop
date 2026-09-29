@@ -1,0 +1,12 @@
+{
+  "protocolVersion": 1,
+  "requestId": "scan-01",
+  "eventId": "42",
+  "event": "progress",
+  "progress": {
+    "scannedEntries": "431204",
+    "processedBytes": "18446744073709551615",
+    "inaccessibleDirectories": "3",
+    "currentPath": "L2hvbWUvZXhhbXBsZS8uY2FjaGUvcGlw"
+  }
+}

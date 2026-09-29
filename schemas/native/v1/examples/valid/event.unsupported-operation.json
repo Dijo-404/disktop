@@ -1,0 +1,10 @@
+{
+  "protocolVersion": 1,
+  "requestId": "trash-01",
+  "eventId": "1",
+  "event": "error",
+  "error": {
+    "code": "unsupported-operation",
+    "message": "This operation is not implemented in this helper build"
+  }
+}
