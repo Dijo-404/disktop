@@ -1,0 +1,11 @@
+{
+  "protocolVersion": 1,
+  "requestId": "scan-02",
+  "operation": "scan",
+  "arguments": {
+    "roots": ["/home/example/Projects"],
+    "crossFilesystems": false,
+    "excludes": [],
+    "accounting": "allocated"
+  }
+}

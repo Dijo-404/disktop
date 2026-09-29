@@ -1,0 +1,14 @@
+{
+  "protocolVersion": 1,
+  "requestId": "hello-1",
+  "eventId": "1",
+  "event": "complete",
+  "result": {
+    "helperVersion": "0.0.0",
+    "buildChecksum": null,
+    "platform": "linux",
+    "architecture": "x86_64",
+    "kernelCapabilities": { "openat2": { "available": true, "reason": null } },
+    "supportedOperations": ["hello", "probe"]
+  }
+}

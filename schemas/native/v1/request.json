@@ -1,0 +1,110 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/Dijo-404/disktop/schemas/native/v1/request.json",
+  "title": "disktop-fs request",
+  "description": "One JSON object per line on the helper's stdin. Node spawns the helper directly and never builds a shell string.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["protocolVersion", "requestId", "operation", "arguments"],
+  "properties": {
+    "protocolVersion": { "$ref": "common.json#/$defs/protocolVersion" },
+    "requestId": { "$ref": "common.json#/$defs/requestId" },
+    "operation": {
+      "type": "string",
+      "enum": [
+        "hello",
+        "probe",
+        "cancel",
+        "scan",
+        "query-index",
+        "hash-candidates",
+        "inspect",
+        "trash",
+        "restore",
+        "erase",
+        "copy-move",
+        "compress",
+        "dedup-hardlink",
+        "empty-trash",
+        "manager-begin",
+        "manager-append",
+        "manager-finish",
+        "journal-reconcile"
+      ]
+    },
+    "arguments": { "type": "object" }
+  },
+  "allOf": [
+    {
+      "if": { "type": "object", "properties": { "operation": { "enum": ["hello", "probe", "journal-reconcile"] } }, "required": ["operation"] },
+      "then": { "properties": { "arguments": { "$ref": "#/$defs/noArguments" } } }
+    },
+    {
+      "if": { "type": "object", "properties": { "operation": { "const": "cancel" } }, "required": ["operation"] },
+      "then": { "properties": { "arguments": { "$ref": "#/$defs/cancelArguments" } } }
+    },
+    {
+      "if": { "type": "object", "properties": { "operation": { "const": "scan" } }, "required": ["operation"] },
+      "then": { "properties": { "arguments": { "$ref": "#/$defs/scanArguments" } } }
+    },
+    {
+      "if": { "type": "object", "properties": { "operation": { "enum": ["trash", "erase"] } }, "required": ["operation"] },
+      "then": { "properties": { "arguments": { "$ref": "common.json#/$defs/mutationArguments" } } }
+    },
+    {
+      "if": { "type": "object", "properties": { "operation": { "const": "empty-trash" } }, "required": ["operation"] },
+      "then": { "properties": { "arguments": { "$ref": "#/$defs/emptyTrashArguments" } } }
+    }
+  ],
+  "$defs": {
+    "noArguments": {
+      "type": "object",
+      "additionalProperties": false
+    },
+    "cancelArguments": {
+      "description": "Stops another in-flight request at a safe item boundary; the cancelled request still emits a final event.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["cancelRequestId"],
+      "properties": { "cancelRequestId": { "$ref": "common.json#/$defs/requestId" } }
+    },
+    "scanArguments": {
+      "description": "Symlinks are never followed, so there is no option to enable it.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["roots", "crossFilesystems", "excludes", "accounting"],
+      "properties": {
+        "roots": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 64,
+          "items": { "$ref": "common.json#/$defs/pathBytes" }
+        },
+        "crossFilesystems": { "type": "boolean" },
+        "excludes": {
+          "type": "array",
+          "items": { "$ref": "common.json#/$defs/pathBytes" }
+        },
+        "accounting": {
+          "type": "string",
+          "enum": ["allocated", "apparent"]
+        },
+        "throttleBytesPerSecond": { "$ref": "common.json#/$defs/decimalInteger" },
+        "maxDepth": { "$ref": "common.json#/$defs/decimalInteger" }
+      }
+    },
+    "emptyTrashArguments": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["planId", "trashDirectories"],
+      "properties": {
+        "planId": { "$ref": "common.json#/$defs/planId" },
+        "trashDirectories": {
+          "type": "array",
+          "minItems": 1,
+          "items": { "$ref": "common.json#/$defs/pathBytes" }
+        }
+      }
+    }
+  }
+}
