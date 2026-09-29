@@ -19,7 +19,16 @@ Rules the schemas enforce rather than merely document:
   `status: "incomplete"` requires at least one warning.
 - A missing tool or denied permission is a `capability`, never a zero.
 
+`dashboard.json`, `devices.json`, and `alerts.json` cover the implemented commands;
+`error.json` covers a command that cannot produce its payload, including one that is
+declared but not yet built. Exit `1` belongs to `alerts check` alone: the dashboard
+reports the same alerts and still exits `0`.
+
 `examples/valid/` and `examples/invalid/` are checked by `tests/contract/cli-schema.test.mjs`.
 Each file is named `<schema>.<case>.json`, and the invalid cases exist to prove a rule
-still bites. Commands gain their schema in the phase that implements them; a schema
-change that is not backward compatible needs a new version directory, not an edit here.
+still bites. `tests/integration/cli-output.test.mjs` validates what the CLI actually
+writes on a running host against these same schemas, so an example cannot drift away from
+the output it claims to describe.
+
+Commands gain their schema in the phase that implements them; a schema change that is not
+backward compatible needs a new version directory, not an edit here.
