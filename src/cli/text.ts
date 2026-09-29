@@ -1,4 +1,8 @@
-import type { Alert, Filesystem, StorageDevice, Warning } from "../domain/models.js";
+import type { Alert, Filesystem, IndexedEntry, StorageDevice, Warning } from "../domain/models.js";
+import type { ScanSummary } from "../application/scan.js";
+import type { SnapshotDiff } from "../application/snapshots.js";
+import type { TypeTotal } from "../ports/scan.js";
+import type { SnapshotSummary } from "../ports/snapshots.js";
 import { formatBytes, usedPercentOfInodes, usedPercentOfSpace } from "../domain/sizes.js";
 
 export type Units = "iec" | "si";
@@ -61,4 +65,112 @@ export function alertLines(alerts: readonly Alert[]): string[] {
 /** Warnings go to stderr so a redirected stdout still holds only the answer. */
 export function warningLines(warnings: readonly Warning[]): string[] {
   return warnings.map((warning) => `warning: ${warning.code}: ${warning.message}`);
+}
+
+/** What one finished or partial scan measured, at 80 columns. */
+export function scanLines(summary: ScanSummary, snapshotId: string, units: Units): string[] {
+  const totals = summary.totals;
+  const lines = [
+    `Scanned ${summary.roots.map((root) => root.display).join(", ")}`,
+    `  entries          ${summary.completeness.scannedEntries}`,
+    `  allocated        ${formatBytes(totals.allocatedBytes, units)}`,
+    `  apparent         ${formatBytes(totals.apparentBytes, units)}`,
+  ];
+  if (totals.sharedBytes > 0n) {
+    lines.push(`  shared hardlinks ${formatBytes(totals.sharedBytes, units)} (counted once, under the first path seen)`);
+  }
+  if (summary.completeness.inaccessibleDirectories > 0n) {
+    lines.push(`  unreadable dirs  ${summary.completeness.inaccessibleDirectories}`);
+  }
+  lines.push(
+    `  accounting       ${summary.accounting}`,
+    summary.completeness.complete ? "  result           complete" : "  result           incomplete, see the warnings below",
+    `  snapshot         ${snapshotId}`,
+  );
+  return lines;
+}
+
+/** Largest first by default; the ranking column is named in the header. */
+export function entryLines(entries: readonly IndexedEntry[], units: Units, accounting: "allocated" | "apparent"): string[] {
+  if (entries.length === 0) {
+    return ["No entries matched."];
+  }
+  const rows = entries.map((entry) => ({
+    size: formatBytes(accounting === "apparent" ? entry.apparentBytes : entry.allocatedBytes, units),
+    kind: entry.kind === "directory" ? "dir" : entry.kind === "symlink" ? "link" : entry.kind === "file" ? "file" : "other",
+    note: entry.shared ? " (shared hardlink)" : "",
+    path: entry.path.display,
+  }));
+  const sizeWidth = Math.max(9, ...rows.map((row) => row.size.length));
+
+  return [
+    `${`Size (${accounting})`.padStart(sizeWidth)}  Kind  Path`,
+    ...rows.map((row) => `${row.size.padStart(sizeWidth)}  ${row.kind.padEnd(4)}  ${row.path}${row.note}`),
+  ];
+}
+
+export function typeTotalLines(totals: readonly TypeTotal[], units: Units): string[] {
+  if (totals.length === 0) {
+    return ["No file types to total."];
+  }
+  const rows = totals.map((total) => ({
+    extension: total.extension === "" ? "(none)" : `.${total.extension}`,
+    files: total.entries.toString(),
+    size: formatBytes(total.allocatedBytes, units),
+  }));
+  const extensionWidth = Math.max(9, ...rows.map((row) => row.extension.length));
+
+  return [
+    `${"Extension".padEnd(extensionWidth)}  ${"Files".padStart(9)}  ${"Allocated".padStart(10)}`,
+    ...rows.map((row) => `${row.extension.padEnd(extensionWidth)}  ${row.files.padStart(9)}  ${row.size.padStart(10)}`),
+  ];
+}
+
+export function snapshotLines(snapshots: readonly SnapshotSummary[], units: Units): string[] {
+  if (snapshots.length === 0) {
+    return ["No snapshots are stored yet. Run 'disktop scan PATH' to record one."];
+  }
+  const rows = snapshots.map((snapshot) => ({
+    id: snapshot.id,
+    when: snapshot.scannedAt,
+    size: formatBytes(snapshot.totals.allocatedBytes, units),
+    scope: `${snapshot.scope.accounting}, ${snapshot.scope.roots.map((root) => root.display).join(", ")}`,
+    note: snapshot.completeness.complete ? "" : "  (incomplete)",
+  }));
+  const idWidth = Math.max(2, ...rows.map((row) => row.id.length));
+
+  return [
+    `${"ID".padEnd(idWidth)}  ${"Scanned at".padEnd(24)}  ${"Allocated".padStart(10)}  Scope`,
+    ...rows.map((row) => `${row.id.padEnd(idWidth)}  ${row.when.padEnd(24)}  ${row.size.padStart(10)}  ${row.scope}${row.note}`),
+  ];
+}
+
+/** Growth between two snapshots, largest movement first, signed. */
+export function diffLines(diff: SnapshotDiff, units: Units): string[] {
+  const sign = (value: bigint): string => (value > 0n ? "+" : value < 0n ? "-" : " ");
+  const magnitude = (value: bigint): bigint => (value < 0n ? -value : value);
+
+  const lines = [
+    `${diff.earlier.id} -> ${diff.later.id}`,
+    `Total ${sign(diff.totalDeltaBytes)}${formatBytes(magnitude(diff.totalDeltaBytes), units)}`,
+    "",
+  ];
+  if (diff.directories.length === 0) {
+    lines.push("No directory in either snapshot changed.");
+    return lines;
+  }
+
+  const rows = diff.directories.map((change) => ({
+    delta: `${sign(change.deltaBytes)}${formatBytes(magnitude(change.deltaBytes), units)}`,
+    kind: change.kind,
+    path: change.path.display,
+  }));
+  const deltaWidth = Math.max(6, ...rows.map((row) => row.delta.length));
+  const kindWidth = Math.max(7, ...rows.map((row) => row.kind.length));
+
+  lines.push(`${"Change".padStart(deltaWidth)}  ${"State".padEnd(kindWidth)}  Path`);
+  for (const row of rows) {
+    lines.push(`${row.delta.padStart(deltaWidth)}  ${row.kind.padEnd(kindWidth)}  ${row.path}`);
+  }
+  return lines;
 }

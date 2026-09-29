@@ -1,0 +1,183 @@
+import { boundedLimit, olderThanNanoseconds, parseSize } from "../../application/explore.js";
+import type { EntryFilter, EntrySort, SortOrder } from "../../ports/scan.js";
+import type { SnapshotSummary } from "../../ports/snapshots.js";
+import { isWithin, pathBytes } from "../../domain/paths.js";
+import { rawPathFromUtf8 } from "../../domain/paths.js";
+import type { CliContext } from "../context.js";
+import {
+  EXIT,
+  buildEnvelope,
+  encodeCapability,
+  encodeCompleteness,
+  encodeIndexedEntry,
+  encodeTypeTotal,
+  writeEnvelope,
+} from "../output.js";
+import { entryLines, typeTotalLines, warningLines } from "../text.js";
+
+export interface ExploreOptions {
+  readonly asJson: boolean;
+  readonly path?: string;
+  readonly sort?: EntrySort;
+  readonly order?: SortOrder;
+  readonly kind?: "file" | "directory" | "symlink" | "other";
+  readonly minSize?: string;
+  readonly maxSize?: string;
+  readonly extension?: string;
+  readonly name?: string;
+  readonly olderThanDays?: string;
+  readonly limit?: string;
+  readonly cursor?: string;
+  readonly typeTotals: boolean;
+}
+
+const AVAILABLE = { status: "available", explanation: "The index answered from a stored scan." } as const;
+
+/**
+ * One page of the most recent scan that covered the requested path.
+ *
+ * Explore never scans. If no stored scan covers the path, it says so and names
+ * the command that would produce one, rather than quietly reporting an empty
+ * directory.
+ */
+export async function runExplore(context: CliContext, options: ExploreOptions): Promise<number> {
+  const wanted = rawPathFromUtf8(context.resolvePath(options.path ?? "."));
+  const snapshot = await newestCovering(context, wanted);
+  if (snapshot === undefined) {
+    return refuse(
+      context,
+      options.asJson,
+      "invalid-input",
+      `No stored scan covers ${wanted.display}. Run 'disktop scan ${wanted.display}' first.`,
+    );
+  }
+
+  const filter = buildFilter(options, context.now());
+  if (filter === "invalid-size") {
+    return refuse(context, options.asJson, "invalid-input", "'--min-size' and '--max-size' accept a size such as 1GiB or 4096.");
+  }
+  if (filter === "invalid-age") {
+    return refuse(context, options.asJson, "invalid-input", "'--older-than' accepts a whole number of days.");
+  }
+
+  const outcome = await context.storage.explore.page({
+    scanId: snapshot.scanId,
+    filter,
+    sort: options.sort ?? "allocated",
+    order: options.order ?? "descending",
+    limit: boundedLimit(options.limit === undefined ? undefined : Number(options.limit)),
+    ...(options.cursor === undefined ? {} : { cursor: options.cursor }),
+    includeTypeTotals: options.typeTotals,
+  });
+
+  if (outcome.kind === "unavailable") {
+    return refuse(
+      context,
+      options.asJson,
+      "unsupported",
+      `Disktop cannot read the index on this machine: ${outcome.capability.explanation}`,
+    );
+  }
+
+  // A page of a partial scan is not a picture of the whole tree, and says so.
+  const complete = snapshot.completeness.complete;
+  const status = complete ? "complete" : "incomplete";
+  const exitCode = complete ? EXIT.complete : EXIT.incomplete;
+  const warnings = complete ? [] : snapshot.completeness.warnings;
+
+  if (options.asJson) {
+    writeEnvelope(
+      context.output.stdout,
+      buildEnvelope({
+        command: "explore",
+        generatedAt: context.now(),
+        status,
+        exitCode,
+        warnings,
+        data: {
+          capability: encodeCapability(AVAILABLE),
+          scanId: snapshot.scanId,
+          snapshotId: snapshot.id,
+          sort: options.sort ?? "allocated",
+          order: options.order ?? "descending",
+          entries: outcome.page.entries.map(encodeIndexedEntry),
+          ...(outcome.page.nextCursor === undefined ? {} : { nextCursor: outcome.page.nextCursor }),
+          ...(outcome.page.typeTotals === undefined ? {} : { typeTotals: outcome.page.typeTotals.map(encodeTypeTotal) }),
+          completeness: encodeCompleteness(snapshot.completeness),
+        },
+      }),
+    );
+    return exitCode;
+  }
+
+  const accounting = options.sort === "apparent" ? "apparent" : snapshot.scope.accounting;
+  for (const line of entryLines(outcome.page.entries, context.settings.units, accounting)) {
+    context.output.stdout(`${line}\n`);
+  }
+  if (outcome.page.typeTotals !== undefined) {
+    context.output.stdout("\n");
+    for (const line of typeTotalLines(outcome.page.typeTotals, context.settings.units)) {
+      context.output.stdout(`${line}\n`);
+    }
+  }
+  if (outcome.page.nextCursor !== undefined) {
+    context.output.stderr(`More entries remain. Continue with --cursor ${outcome.page.nextCursor}\n`);
+  }
+  for (const line of warningLines(warnings)) {
+    context.output.stderr(`${line}\n`);
+  }
+  return exitCode;
+}
+
+/** The newest snapshot one of whose roots is the path or an ancestor of it. */
+async function newestCovering(context: CliContext, wanted: { bytesBase64: string }): Promise<SnapshotSummary | undefined> {
+  const target = pathBytes(wanted as never);
+  const snapshots = await context.storage.snapshots.list();
+  return snapshots.find((snapshot) => snapshot.scope.roots.some((root) => isWithin(pathBytes(root), target)));
+}
+
+function buildFilter(options: ExploreOptions, now: Date): EntryFilter | "invalid-size" | "invalid-age" {
+  const minimum = options.minSize === undefined ? undefined : parseSize(options.minSize);
+  if (options.minSize !== undefined && minimum === undefined) {
+    return "invalid-size";
+  }
+  const maximum = options.maxSize === undefined ? undefined : parseSize(options.maxSize);
+  if (options.maxSize !== undefined && maximum === undefined) {
+    return "invalid-size";
+  }
+  let olderThan: bigint | undefined;
+  if (options.olderThanDays !== undefined) {
+    if (!/^(0|[1-9][0-9]*)$/.test(options.olderThanDays)) {
+      return "invalid-age";
+    }
+    olderThan = olderThanNanoseconds(now, Number(options.olderThanDays));
+  }
+
+  return {
+    ...(minimum === undefined ? {} : { minAllocatedBytes: minimum }),
+    ...(maximum === undefined ? {} : { maxAllocatedBytes: maximum }),
+    ...(options.extension === undefined ? {} : { extension: options.extension.replace(/^\./, "") }),
+    ...(options.name === undefined ? {} : { nameContains: options.name }),
+    ...(olderThan === undefined ? {} : { modifiedBeforeNanoseconds: olderThan }),
+    ...(options.kind === undefined ? {} : { kinds: [options.kind] }),
+  };
+}
+
+function refuse(context: CliContext, asJson: boolean, code: "invalid-input" | "unsupported", message: string): number {
+  if (asJson) {
+    writeEnvelope(
+      context.output.stdout,
+      buildEnvelope({
+        command: "explore",
+        generatedAt: context.now(),
+        status: "error",
+        exitCode: EXIT.operationalError,
+        warnings: [],
+        failure: { code, message },
+      }),
+    );
+  } else {
+    context.output.stderr(`${message}\n`);
+  }
+  return EXIT.operationalError;
+}

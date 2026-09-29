@@ -1,4 +1,7 @@
-import type { Alert, Capability, Filesystem, RawPath, StorageDevice, Warning } from "../domain/models.js";
+import type { Alert, Capability, Filesystem, IndexedEntry, RawPath, ScanCompleteness, StorageDevice, Warning } from "../domain/models.js";
+import type { ScanTotals, TypeTotal } from "../ports/scan.js";
+import type { SnapshotSummary } from "../ports/snapshots.js";
+import type { DirectoryChange } from "../application/snapshots.js";
 import { decimalBytes } from "../domain/sizes.js";
 import type { OperationFailure } from "../domain/errors.js";
 
@@ -131,4 +134,81 @@ export function encodeAlert(alert: Alert): Record<string, unknown> {
 /** Structured output is one line on stdout; progress and diagnostics are stderr's job. */
 export function writeEnvelope(write: (message: string) => void, envelope: Envelope): void {
   write(`${JSON.stringify(envelope, null, 2)}\n`);
+}
+
+export function encodeCompleteness(completeness: ScanCompleteness): Record<string, unknown> {
+  return {
+    complete: completeness.complete,
+    scannedEntries: decimalBytes(completeness.scannedEntries),
+    inaccessibleDirectories: decimalBytes(completeness.inaccessibleDirectories),
+    excludedMounts: completeness.excludedMounts.map(encodeRawPath),
+  };
+}
+
+export function encodeScanTotals(totals: ScanTotals): Record<string, unknown> {
+  return {
+    allocatedBytes: decimalBytes(totals.allocatedBytes),
+    apparentBytes: decimalBytes(totals.apparentBytes),
+    sharedBytes: decimalBytes(totals.sharedBytes),
+  };
+}
+
+export function encodeIndexedEntry(entry: IndexedEntry): Record<string, unknown> {
+  return {
+    id: entry.id,
+    ...(entry.parentId === undefined ? {} : { parentId: entry.parentId }),
+    path: encodeRawPath(entry.path),
+    kind: entry.kind,
+    device: decimalBytes(entry.device),
+    inode: decimalBytes(entry.inode),
+    mountId: entry.mountId,
+    linkCount: decimalBytes(entry.linkCount),
+    apparentBytes: decimalBytes(entry.apparentBytes),
+    allocatedBytes: decimalBytes(entry.allocatedBytes),
+    ownerId: decimalBytes(entry.ownerId),
+    modifiedNanoseconds: decimalBytes(entry.modifiedNanoseconds),
+    shared: entry.shared,
+  };
+}
+
+export function encodeTypeTotal(total: TypeTotal): Record<string, unknown> {
+  return {
+    extension: total.extension,
+    entries: decimalBytes(total.entries),
+    allocatedBytes: decimalBytes(total.allocatedBytes),
+    apparentBytes: decimalBytes(total.apparentBytes),
+  };
+}
+
+export function encodeSnapshot(snapshot: SnapshotSummary): Record<string, unknown> {
+  return {
+    id: snapshot.id,
+    scanId: snapshot.scanId,
+    scannedAt: snapshot.scannedAt,
+    scope: {
+      roots: snapshot.scope.roots.map(encodeRawPath),
+      excludes: snapshot.scope.excludes.map(encodeRawPath),
+      accounting: snapshot.scope.accounting,
+      crossFilesystems: snapshot.scope.crossFilesystems,
+      filesystems: [...snapshot.scope.filesystems],
+    },
+    totals: encodeScanTotals(snapshot.totals),
+    completeness: encodeCompleteness(snapshot.completeness),
+    directories: snapshot.directories.map((entry) => ({
+      path: encodeRawPath(entry.path),
+      allocatedBytes: decimalBytes(entry.allocatedBytes),
+      apparentBytes: decimalBytes(entry.apparentBytes),
+    })),
+  };
+}
+
+/** A signed delta: the caller never has to infer direction from two totals. */
+export function encodeDirectoryChange(change: DirectoryChange): Record<string, unknown> {
+  return {
+    path: encodeRawPath(change.path),
+    kind: change.kind,
+    earlierBytes: decimalBytes(change.earlierBytes),
+    laterBytes: decimalBytes(change.laterBytes),
+    deltaBytes: change.deltaBytes.toString(10),
+  };
 }

@@ -42,7 +42,7 @@ test("a scan hands progress to the caller as it arrives and returns the summary"
     SETTINGS,
   );
 
-  const outcome = await service.run([ROOT], new AbortController().signal, (progress) => seen.push(progress.scannedEntries));
+  const outcome = await service.run([ROOT], {}, new AbortController().signal, (progress) => seen.push(progress.scannedEntries));
 
   assert.equal(outcome.kind, "scanned");
   assert.equal(outcome.summary.scanId, "scan-1");
@@ -66,7 +66,7 @@ test("a partial scan still returns a summary that says it is partial", async () 
     SETTINGS,
   );
 
-  const outcome = await service.run([ROOT], new AbortController().signal);
+  const outcome = await service.run([ROOT], {}, new AbortController().signal);
 
   assert.equal(outcome.kind, "scanned");
   assert.equal(outcome.summary.completeness.complete, false);
@@ -75,7 +75,7 @@ test("a partial scan still returns a summary that says it is partial", async () 
 
 test("a stream that ends without a completion is a fault, not an empty scan", async () => {
   const service = createScanService(scannerEmitting([{ kind: "progress", scannedEntries: 1n, processedBytes: 0n, inaccessibleDirectories: 0n }]), SETTINGS);
-  await assert.rejects(() => service.run([ROOT], new AbortController().signal), /without a result/);
+  await assert.rejects(() => service.run([ROOT], {}, new AbortController().signal), /without a result/);
 });
 
 test("a missing capability is reported as one rather than raised at the surface", async () => {
@@ -90,7 +90,7 @@ test("a missing capability is reported as one rather than raised at the surface"
     SETTINGS,
   );
 
-  const outcome = await service.run([ROOT], new AbortController().signal);
+  const outcome = await service.run([ROOT], {}, new AbortController().signal);
 
   assert.equal(outcome.kind, "unavailable");
   assert.deepEqual(outcome.capability, capability);
@@ -98,7 +98,7 @@ test("a missing capability is reported as one rather than raised at the surface"
 
 test("a scan needs a root", async () => {
   const service = createScanService(scannerEmitting([]), SETTINGS);
-  await assert.rejects(() => service.run([], new AbortController().signal), RangeError);
+  await assert.rejects(() => service.run([], {}, new AbortController().signal), RangeError);
 });
 
 test("cancellation and denied directories are the warnings shown first", () => {

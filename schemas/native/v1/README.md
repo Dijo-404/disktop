@@ -35,8 +35,8 @@ whose contract is fixed (`hello`, `probe`, `cancel`, `scan`, `query-index`, `tra
 open `arguments` object until the phase that implements them narrows it here, in the same
 change as the code and `docs/native-protocol.md`.
 
-The current helper implements `hello` and `probe`. Every other operation in the enum is
-recognized and refused with `unsupported-operation`; anything outside it is
+The current helper implements `hello`, `probe`, `scan`, `query-index`, and `cancel`. Every
+other operation in the enum is recognized and refused with `unsupported-operation`; anything outside it is
 `unknown-operation`. `tests/contract/native-schema.test.mjs` validates the examples and
 `tests/integration/native.test.mjs` validates the real helper's output against
 `event.json`.

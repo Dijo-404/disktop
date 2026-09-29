@@ -4,6 +4,9 @@ import { EXIT, buildEnvelope, writeEnvelope } from "./output.js";
 import { runAlertsCheck, parseThreshold } from "./commands/alerts.js";
 import { runDashboard } from "./commands/dashboard.js";
 import { runDevices } from "./commands/devices.js";
+import { runExplore } from "./commands/explore.js";
+import { runScan } from "./commands/scan.js";
+import { runSnapshots } from "./commands/snapshots.js";
 
 /** Resolve one argument list to an exit status. Nothing here touches a device. */
 export async function runCli(args: readonly string[], context: CliContext): Promise<number> {
@@ -31,8 +34,44 @@ export async function runCli(args: readonly string[], context: CliContext): Prom
   }
 
   const name = parsed.command.path.join(" ");
+  const accounting = parsed.values.get("accounting") as "allocated" | "apparent" | undefined;
   if (name === "devices") {
     return runDevices(withUnits, asJson);
+  }
+  if (name === "scan") {
+    return runScan(withUnits, {
+      asJson,
+      ...(parsed.operand === undefined ? {} : { path: parsed.operand }),
+      ...(accounting === undefined ? {} : { accounting }),
+      crossFilesystems: parsed.flags.has("cross-filesystems"),
+      ...(optional(parsed, "throttle")),
+      ...(optional(parsed, "max-depth", "maxDepth")),
+    });
+  }
+  if (name === "explore") {
+    return runExplore(withUnits, {
+      asJson,
+      ...(parsed.operand === undefined ? {} : { path: parsed.operand }),
+      ...(optional(parsed, "sort")),
+      ...(optional(parsed, "order")),
+      ...(optional(parsed, "kind")),
+      ...(optional(parsed, "min-size", "minSize")),
+      ...(optional(parsed, "max-size", "maxSize")),
+      ...(optional(parsed, "ext", "extension")),
+      ...(optional(parsed, "name")),
+      ...(optional(parsed, "older-than", "olderThanDays")),
+      ...(optional(parsed, "limit")),
+      ...(optional(parsed, "cursor")),
+      typeTotals: parsed.flags.has("type-totals"),
+    } as Parameters<typeof runExplore>[1]);
+  }
+  if (name === "snapshots") {
+    return runSnapshots(withUnits, {
+      asJson,
+      action: parsed.operand ?? "list",
+      ...(optional(parsed, "from")),
+      ...(optional(parsed, "to")),
+    });
   }
   if (name === "alerts check") {
     const threshold = parseThreshold(parsed.values.get("threshold"));
@@ -48,6 +87,12 @@ export async function runCli(args: readonly string[], context: CliContext): Prom
     return runDashboard(withUnits, asJson);
   }
   return withUnits.launchTui(withUnits.settings);
+}
+
+/** Copy an option through only when it was given, so no default is invented. */
+function optional(parsed: ParsedCommand, option: string, field = option): Record<string, string> {
+  const value = parsed.values.get(option);
+  return value === undefined ? {} : { [field]: value };
 }
 
 function applyUnits(context: CliContext, parsed: ParsedCommand): CliContext {

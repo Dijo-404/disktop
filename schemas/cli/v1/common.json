@@ -301,6 +301,259 @@
           "type": "string"
         }
       }
+    },
+    "entryKind": {
+      "type": "string",
+      "enum": [
+        "file",
+        "directory",
+        "symlink",
+        "other"
+      ]
+    },
+    "indexedEntry": {
+      "description": "One row of a scan index. A directory row carries the totals for its whole subtree; a file row carries its own. `shared` marks a hardlink whose bytes were attributed to an earlier path, so removing it frees nothing.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "path",
+        "kind",
+        "device",
+        "inode",
+        "mountId",
+        "linkCount",
+        "apparentBytes",
+        "allocatedBytes",
+        "ownerId",
+        "modifiedNanoseconds",
+        "shared"
+      ],
+      "properties": {
+        "id": {
+          "$ref": "#/$defs/decimalInteger"
+        },
+        "parentId": {
+          "$ref": "#/$defs/decimalInteger"
+        },
+        "path": {
+          "$ref": "#/$defs/rawPath"
+        },
+        "kind": {
+          "$ref": "#/$defs/entryKind"
+        },
+        "device": {
+          "$ref": "#/$defs/decimalInteger"
+        },
+        "inode": {
+          "$ref": "#/$defs/decimalInteger"
+        },
+        "mountId": {
+          "$ref": "#/$defs/decimalInteger"
+        },
+        "linkCount": {
+          "$ref": "#/$defs/decimalInteger"
+        },
+        "apparentBytes": {
+          "$ref": "#/$defs/decimalInteger"
+        },
+        "allocatedBytes": {
+          "$ref": "#/$defs/decimalInteger"
+        },
+        "ownerId": {
+          "$ref": "#/$defs/decimalInteger"
+        },
+        "modifiedNanoseconds": {
+          "$ref": "#/$defs/decimalInteger"
+        },
+        "shared": {
+          "type": "boolean"
+        }
+      }
+    },
+    "typeTotal": {
+      "description": "Bytes per lowercased extension over regular files only; the empty string groups files with no extension. Directory rows and shared hardlinks are left out so the totals cannot exceed what the filesystem holds.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "extension",
+        "entries",
+        "allocatedBytes",
+        "apparentBytes"
+      ],
+      "properties": {
+        "extension": {
+          "type": "string",
+          "maxLength": 64
+        },
+        "entries": {
+          "$ref": "#/$defs/decimalInteger"
+        },
+        "allocatedBytes": {
+          "$ref": "#/$defs/decimalInteger"
+        },
+        "apparentBytes": {
+          "$ref": "#/$defs/decimalInteger"
+        }
+      }
+    },
+    "scanTotals": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "allocatedBytes",
+        "apparentBytes",
+        "sharedBytes"
+      ],
+      "properties": {
+        "allocatedBytes": {
+          "$ref": "#/$defs/decimalInteger"
+        },
+        "apparentBytes": {
+          "$ref": "#/$defs/decimalInteger"
+        },
+        "sharedBytes": {
+          "description": "Bytes reached through a second hardlink to an inode already counted. Reported separately, never added to the totals.",
+          "$ref": "#/$defs/decimalInteger"
+        }
+      }
+    },
+    "snapshotScope": {
+      "description": "The rules a scan ran under. Two snapshots are comparable only when every field matches.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "roots",
+        "excludes",
+        "accounting",
+        "crossFilesystems",
+        "filesystems"
+      ],
+      "properties": {
+        "roots": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "$ref": "#/$defs/rawPath"
+          }
+        },
+        "excludes": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/rawPath"
+          }
+        },
+        "accounting": {
+          "type": "string",
+          "enum": [
+            "allocated",
+            "apparent"
+          ]
+        },
+        "crossFilesystems": {
+          "type": "boolean"
+        },
+        "filesystems": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/identifier"
+          }
+        }
+      }
+    },
+    "snapshot": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "scanId",
+        "scannedAt",
+        "scope",
+        "totals",
+        "completeness"
+      ],
+      "properties": {
+        "id": {
+          "$ref": "#/$defs/identifier"
+        },
+        "scanId": {
+          "$ref": "#/$defs/identifier"
+        },
+        "scannedAt": {
+          "$ref": "#/$defs/timestamp"
+        },
+        "scope": {
+          "$ref": "#/$defs/snapshotScope"
+        },
+        "totals": {
+          "$ref": "#/$defs/scanTotals"
+        },
+        "completeness": {
+          "$ref": "#/$defs/completeness"
+        },
+        "directories": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/directorySummary"
+          }
+        }
+      }
+    },
+    "directorySummary": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "path",
+        "allocatedBytes",
+        "apparentBytes"
+      ],
+      "properties": {
+        "path": {
+          "$ref": "#/$defs/rawPath"
+        },
+        "allocatedBytes": {
+          "$ref": "#/$defs/decimalInteger"
+        },
+        "apparentBytes": {
+          "$ref": "#/$defs/decimalInteger"
+        }
+      }
+    },
+    "directoryChange": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "path",
+        "kind",
+        "earlierBytes",
+        "laterBytes",
+        "deltaBytes"
+      ],
+      "properties": {
+        "path": {
+          "$ref": "#/$defs/rawPath"
+        },
+        "kind": {
+          "description": "`added` and `removed` also describe a rename, or a directory that moved in or out of the snapshot top entries.",
+          "type": "string",
+          "enum": [
+            "grew",
+            "shrank",
+            "added",
+            "removed",
+            "unchanged"
+          ]
+        },
+        "earlierBytes": {
+          "$ref": "#/$defs/decimalInteger"
+        },
+        "laterBytes": {
+          "$ref": "#/$defs/decimalInteger"
+        },
+        "deltaBytes": {
+          "$ref": "#/$defs/signedDecimalInteger"
+        }
+      }
     }
   }
 }

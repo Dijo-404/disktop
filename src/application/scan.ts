@@ -28,9 +28,23 @@ export type ScanOutcome =
   | { readonly kind: "scanned"; readonly summary: ScanSummary }
   | { readonly kind: "unavailable"; readonly capability: Capability };
 
+/**
+ * What one invocation may change about the configured defaults.
+ *
+ * Accounting and mount policy decide what a scan measures, so a snapshot
+ * records the values that were actually used rather than the configured ones.
+ */
+export interface ScanOverrides {
+  readonly accounting?: Accounting;
+  readonly crossFilesystems?: boolean;
+  readonly throttleBytesPerSecond?: bigint;
+  readonly maxDepth?: bigint;
+}
+
 export interface ScanService {
   run(
     roots: readonly RawPath[],
+    overrides: ScanOverrides,
     signal: AbortSignal,
     onProgress?: (progress: ScanProgress) => void,
   ): Promise<ScanOutcome>;
@@ -47,19 +61,19 @@ export interface ScanService {
  */
 export function createScanService(scanner: ScanPort, settings: ScanSettings): ScanService {
   return {
-    async run(roots, signal, onProgress) {
+    async run(roots, overrides, signal, onProgress) {
       if (roots.length === 0) {
         throw new RangeError("A scan needs at least one root");
       }
 
+      const throttle = overrides.throttleBytesPerSecond ?? settings.throttleBytesPerSecond;
       const request: ScanRequest = {
         roots,
-        crossFilesystems: settings.crossFilesystems,
+        crossFilesystems: overrides.crossFilesystems ?? settings.crossFilesystems,
         excludes: settings.excludes,
-        accounting: settings.accounting,
-        ...(settings.throttleBytesPerSecond === undefined
-          ? {}
-          : { throttleBytesPerSecond: settings.throttleBytesPerSecond }),
+        accounting: overrides.accounting ?? settings.accounting,
+        ...(throttle === undefined ? {} : { throttleBytesPerSecond: throttle }),
+        ...(overrides.maxDepth === undefined ? {} : { maxDepth: overrides.maxDepth }),
       };
 
       let summary: ScanSummary | undefined;

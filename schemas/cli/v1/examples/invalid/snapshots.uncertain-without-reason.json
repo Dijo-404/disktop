@@ -1,0 +1,12 @@
+{
+  "schemaVersion": "1",
+  "command": "snapshots diff",
+  "generatedAt": "2026-09-30T09:20:00.000Z",
+  "status": "complete",
+  "exitCode": 0,
+  "data": {
+    "totalDeltaBytes": "0",
+    "directories": [],
+    "uncertain": true
+  }
+}

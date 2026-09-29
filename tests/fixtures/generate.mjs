@@ -142,8 +142,14 @@ async function buildStandardFixture(root) {
   return fixture;
 }
 
-/** A wide, shallow tree for the memory and scan-time budget. */
-export async function createLargeFixture({ entries, fanOut = 256 }) {
+/**
+ * A wide, shallow tree for the memory and scan-time budget.
+ *
+ * `bytesPerFile` gives the files real content, which is what makes an
+ * allocated-bytes comparison against `du -x` mean anything: empty files
+ * occupy no blocks, so a tree of them totals zero on every filesystem.
+ */
+export async function createLargeFixture({ entries, fanOut = 256, bytesPerFile = 0 }) {
   if (!Number.isInteger(entries) || entries < 1) {
     throw new RangeError("entries must be a positive integer");
   }
@@ -154,11 +160,11 @@ export async function createLargeFixture({ entries, fanOut = 256 }) {
     await mkdir(directory);
     const batch = Math.min(fanOut, entries - created);
     for (let index = 0; index < batch; index += 1) {
-      await writeFile(join(directory, `file-${index}.bin`), "");
+      await writeFile(join(directory, `file-${index}.bin`), bytesPerFile === 0 ? "" : "d".repeat(bytesPerFile));
       created += 1;
     }
   }
-  const fixture = { root, entryCount: created };
+  const fixture = { root, entryCount: created, bytesPerFile };
   fixture.cleanup = sandboxCleanup(fixture);
   return fixture;
 }
