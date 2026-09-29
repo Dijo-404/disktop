@@ -1,9 +1,9 @@
-import type { Capability, Filesystem, StorageDevice } from "../domain/models.js";
+import type { Capability, Filesystem, StorageDevice, Warning } from "../domain/models.js";
 
 export interface InventoryResult {
   readonly devices: readonly StorageDevice[];
   readonly filesystems: readonly Filesystem[];
-  readonly warnings: readonly string[];
+  readonly warnings: readonly Warning[];
   readonly capability: Capability;
 }
 

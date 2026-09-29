@@ -1,0 +1,20 @@
+{
+  "protocolVersion": 1,
+  "requestId": "trash-03",
+  "operation": "trash",
+  "arguments": {
+    "targets": [
+      {
+        "path": "L2hvbWUvZXhhbXBsZS8uY2FjaGUvcGlw",
+        "expected": {
+          "device": "66306",
+          "inode": "1179651",
+          "mountId": "29",
+          "kind": "directory",
+          "apparentBytes": "4096",
+          "modifiedNanoseconds": "1758000000123456789"
+        }
+      }
+    ]
+  }
+}

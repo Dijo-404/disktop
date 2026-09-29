@@ -1,0 +1,6 @@
+{
+  "protocolVersion": 1,
+  "requestId": "cancel-01",
+  "operation": "cancel",
+  "arguments": { "cancelRequestId": "scan-01" }
+}

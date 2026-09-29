@@ -1,16 +1,16 @@
-import type { IndexedEntry, RawPath, ScanCompleteness } from "../domain/models.js";
+import type { IndexedEntry, RawPath, ScanCompleteness, Warning } from "../domain/models.js";
 
 export interface ScanRequest {
   readonly roots: readonly RawPath[];
   readonly crossFilesystems: boolean;
-  readonly excludes: readonly string[];
+  readonly excludes: readonly RawPath[];
   readonly accounting: "allocated" | "apparent";
   readonly throttleBytesPerSecond?: bigint;
 }
 
 export type ScanEvent =
   | { readonly kind: "progress"; readonly scannedEntries: bigint }
-  | { readonly kind: "warning"; readonly message: string }
+  | { readonly kind: "warning"; readonly warning: Warning }
   | { readonly kind: "complete"; readonly scanId: string; readonly completeness: ScanCompleteness };
 
 export interface ScanPort {

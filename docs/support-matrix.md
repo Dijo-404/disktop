@@ -1,6 +1,21 @@
 # Linux support matrix
 
-Status: **release targets, not validated support claims**. The repository is a scaffold, and no platform row below is certified yet. Phase 0 fixes exact minimums and Phase 8 supplies install and acceptance evidence before publishing the single `1.0.0` release.
+Status: **release targets, not validated support claims**. Phase 0 has fixed the minimums below; no platform row is certified yet, and Phase 8 supplies install and acceptance evidence before publishing the single `1.0.0` release.
+
+## Fixed minimums
+
+| Requirement | Minimum | Behaviour below it |
+| --- | --- | --- |
+| Node.js | 24.0.0, enforced by `engines` | npm refuses to install. |
+| Linux kernel for scanning and mutation | 5.6, for `openat2` with `RESOLVE_BENEATH` and `RESOLVE_NO_MAGICLINKS` | The helper's `hello` reports `openat2` unavailable with the errno reason; scans and every mutation are refused as `unsupported-kernel`. Inventory stays available. |
+| Kernel with `openat2` present but blocked (a seccomp policy, some container runtimes) | — | Identical to the above: probed at startup, refused explicitly, never retried through an unsafe path. |
+| Architecture and libc | x86-64 or ARM64, glibc or musl | No bundled binary matches; `unsupported-architecture`, helper-backed features disabled, inventory still available. |
+| Operating system | Linux, enforced by `os` in `package.json` | Not installable. The macOS adapter boundary exists; no macOS behaviour ships in `1.0.0`. |
+
+`openat2` is the hard floor because containment is what the safety rules rest on; there
+is no degraded traversal mode. See [adr/0003](adr/0003-prebuilt-binary-packaging.md) for
+binary selection and [adr/0002](adr/0002-native-helper-and-index.md) for why the helper
+owns traversal.
 
 ## Runtime and binary targets
 

@@ -11,7 +11,8 @@ use std::io::{self, BufRead, Write};
 const PROTOCOL_VERSION: u16 = 1;
 const MAX_REQUEST_BYTES: usize = 1024 * 1024;
 const SUPPORTED_OPERATIONS: [&str; 2] = ["hello", "probe"];
-const PLANNED_OPERATIONS: [&str; 15] = [
+const PLANNED_OPERATIONS: [&str; 16] = [
+    "cancel",
     "scan",
     "query-index",
     "hash-candidates",
@@ -286,6 +287,14 @@ mod tests {
         assert_eq!(output[0]["error"]["code"], "invalid-request");
         assert_eq!(output[1]["requestId"], "bad-version");
         assert_eq!(output[1]["error"]["code"], "unsupported-protocol-version");
+    }
+
+    #[test]
+    fn cancellation_is_specified_but_not_yet_implemented() {
+        let output = responses(
+            "{\"protocolVersion\":1,\"requestId\":\"cancel-1\",\"operation\":\"cancel\",\"arguments\":{\"cancelRequestId\":\"scan-1\"}}\n",
+        );
+        assert_eq!(output[0]["error"]["code"], "unsupported-operation");
     }
 
     #[test]

@@ -1,0 +1,12 @@
+{
+  "protocolVersion": 1,
+  "requestId": "trash-01",
+  "eventId": "2",
+  "event": "item-result",
+  "itemResult": {
+    "path": "L2hvbWUvZXhhbXBsZS8uY2FjaGUvcGlwL2h0dHAtdjIvYTE=",
+    "outcome": "skipped",
+    "reason": "changed-target",
+    "message": "Live inode differs from the reviewed plan; nothing was removed."
+  }
+}
