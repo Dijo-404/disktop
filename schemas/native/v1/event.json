@@ -1,0 +1,101 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/Dijo-404/disktop/schemas/native/v1/event.json",
+  "title": "disktop-fs event",
+  "description": "One JSON object per line on the helper's stdout. Stdout carries protocol messages only; stderr carries diagnostics.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["protocolVersion", "requestId", "eventId", "event"],
+  "properties": {
+    "protocolVersion": { "$ref": "common.json#/$defs/protocolVersion" },
+    "requestId": {
+      "description": "Null only when the request was too malformed to recover a usable ID.",
+      "oneOf": [{ "$ref": "common.json#/$defs/requestId" }, { "type": "null" }]
+    },
+    "eventId": { "$ref": "common.json#/$defs/eventId" },
+    "event": {
+      "type": "string",
+      "enum": ["accepted", "progress", "item-result", "complete", "error"]
+    },
+    "accepted": { "$ref": "#/$defs/accepted" },
+    "progress": { "$ref": "#/$defs/progress" },
+    "itemResult": { "$ref": "#/$defs/itemResult" },
+    "result": { "type": "object" },
+    "error": { "$ref": "#/$defs/error" }
+  },
+  "allOf": [
+    {
+      "if": { "type": "object", "properties": { "event": { "const": "error" } }, "required": ["event"] },
+      "then": { "properties": { "error": { "$ref": "#/$defs/error" } }, "required": ["error"] }
+    },
+    {
+      "if": { "type": "object", "properties": { "event": { "const": "complete" } }, "required": ["event"] },
+      "then": {
+        "properties": {
+          "requestId": { "$ref": "common.json#/$defs/requestId" },
+          "result": { "type": "object" }
+        },
+        "required": ["requestId", "result"]
+      }
+    },
+    {
+      "if": { "type": "object", "properties": { "event": { "const": "accepted" } }, "required": ["event"] },
+      "then": { "properties": { "accepted": { "$ref": "#/$defs/accepted" } }, "required": ["accepted"] }
+    },
+    {
+      "if": { "type": "object", "properties": { "event": { "const": "progress" } }, "required": ["event"] },
+      "then": { "properties": { "progress": { "$ref": "#/$defs/progress" } }, "required": ["progress"] }
+    },
+    {
+      "if": { "type": "object", "properties": { "event": { "const": "item-result" } }, "required": ["event"] },
+      "then": { "properties": { "itemResult": { "$ref": "#/$defs/itemResult" } }, "required": ["itemResult"] }
+    }
+  ],
+  "$defs": {
+    "accepted": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["operation", "cancellable"],
+      "properties": {
+        "operation": { "type": "string" },
+        "cancellable": { "type": "boolean" }
+      }
+    },
+    "progress": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["scannedEntries"],
+      "properties": {
+        "scannedEntries": { "$ref": "common.json#/$defs/decimalInteger" },
+        "processedBytes": { "$ref": "common.json#/$defs/decimalInteger" },
+        "inaccessibleDirectories": { "$ref": "common.json#/$defs/decimalInteger" },
+        "currentPath": { "$ref": "common.json#/$defs/pathBytes" }
+      }
+    },
+    "itemResult": {
+      "description": "One reviewed item's outcome, emitted after its journal record is durable.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["path", "outcome"],
+      "properties": {
+        "path": { "$ref": "common.json#/$defs/pathBytes" },
+        "outcome": {
+          "type": "string",
+          "enum": ["completed", "skipped", "failed"]
+        },
+        "reason": { "$ref": "common.json#/$defs/errorCode" },
+        "message": { "type": "string" },
+        "bytesMoved": { "$ref": "common.json#/$defs/decimalInteger" }
+      }
+    },
+    "error": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["code", "message"],
+      "properties": {
+        "code": { "$ref": "common.json#/$defs/errorCode" },
+        "message": { "type": "string" }
+      }
+    }
+  }
+}

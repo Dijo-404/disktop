@@ -1,0 +1,10 @@
+{
+  "protocolVersion": 1,
+  "requestId": null,
+  "eventId": "1",
+  "event": "error",
+  "error": {
+    "code": "request-too-large",
+    "message": "Request exceeds 1 MiB"
+  }
+}

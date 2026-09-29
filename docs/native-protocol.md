@@ -1,6 +1,6 @@
 # Native helper protocol
 
-Status: partially implemented version 1 boundary. The current Rust scaffold supports `hello` and `probe` only. It reports `buildChecksum: null` for development builds unless a build checksum is injected, and returns `unsupported-operation` for every recognized planned scan or action operation. It cannot scan, index, hash, mutate, or journal files. `schemas/native/v1/` and contract tests will define the complete release contract as implementation progresses.
+Status: version 1 is normative in [`schemas/native/v1/`](../schemas/native/v1/); the current Rust build implements `hello` and `probe` only. It reports `buildChecksum: null` for development builds unless a build checksum is injected, and returns `unsupported-operation` for every recognized planned scan or action operation. It cannot scan, index, hash, mutate, or journal files. `schemas/native/v1/request.json` and `event.json` are the normative wire contract, validated by `tests/contract/native-schema.test.mjs` and, against the real process, by `tests/integration/native.test.mjs`. The operation list there is complete for `1.0.0`; argument schemas exist for `hello`, `probe`, `cancel`, `scan`, `trash`, `erase`, `empty-trash`, and `journal-reconcile`, and the remaining planned operations narrow their `arguments` in the phase that implements them.
 
 ## Transport and negotiation
 
@@ -8,7 +8,7 @@ Node will start the matching bundled `disktop-fs` child with `spawn`, never a sh
 
 Every request carries a protocol version, unique request ID, operation, and validated arguments. The scaffold emits one `complete` or `error` event per request, echoes a valid request ID, rejects unknown top-level fields and versions, and distinguishes recognized but unimplemented operations from unknown ones. The complete protocol will add `accepted`, `progress`, and `item-result` events. Malformed base64 paths and out-of-range integers must be rejected when path operations arrive. The v1 schemas will fix the exact field names and limits for those operations.
 
-Planned cancellation names a request ID. The helper will stop at a safe item boundary, flush its journal where applicable, and emit a final incomplete result. Process termination or a broken pipe must leave a record that startup reconciliation can inspect. The client must not treat a missing final event as success.
+Cancellation is the `cancel` operation, whose argument is the request ID to stop; the current build recognizes it and answers `unsupported-operation`. The helper will stop at a safe item boundary, flush its journal where applicable, and emit a final incomplete result. Process termination or a broken pipe must leave a record that startup reconciliation can inspect. The client must not treat a missing final event as success.
 
 ## Path and number encoding
 
@@ -21,6 +21,7 @@ Device and inode IDs, counts, byte sizes, and nanosecond timestamps will cross I
 | Group | Operations | Responsibility |
 | --- | --- | --- |
 | Current scaffold | `hello`, `probe` | Version, platform, checksum field, supported-operation list, and `openat2` capability probe only. |
+| Control | `cancel` | Stop a named in-flight request at a safe item boundary; the cancelled request still emits a final event. |
 | Planned read | `scan`, `query-index`, `hash-candidates`, `inspect` | Bounded traversal, paginated SQLite queries, duplicate pipeline, live metadata. |
 | User-file actions | `trash`, `restore`, `erase`, `copy-move`, `compress`, `dedup-hardlink`, `empty-trash` | Recheck plan and target, perform constrained action, journal per-item outcome. |
 | Manager journal | `manager-begin`, `manager-append`, `manager-finish` | Record intent, progress, command result, and verification for a fixed-argument Linux manager adapter. The helper does not invent or execute manager commands. |

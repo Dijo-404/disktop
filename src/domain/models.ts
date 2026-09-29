@@ -21,11 +21,21 @@ export interface Capability {
   readonly explanation: string;
 }
 
+/** A named reason a result is partial, uncertain, or degraded. */
+export interface Warning {
+  readonly code: string;
+  readonly message: string;
+  readonly path?: RawPath;
+}
+
 export interface StorageDevice {
   readonly id: string;
   readonly name: string;
   readonly kind: "ssd" | "hdd" | "unknown";
   readonly removable: boolean;
+  readonly sizeBytes: Bytes;
+  readonly model?: string;
+  readonly transport?: string;
   readonly partitions: readonly string[];
 }
 
@@ -33,7 +43,7 @@ export interface Filesystem {
   readonly id: string;
   readonly type: string;
   readonly source: string;
-  readonly mounts: readonly string[];
+  readonly mounts: readonly RawPath[];
   readonly totalBytes: Bytes;
   readonly freeBytes: Bytes;
   readonly availableBytes: Bytes;
@@ -41,14 +51,16 @@ export interface Filesystem {
   readonly freeInodes?: bigint;
   readonly network: boolean;
   readonly removable: boolean;
+  readonly readOnly?: boolean;
+  readonly deviceId?: string;
 }
 
 export interface ScanCompleteness {
   readonly complete: boolean;
   readonly scannedEntries: bigint;
   readonly inaccessibleDirectories: bigint;
-  readonly excludedMounts: readonly string[];
-  readonly warnings: readonly string[];
+  readonly excludedMounts: readonly RawPath[];
+  readonly warnings: readonly Warning[];
 }
 
 export interface IndexedEntry {

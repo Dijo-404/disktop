@@ -1,0 +1,6 @@
+{
+  "protocolVersion": 1,
+  "requestId": "../../etc/shadow",
+  "operation": "probe",
+  "arguments": {}
+}

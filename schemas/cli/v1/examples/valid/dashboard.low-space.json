@@ -1,0 +1,44 @@
+{
+  "schemaVersion": "1",
+  "command": "dashboard",
+  "generatedAt": "2026-09-29T08:15:04.117Z",
+  "status": "complete",
+  "exitCode": 1,
+  "data": {
+    "capability": { "status": "available", "explanation": "Capacity read from statfs for every visible filesystem." },
+    "filesystems": [
+      {
+        "id": "fs-259-2",
+        "type": "ext4",
+        "source": "/dev/nvme0n1p2",
+        "mounts": [
+          { "bytesBase64": "Lw==", "display": "/" },
+          { "bytesBase64": "L2hvbWU=", "display": "/home" }
+        ],
+        "totalBytes": "981450162176",
+        "freeBytes": "58887012352",
+        "availableBytes": "8887012352",
+        "totalInodes": "61054976",
+        "freeInodes": "1220993",
+        "network": false,
+        "removable": false
+      }
+    ],
+    "alerts": [
+      {
+        "filesystemId": "fs-259-2",
+        "kind": "low-space",
+        "usedPercent": 99,
+        "thresholdPercent": 90,
+        "message": "/ and /home share one ext4 filesystem with 8.9 GB available."
+      },
+      {
+        "filesystemId": "fs-259-2",
+        "kind": "low-inodes",
+        "usedPercent": 98,
+        "thresholdPercent": 90,
+        "message": "Only 1,220,993 inodes remain; low inodes fail writes even with free blocks."
+      }
+    ]
+  }
+}

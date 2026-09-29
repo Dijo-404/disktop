@@ -3,7 +3,13 @@
   "version": "0.0.0",
   "private": true,
   "description": "Development scaffold for a Linux terminal storage manager and analyzer",
-  "keywords": ["linux", "disk-usage", "storage", "tui", "cleanup"],
+  "keywords": [
+    "linux",
+    "disk-usage",
+    "storage",
+    "tui",
+    "cleanup"
+  ],
   "type": "module",
   "license": "Apache-2.0",
   "repository": {
@@ -18,6 +24,7 @@
   "files": [
     "dist/",
     "vendor/bin/",
+    "schemas/",
     "docs/",
     "PLAN.md",
     "AGENTS.md",
@@ -41,11 +48,13 @@
     "test": "npm run build && node --test tests/unit/*.test.mjs tests/contract/*.test.mjs",
     "test:integration": "npm run build && npm run build:native && node --test tests/integration/*.test.mjs",
     "test:pty": "npm run build && node --test tests/pty/*.test.mjs",
+    "fixtures": "node scripts/generate-fixtures.mjs",
     "check": "npm run typecheck && npm run lint && npm test && npm run test:integration && npm run test:pty",
     "prepack": "npm run build"
   },
   "devDependencies": {
     "@types/node": "24.19.0",
+    "ajv": "8.20.0",
     "eslint": "10.11.0",
     "typescript": "6.0.3",
     "typescript-eslint": "8.71.0"

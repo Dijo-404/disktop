@@ -5,6 +5,9 @@ import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { test } from "node:test";
 import { handshakeRequest, parseHandshakeResponse } from "../../dist/native/protocol.js";
+import { compileBundle } from "../support/schemas.mjs";
+
+const nativeSchemas = compileBundle("schemas/native/v1");
 
 const binary = resolve("native/disktop-fs/target/debug/disktop-fs");
 
@@ -51,4 +54,22 @@ test("native helper rejects a planned destructive operation without changing a f
   } finally {
     await rm(sandbox, { recursive: true, force: true });
   }
+});
+
+test("every line the helper writes validates against the v1 event schema", async () => {
+  const event = nativeSchemas.get("event");
+  const helloResult = nativeSchemas.get("hello-result");
+  const responses = await exchange([
+    handshakeRequest("hello-1"),
+    { protocolVersion: 1, requestId: "cancel-1", operation: "cancel", arguments: { cancelRequestId: "hello-1" } },
+    { protocolVersion: 2, requestId: "old-client", operation: "hello", arguments: {} },
+  ]);
+
+  assert.equal(responses.length, 3);
+  for (const response of responses) {
+    assert.ok(event(response), `${JSON.stringify(response)}: ${JSON.stringify(event.errors)}`);
+  }
+  assert.ok(helloResult(responses[0]), JSON.stringify(helloResult.errors));
+  assert.equal(responses[1].error.code, "unsupported-operation");
+  assert.equal(responses[2].error.code, "unsupported-protocol-version");
 });

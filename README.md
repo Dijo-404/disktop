@@ -2,7 +2,7 @@
 
 Disktop is a Linux terminal storage manager and analyzer. Its goal is to help you see where disk space went, investigate files and application data, and review cleanup actions before anything changes. The planned interface combines a terminal UI for exploration with a non-interactive CLI for scripts.
 
-> **Project status:** This repository is an implementation scaffold, not a usable storage cleaner. The executable scaffold provides help and version output; inventory, scanning, reports, and cleanup are still planned. There is no published npm package. The first public release will be **`1.0.0`**, after every Linux capability in [PLAN.md](PLAN.md#feature-acceptance-matrix) passes its acceptance checks. Internal phases and CI artifacts are not public releases.
+> **Project status:** This repository is an implementation scaffold, not a usable storage cleaner. Phase 0 (contracts and threat model) is complete; Phase 1 is the next gate. The executable scaffold provides help and version output; inventory, scanning, reports, and cleanup are still planned. There is no published npm package. The first public release will be **`1.0.0`**, after every Linux capability in [PLAN.md](PLAN.md#feature-acceptance-matrix) passes its acceptance checks. Internal phases and CI artifacts are not public releases.
 
 `disktop` is the working package and command name. Registry availability and naming rights must be checked again before publication.
 

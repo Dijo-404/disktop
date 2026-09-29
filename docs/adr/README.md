@@ -1,6 +1,14 @@
 # Architecture decision records
 
-Architecture decision records (ADRs) explain choices that affect multiple modules or are hard to reverse. This directory starts as a template and index; no decision record has been finalized in the scaffold.
+Architecture decision records (ADRs) explain choices that affect multiple modules or are hard to reverse.
+
+| ADR | Decision | Status |
+| --- | --- | --- |
+| [0001](0001-terminal-renderer.md) | `terminal-kit` behind a renderer interface, with lifecycle-owned terminal restoration | accepted |
+| [0002](0002-native-helper-and-index.md) | A Rust child process owns traversal, the SQLite index, and mutation; the scan budget | accepted |
+| [0003](0003-prebuilt-binary-packaging.md) | Prebuilt helper binaries in one npm tarball, with no install script | accepted |
+| [0004](0004-reviewed-action-pipeline.md) | One reviewed action pipeline and one durable journal | accepted |
+| [0005](0005-lossless-values-in-contracts.md) | Decimal strings and base64 path bytes in every contract | accepted |
 
 Create one numbered Markdown file per decision, for example `0001-terminal-renderer.md`. Use this structure:
 
@@ -30,4 +38,4 @@ Which credible options were evaluated and why were they not selected?
 Which fixture, benchmark, or acceptance test validates the choice?
 ```
 
-The first records should cover the terminal renderer, Rust child-process and SQLite index design, prebuilt binary packaging, and safe action/journal approach. An ADR does not override [PLAN.md](../../PLAN.md) or [AGENTS.md](../../AGENTS.md); if a decision changes a contract, update the plan, schema, tests, and affected docs in the same change.
+An ADR does not override [PLAN.md](../../PLAN.md) or [AGENTS.md](../../AGENTS.md); if a decision changes a contract, update the plan, schema, tests, and affected docs in the same change.

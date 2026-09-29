@@ -43,3 +43,6 @@ pnpm-debug.log*
 *.swp
 *.swo
 *~
+
+# Superpowers execution scratch
+/.superpowers/

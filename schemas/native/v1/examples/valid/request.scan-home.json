@@ -1,0 +1,12 @@
+{
+  "protocolVersion": 1,
+  "requestId": "scan-01",
+  "operation": "scan",
+  "arguments": {
+    "roots": ["L2hvbWUvZXhhbXBsZQ=="],
+    "crossFilesystems": false,
+    "excludes": ["L3Byb2M=", "L3N5cw=="],
+    "accounting": "allocated",
+    "throttleBytesPerSecond": "52428800"
+  }
+}
