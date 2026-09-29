@@ -76,6 +76,8 @@ export interface IndexedEntry {
   readonly allocatedBytes: Bytes;
   readonly ownerId: bigint;
   readonly modifiedNanoseconds: bigint;
+  /** True for a hardlink whose bytes were attributed to an earlier path. */
+  readonly shared: boolean;
 }
 
 export interface Finding {
