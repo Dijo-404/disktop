@@ -76,7 +76,7 @@ Scans stay on one filesystem by default, do not follow symlinks, and report unre
 ## Supported environment for the planned release
 
 - Linux on x86-64 or ARM64, with packaged glibc and musl Rust helper binaries; the exact tested distribution matrix is tracked in [support-matrix.md](docs/support-matrix.md).
-- Node.js 24 LTS for the CLI and TUI. Full native scanning and mutation require Linux kernel 5.6 or newer because the safety design uses `openat2`. Unsupported combinations expose a clear capability state and retain whatever read-only inventory functions are safe.
+- Node.js 24.21.0 or newer within the 24 LTS line, or 26.10.0 or newer within the 26 line, for the CLI and TUI. Use the latest security release of either line; other Node versions are refused at startup. Full native scanning and mutation require Linux kernel 5.6 or newer because the safety design uses `openat2`. Unsupported kernel, architecture, or helper combinations expose a clear capability state and retain whatever read-only inventory functions are safe.
 - Optional external tools, such as package managers, `lsof`, `smartctl`, `notify-send`, or systemd user units, are probed before their related features are offered.
 - A macOS platform boundary is part of the architecture, but a macOS implementation is outside the Linux `1.0.0` scope.
 
@@ -84,7 +84,7 @@ The npm tarball will include prebuilt helpers and will not compile Rust during a
 
 ## Work on the repository now
 
-Start with [AGENTS.md](AGENTS.md), then [PLAN.md](PLAN.md). The scaffold provides these local checks (Node.js 24 and a Rust toolchain are needed):
+Start with [AGENTS.md](AGENTS.md), then [PLAN.md](PLAN.md). The scaffold provides these local checks (a supported Node.js version and a Rust toolchain are needed):
 
 ```sh
 npm ci

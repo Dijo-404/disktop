@@ -6,7 +6,7 @@ Disktop is being built toward one initial public npm release, `1.0.0`. The phase
 
 Read [AGENTS.md](AGENTS.md) and [PLAN.md](PLAN.md) before changing code. The plan defines module ownership, platform boundaries, protocol and CLI contracts, and the feature acceptance matrix. For a change, identify the owning folder, affected port or schema, acceptance row, fixture, and relevant test.
 
-The Linux application uses Node.js 24 LTS and a Rust helper. Use the pinned versions in `package.json`, `package-lock.json`, and `rust-toolchain.toml`. Install dependencies with `npm ci`; keep both npm and Cargo lockfiles committed. The current scaffold checks are:
+The Linux application uses Node.js 24 LTS as its baseline, checks Node 26 compatibility in CI, and uses a Rust helper. Use a current patched release within the supported Node lines and the pinned dependencies in `package.json`, `package-lock.json`, and `rust-toolchain.toml`. Install dependencies with `npm ci`; keep both npm and Cargo lockfiles committed. The current scaffold checks are:
 
 ```sh
 npm run typecheck
