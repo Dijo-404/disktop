@@ -58,7 +58,7 @@ jobs:
           registry-url: https://registry.npmjs.org
           package-manager-cache: false
       - name: Install pinned Rust toolchain
-        run: rustup toolchain install 1.93.0 --profile minimal --component rustfmt clippy
+        run: rustup toolchain install 1.93.0 --profile minimal --component rustfmt,clippy
       - name: Verify reviewed tag and package metadata
         env:
           EXPECTED_COMMIT: ${{ inputs.expected_commit }}

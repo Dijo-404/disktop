@@ -6,7 +6,7 @@ Status: **release targets, not validated support claims**. Phase 0 has fixed the
 
 | Requirement | Minimum | Behaviour below it |
 | --- | --- | --- |
-| Node.js | 24.0.0, enforced by `engines` | npm refuses to install. |
+| Node.js | 24.21.0 LTS or 26.10.0 Current, within those major lines | The CLI refuses older and unsupported majors. npm checks `engines`, but may only warn unless `engine-strict` is enabled. |
 | Linux kernel for scanning and mutation | 5.6, for `openat2` with `RESOLVE_BENEATH` and `RESOLVE_NO_MAGICLINKS` | The helper's `hello` reports `openat2` unavailable with the errno reason; scans and every mutation are refused as `unsupported-kernel`. Inventory stays available. |
 | Kernel with `openat2` present but blocked (a seccomp policy, some container runtimes) | — | Identical to the above: probed at startup, refused explicitly, never retried through an unsafe path. |
 | Architecture and libc | x86-64 or ARM64, glibc or musl | No bundled binary matches; `unsupported-architecture`, helper-backed features disabled, inventory still available. |
@@ -21,7 +21,7 @@ owns traversal.
 
 | Component | Target | Required validation before release |
 | --- | --- | --- |
-| Node.js | 24 LTS | CLI, TUI, reports, and packed-package smoke tests. |
+| Node.js | 24 LTS baseline; 26 Current compatibility | CLI, TUI, reports, and packed-package smoke tests on the latest patched release of each supported line. |
 | Linux kernel | 5.6 or newer for full native scan and mutation | Probe `openat2` and action behavior. Older or restricted kernels must show explicit unsupported states. |
 | x86-64 glibc | Bundled `disktop-fs` binary | Check checksum, permissions, protocol, and clean-account install. |
 | x86-64 musl | Bundled `disktop-fs` binary | Same checks in a musl environment. |
@@ -30,6 +30,8 @@ owns traversal.
 | macOS | Platform boundary only | No macOS behavior promised in Linux `1.0.0`. |
 
 The package must select a binary without running a Rust compiler during installation. If there is no matching helper or required kernel primitive, inventory and other safe read-only functions may remain available, but unsupported scans or actions must be disabled explicitly. Binary packaging and integrity checks are a publication gate.
+
+Node 24 remains the [LTS baseline](https://nodejs.org/en/about/previous-releases). Security fixes are issued on maintained release lines, including [the July 2026 fixes for both 24.x and 26.x](https://nodejs.org/en/blog/vulnerability/july-2026-security-releases), so a newer major alone is not a security update. The minimum versions above include the published fixes available on 2026-09-30; users should keep their chosen supported line at its latest security release. Node 25 is end of life and is not a supported runtime.
 
 ## Linux distribution test targets
 
