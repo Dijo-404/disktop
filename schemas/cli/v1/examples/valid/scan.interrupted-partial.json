@@ -1,0 +1,56 @@
+{
+  "schemaVersion": "1",
+  "command": "scan",
+  "generatedAt": "2026-09-30T09:12:44.008Z",
+  "status": "incomplete",
+  "exitCode": 130,
+  "warnings": [
+    {
+      "code": "cancelled",
+      "message": "The scan stopped at a directory boundary when cancellation was requested."
+    },
+    {
+      "code": "inaccessible-directory",
+      "message": "Permission denied.",
+      "path": {
+        "bytesBase64": "L2hvbWUvZXhhbXBsZS9wcm9qZWN0cy9wcml2YXRl",
+        "display": "/home/example/projects/private",
+        "utf8": "/home/example/projects/private"
+      }
+    }
+  ],
+  "data": {
+    "capability": {
+      "status": "available",
+      "explanation": "The helper scanned the requested root."
+    },
+    "scanId": "scan-1759223564-0a1b2c3d",
+    "snapshotId": "snap-2026-09-30T09-12-44-008Z-0a1b2c3d",
+    "accounting": "allocated",
+    "roots": [
+      {
+        "bytesBase64": "L2hvbWUvZXhhbXBsZS9wcm9qZWN0cw==",
+        "display": "/home/example/projects",
+        "utf8": "/home/example/projects"
+      }
+    ],
+    "totals": {
+      "allocatedBytes": "4294967296",
+      "apparentBytes": "4294930432",
+      "sharedBytes": "0"
+    },
+    "completeness": {
+      "complete": false,
+      "scannedEntries": "18422",
+      "inaccessibleDirectories": "1",
+      "excludedMounts": [
+        {
+          "bytesBase64": "L2hvbWUvZXhhbXBsZS9wcm9qZWN0cy9tbnQvZGF0YQ==",
+          "display": "/home/example/projects/mnt/data",
+          "utf8": "/home/example/projects/mnt/data"
+        }
+      ]
+    },
+    "prunedSnapshots": "1"
+  }
+}

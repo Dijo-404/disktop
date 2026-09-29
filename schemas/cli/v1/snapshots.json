@@ -1,0 +1,82 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/Dijo-404/disktop/schemas/cli/v1/snapshots.json",
+  "title": "disktop snapshots list|diff --json",
+  "type": "object",
+  "allOf": [
+    {
+      "$ref": "envelope.json"
+    }
+  ],
+  "properties": {
+    "command": {
+      "enum": [
+        "snapshots list",
+        "snapshots diff"
+      ]
+    },
+    "data": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "snapshots": {
+          "type": "array",
+          "items": {
+            "$ref": "common.json#/$defs/snapshot"
+          }
+        },
+        "earlier": {
+          "$ref": "common.json#/$defs/snapshot"
+        },
+        "later": {
+          "$ref": "common.json#/$defs/snapshot"
+        },
+        "totalDeltaBytes": {
+          "$ref": "common.json#/$defs/signedDecimalInteger"
+        },
+        "directories": {
+          "type": "array",
+          "items": {
+            "$ref": "common.json#/$defs/directoryChange"
+          }
+        },
+        "uncertain": {
+          "type": "boolean"
+        },
+        "uncertainty": {
+          "description": "Why the comparison may not mean what it appears to. Present whenever `uncertain` is true.",
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        }
+      },
+      "allOf": [
+        {
+          "if": {
+            "type": "object",
+            "properties": {
+              "uncertain": {
+                "const": true
+              }
+            },
+            "required": [
+              "uncertain"
+            ]
+          },
+          "then": {
+            "properties": {
+              "uncertainty": {
+                "type": "array",
+                "minItems": 1
+              }
+            },
+            "required": [
+              "uncertainty"
+            ]
+          }
+        }
+      ]
+    }
+  }
+}

@@ -134,7 +134,7 @@ test("an incomplete inventory reports 3 and says what it missed", async () => {
 
 test("a declared but unbuilt command refuses in the same envelope shape", async () => {
   const context = fakeContext();
-  assert.equal(await runCli(["scan", "--json"], context), 2);
+  assert.equal(await runCli(["find", "duplicates", "--json"], context), 2);
   const envelope = JSON.parse(context.captured.stdout);
   assert.equal(envelope.status, "error");
   assert.equal(envelope.error.code, "not-implemented");

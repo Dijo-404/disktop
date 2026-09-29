@@ -1,0 +1,36 @@
+{
+  "schemaVersion": "1",
+  "command": "explore",
+  "generatedAt": "2026-09-30T09:14:02.551Z",
+  "status": "complete",
+  "exitCode": 0,
+  "data": {
+    "capability": {
+      "status": "available",
+      "explanation": "The index answered from a stored scan."
+    },
+    "scanId": "scan-1",
+    "snapshotId": "snap-1",
+    "sort": "allocated",
+    "order": "descending",
+    "entries": [
+      {
+        "id": "1",
+        "path": {
+          "bytesBase64": "L2hvbWUvZXhhbXBsZS9hLnR4dA==",
+          "display": "/home/example/a.txt",
+          "utf8": "/home/example/a.txt"
+        },
+        "kind": "file",
+        "device": "2049",
+        "inode": "7",
+        "mountId": "29",
+        "linkCount": "1",
+        "apparentBytes": "1024",
+        "allocatedBytes": "4096",
+        "ownerId": "1000",
+        "modifiedNanoseconds": "1759190400000000000"
+      }
+    ]
+  }
+}

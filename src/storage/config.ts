@@ -15,6 +15,10 @@ export interface DisktopConfig {
     readonly accounting: "allocated" | "apparent";
     readonly excludeWindowsMounts: boolean;
     readonly excludes: readonly string[];
+    /** Byte budget for the helper's index; older scans are dropped to fit. */
+    readonly maxIndexBytes: number;
+    /** How many scans the index retains, newest first. */
+    readonly keepScans: number;
   };
   readonly find: {
     readonly staleAfterDays: number;
@@ -37,6 +41,8 @@ export const DEFAULT_CONFIG: DisktopConfig = {
     accounting: "allocated",
     excludeWindowsMounts: true,
     excludes: ["/proc", "/sys", "/dev", "/run"],
+    maxIndexBytes: 2 * 1024 * 1024 * 1024,
+    keepScans: 3,
   },
   find: { staleAfterDays: 183 },
   snapshots: { keepLatest: 20 },
@@ -61,6 +67,8 @@ export function parseConfigDocument(source: string): DisktopConfig {
       accounting: reader.enumeration("scan", "accounting", ["allocated", "apparent"], DEFAULT_CONFIG.scan.accounting),
       excludeWindowsMounts: reader.boolean("scan", "exclude_windows_mounts", DEFAULT_CONFIG.scan.excludeWindowsMounts),
       excludes: reader.absolutePaths("scan", "excludes", DEFAULT_CONFIG.scan.excludes, false),
+      maxIndexBytes: reader.integer("scan", "max_index_bytes", DEFAULT_CONFIG.scan.maxIndexBytes, 16 * 1024 * 1024, 1024 ** 4),
+      keepScans: reader.integer("scan", "keep_scans", DEFAULT_CONFIG.scan.keepScans, 1, 100),
     },
     find: { staleAfterDays: reader.integer("find", "stale_after_days", DEFAULT_CONFIG.find.staleAfterDays, 1, 3650) },
     snapshots: { keepLatest: reader.integer("snapshots", "keep_latest", DEFAULT_CONFIG.snapshots.keepLatest, 1, 1000) },

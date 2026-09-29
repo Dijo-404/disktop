@@ -33,7 +33,11 @@ function exchange(requests) {
 test("native hello reports only the implemented operations", async () => {
   const [response] = await exchange([handshakeRequest("hello-1")]);
   const result = parseHandshakeResponse(JSON.stringify(response), "hello-1");
-  assert.deepEqual(result.supportedOperations, ["hello", "probe"]);
+  assert.deepEqual(result.supportedOperations, ["hello", "probe", "cancel", "scan", "query-index"]);
+  // Nothing that changes a user file is listed, because nothing does yet.
+  for (const mutation of ["trash", "erase", "copy-move", "empty-trash"]) {
+    assert.equal(result.supportedOperations.includes(mutation), false);
+  }
   assert.equal(typeof result.kernelCapabilities.openat2.available, "boolean");
 });
 
@@ -70,6 +74,8 @@ test("every line the helper writes validates against the v1 event schema", async
     assert.ok(event(response), `${JSON.stringify(response)}: ${JSON.stringify(event.errors)}`);
   }
   assert.ok(helloResult(responses[0]), JSON.stringify(helloResult.errors));
-  assert.equal(responses[1].error.code, "unsupported-operation");
+  // Cancelling a request that already finished is refused by name rather than
+  // answered as though something was stopped.
+  assert.equal(responses[1].error.code, "unknown-request");
   assert.equal(responses[2].error.code, "unsupported-protocol-version");
 });
