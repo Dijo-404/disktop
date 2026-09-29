@@ -1,0 +1,118 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/Dijo-404/disktop/schemas/cli/v1/envelope.json",
+  "title": "Disktop CLI v1 output envelope",
+  "description": "Every `--json` command writes exactly one of these objects to stdout. Progress and diagnostics go to stderr.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schemaVersion",
+    "command",
+    "generatedAt",
+    "status",
+    "exitCode"
+  ],
+  "properties": {
+    "schemaVersion": {
+      "const": "1"
+    },
+    "command": {
+      "type": "string",
+      "pattern": "^[a-z][a-z-]*( [a-z][a-z-]*)*$"
+    },
+    "generatedAt": {
+      "$ref": "common.json#/$defs/timestamp"
+    },
+    "status": {
+      "type": "string",
+      "enum": [
+        "complete",
+        "incomplete",
+        "error"
+      ]
+    },
+    "exitCode": {
+      "description": "0 complete, 1 alert threshold reached, 2 input or operational error, 3 incomplete, 130 interrupted.",
+      "type": "integer",
+      "enum": [
+        0,
+        1,
+        2,
+        3,
+        130
+      ]
+    },
+    "warnings": {
+      "type": "array",
+      "items": {
+        "$ref": "common.json#/$defs/warning"
+      }
+    },
+    "data": {
+      "type": "object"
+    },
+    "error": {
+      "$ref": "common.json#/$defs/failure"
+    }
+  },
+  "allOf": [
+    {
+      "if": {
+        "type": "object",
+        "properties": {
+          "status": {
+            "const": "error"
+          }
+        },
+        "required": [
+          "status"
+        ]
+      },
+      "then": {
+        "properties": {
+          "error": {
+            "$ref": "common.json#/$defs/failure"
+          }
+        },
+        "required": [
+          "error"
+        ]
+      },
+      "else": {
+        "properties": {
+          "data": {
+            "type": "object"
+          }
+        },
+        "required": [
+          "data"
+        ]
+      }
+    },
+    {
+      "if": {
+        "type": "object",
+        "properties": {
+          "status": {
+            "const": "incomplete"
+          }
+        },
+        "required": [
+          "status"
+        ]
+      },
+      "then": {
+        "description": "An incomplete result must say what was missed.",
+        "properties": {
+          "warnings": {
+            "type": "array",
+            "minItems": 1
+          }
+        },
+        "required": [
+          "warnings"
+        ]
+      }
+    }
+  ]
+}

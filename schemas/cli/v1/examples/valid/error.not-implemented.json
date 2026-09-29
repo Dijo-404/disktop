@@ -1,0 +1,12 @@
+{
+  "schemaVersion": "1",
+  "command": "clean apply",
+  "generatedAt": "2026-09-29T08:15:04.117Z",
+  "status": "error",
+  "exitCode": 2,
+  "error": {
+    "code": "not-implemented",
+    "message": "Reviewed cleanup is not implemented in this build.",
+    "details": { "phase": "4" }
+  }
+}
