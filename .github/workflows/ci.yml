@@ -94,3 +94,14 @@ jobs:
         run: |
           npm run build
           npm run test:pty
+      # A container may not reach lsblk or every mount, which is an incomplete
+      # result (3), not a failure. An operational error (2) still fails the job.
+      - name: Read this container's inventory
+        run: |
+          for arguments in "devices --json" "--json" "alerts check --json"; do
+            node dist/bin/disktop.js $arguments > /dev/null && status=0 || status=$?
+            case "$status" in
+              0|1|3) echo "disktop $arguments exited $status" ;;
+              *) echo "disktop $arguments exited $status"; exit 1 ;;
+            esac
+          done

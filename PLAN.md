@@ -10,11 +10,13 @@ The user journey is: open a fast dashboard → identify a full filesystem → in
 
 ### Current implementation boundary
 
-The development package remains private at `0.0.0`. **Phase 0 is complete**; Phase 1 is the next gate.
+The development package remains private at `0.0.0`. **Phases 0 and 1 are complete**; Phase 2 is the next gate.
 
 Phase 0 delivered the contracts, not features: normative JSON Schemas for CLI output (`schemas/cli/v1/`) and the helper protocol (`schemas/native/v1/`) with valid and invalid examples under contract test; byte-exact path handling and the protected-path refusal policy in `src/domain`; XDG locations, configuration defaults, and a strict TOML subset reader in `src/storage`; the source dependency rule enforced by `eslint.config.mjs` and proven by `tests/unit/dependency-rules.test.mjs`; the filesystem fixture generator in `tests/fixtures/generate.mjs`; the fixed kernel and architecture minimums in `docs/support-matrix.md`; the action threat model in `docs/threat-model.md`; and ADRs 0001 to 0005.
 
-The CLI bootstrap still implements `--help` and `--version` only and explicitly reports planned commands as unavailable. The native helper still implements only the versioned `hello` and `probe` requests; `cancel` and every other planned operation is recognized and refused as unsupported. No file discovery, cleanup, TUI, inventory, export, or alert feature exists, and no feature acceptance row passes yet.
+Phase 1 delivered the first vertical slice: the command surface is defined once in `src/cli/parser.ts` and drives parsing and help; `disktop devices`, `disktop --json`, and `disktop alerts check` are implemented against real Linux readings; the Linux inventory adapter in `src/platform/linux/inventory/` joins `lsblk -J -b`, `/proc/self/mountinfo`, and `statfs`; `src/application/dashboard.ts` and `src/application/alerts.ts` compute the joined capacity view and the space and inode thresholds; the 80×24 dashboard in `src/tui/` runs behind the `Renderer` interface with vim keys, `NO_COLOR`, an ASCII fallback, and terminal restoration on exit, on `SIGINT`, `SIGTERM`, `SIGHUP`, and after an uncaught exception; `src/native/locator.ts` and `src/native/client.ts` select, verify, spawn, and shut down the helper and carry cancellation by request ID; and `src/composition/root.ts` is now the only layer permitted to build an adapter.
+
+The native helper still implements only the versioned `hello` and `probe` requests; `cancel` and every other planned operation is recognized and refused as unsupported. No scan, index, file discovery, cleanup, snapshot, or export feature exists. `scan`, `explore`, `find`, `snapshots`, `clean`, `history`, `undo`, `report`, `timer`, and `completion` are declared in the parser and refuse with `not-implemented`. Explore, Clean, Dev, Apps, and History appear as TUI tabs and say they have nothing to show yet.
 
 ## Supported environment and packaging
 
@@ -84,7 +86,8 @@ disktop/
 │   │   ├── undo.ts                  restore and collision handling
 │   │   └── alerts.ts                threshold checks and notification intent
 │   ├── platform/linux/
-│   │   ├── inventory/              lsblk, mountinfo, statfs, WSL detection
+│   │   ├── inventory/              lsblk, mountinfo, statfs, WSL detection,
+│   │   │                           filesystem-kind classification
 │   │   ├── packages/               dpkg, rpm, pacman, snap, flatpak, npm, pip
 │   │   ├── diagnostics/            lsof, smartctl, btrfs/zfs, logs, per-user
 │   │   ├── managers/               apt, dnf, pacman, journal, snap, flatpak,
@@ -106,8 +109,14 @@ disktop/
 │   │   ├── client.ts               typed helper process and cancellation
 │   │   ├── protocol.ts             versioned messages and decimal byte values
 │   │   └── locator.ts              matching bundled binary and integrity check
+│   ├── composition/
+│   │   └── root.ts                 the only layer that builds an adapter
 │   ├── cli/
 │   │   ├── parser.ts               one command/option definition
+│   │   ├── run.ts                  dispatch from parsed command to handler
+│   │   ├── context.ts              the services a handler may reach
+│   │   ├── bootstrap.ts            supported-runtime gate before any reading
+│   │   ├── text.ts                 human-readable tables
 │   │   ├── commands/              devices, scan, find, clean, history,
 │   │   │                           undo, snapshots, report, alerts, completion
 │   │   ├── output.ts               stdout JSON/text and stderr progress
@@ -153,7 +162,7 @@ disktop/
 
 ### Dependency rule
 
-`domain` has no I/O and imports no UI. `application` depends on `domain` and `ports`. Linux adapters, providers, storage, and the native client implement ports. CLI, TUI, and reports call application services; they never call the helper or a cleanup command directly. Only `application/apply-action.ts` may commit a reviewed plan, and only the Rust helper may mutate arbitrary filesystem paths. Manager-backed actions go through fixed-argument adapters and the same plan, confirmation, result, and journal pipeline.
+`domain` has no I/O and imports no UI. `application` depends on `domain` and `ports`. Linux adapters, providers, storage, and the native client implement ports. CLI, TUI, and reports call application services; they never call the helper or a cleanup command directly. `composition` is the one layer that may build an adapter, and it imports no surface; every other layer receives what it needs as an argument, which is what lets the rule forbid the reach at all. Only `application/apply-action.ts` may commit a reviewed plan, and only the Rust helper may mutate arbitrary filesystem paths. Manager-backed actions go through fixed-argument adapters and the same plan, confirmation, result, and journal pipeline.
 
 ~~~text
 CLI ─┐
@@ -310,7 +319,7 @@ Each phase ends with a testable gate. No phase publishes to npm.
 | Phase | Build work | Gate before continuing |
 | --- | --- | --- |
 | 0. Contracts and threat model **(complete)** | Establish repository scaffold, schema v1, native IPC, supported kernel/architecture matrix, source dependency rule, config defaults, action threat model, fixture generator, ADRs for TUI/index/packaging. | Example CLI JSON validates against schemas; helper handshake and unsupported-state behavior are specified; safety review approves protected roots and action rules. |
-| 1. Vertical slice and inventory | Implement CLI bootstrap, Linux device/mount/capacity inventory, a minimal 80×24 dashboard, Node/Rust process lifecycle, progress/cancel plumbing, and low-space/inode warnings. | Device/partition/mount counts are correct on fixture and real layouts; TUI restores terminal; `disktop --json` works without TTY. |
+| 1. Vertical slice and inventory **(complete)** | Implement CLI bootstrap, Linux device/mount/capacity inventory, a minimal 80×24 dashboard, Node/Rust process lifecycle, progress/cancel plumbing, and low-space/inode warnings. | Device/partition/mount counts are correct on fixture and real layouts; TUI restores terminal; `disktop --json` works without TTY. |
 | 2. Scanner, index, search, history | Build fd-relative walk, allocated/apparent/hardlink accounting, bounded SQLite index, query filters, file-type totals, cached scan view, snapshot comparison and pruning. | Million-entry memory gate, `du -x` comparison where semantics match, invalid-byte names, bind mounts, inaccessible dirs, cancel/restart, and snapshot compatibility tests pass. |
 | 3. Findings and application inventory | Implement every dev, language, AI, browser, Electron, game, VM, package, and per-user detector plus SMART, open-deleted, snapshot, log, crash, swap, and WSL diagnostics. | Each provider passes fixtures; optional tools and permissions show capability states; no duplicate findings or unlabelled size estimates. |
 | 4. Safe action engine | Implement immutable plans, native journal, Trash, undo, permanent erase, empty folders, broken symlinks, user caches/temp cleanup, Trash emptying, action history, interruption and restart recovery. | All mutations pass sandbox, symlink/bind-mount, collision, protected-root, invalid-byte, crash, and undo tests. Moved-to-Trash and observed free-space values are distinct. |

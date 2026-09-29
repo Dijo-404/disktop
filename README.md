@@ -2,7 +2,7 @@
 
 Disktop is a Linux terminal storage manager and analyzer. Its goal is to help you see where disk space went, investigate files and application data, and review cleanup actions before anything changes. The planned interface combines a terminal UI for exploration with a non-interactive CLI for scripts.
 
-> **Project status:** This repository is an implementation scaffold, not a usable storage cleaner. Phase 0 (contracts and threat model) is complete; Phase 1 is the next gate. The executable scaffold provides help and version output; inventory, scanning, reports, and cleanup are still planned. There is no published npm package. The first public release will be **`1.0.0`**, after every Linux capability in [PLAN.md](PLAN.md#feature-acceptance-matrix) passes its acceptance checks. Internal phases and CI artifacts are not public releases.
+> **Project status:** This repository is an implementation in progress, not a usable storage cleaner. Phases 0 (contracts and threat model) and 1 (vertical slice and inventory) are complete; Phase 2 is the next gate. Device, mount, and capacity inventory works, along with space and inode alerts and a read-only dashboard; scanning, reports, and every form of cleanup are still planned, and Disktop cannot yet change anything on disk. There is no published npm package. The first public release will be **`1.0.0`**, after every Linux capability in [PLAN.md](PLAN.md#feature-acceptance-matrix) passes its acceptance checks. Internal phases and CI artifacts are not public releases.
 
 `disktop` is the working package and command name. Registry availability and naming rights must be checked again before publication.
 
@@ -37,7 +37,7 @@ The full feature list and the acceptance check for each feature are in [PLAN.md]
 
 The planned TUI opens at a disk dashboard. Its main views are **Disks**, **Explore**, **Clean**, **Dev**, **Apps**, and **History**. Explore shows a sorted directory tree and filters. Clean shows the action scope, estimate, reversibility, permission requirement, and confirmation before applying a plan. The interface will support vim keys, mouse input, a `?` help view, themes, `NO_COLOR`, an ASCII fallback, SI/IEC units, and an 80×24 terminal.
 
-The planned CLI shares the same application services as the TUI. The command shapes below describe the intended interface; feature commands are **not implemented in the current scaffold**:
+The CLI shares the same application services as the TUI. `devices`, `--json`, and `alerts check` work today; every other command below is declared in the parser and returns a clear `not-implemented` error:
 
 ```text
 disktop --json
@@ -100,7 +100,7 @@ npm pack --dry-run
 node dist/bin/disktop.js --help
 ```
 
-`--help` and `--version` are scaffold behavior, not proof that a storage feature works. Feature commands currently return a clear not-implemented error. The native build and smoke tests check the helper's `hello`/`probe` handshake and explicit rejection of unimplemented operations; integration and PTY smoke tests exercise the scaffold boundary and terminal behavior. They do not validate scanning or cleanup. Full fixtures, recovery tests, platform coverage, and release-package checks are added as their owning phases are implemented. Do not use a cleanup test against a real home directory or the CI host filesystem.
+The suites cover what is built, not what is planned. Unit tests exercise the mountinfo and lsblk parsers, the inventory join, the alert thresholds, and the dashboard layout at 80×24; integration tests validate what the CLI actually writes on the running host against the published JSON schemas; PTY tests drive a real terminal and check that Disktop hands it back, including after Ctrl+C. The native build and smoke tests check the helper's `hello`/`probe` handshake, its explicit rejection of unimplemented operations, and the locator's checksum and permission verification. Nothing here validates scanning or cleanup, because neither exists yet. Full fixtures, recovery tests, platform coverage, and release-package checks are added as their owning phases are implemented. Do not use a cleanup test against a real home directory or the CI host filesystem.
 
 The intended ownership map is:
 
