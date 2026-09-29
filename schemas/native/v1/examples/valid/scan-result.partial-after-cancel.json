@@ -33,6 +33,9 @@
         "message": "A nested mount was not descended into because crossFilesystems is false.",
         "path": "L2hvbWUvZXhhbXBsZS9Qcm9qZWN0cy9tbnQvZGF0YQ=="
       }
+    ],
+    "filesystems": [
+      "2049"
     ]
   }
 }

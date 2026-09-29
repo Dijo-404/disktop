@@ -13,8 +13,13 @@ import type { ScanSummary } from "./scan.js";
 /** How many directory aggregates one snapshot keeps. */
 export const SNAPSHOT_DIRECTORIES = 200;
 
+/** Everything about a scan's scope that the scan itself does not report. */
+export interface RecordedScope {
+  readonly excludes: readonly RawPath[];
+}
+
 export interface SnapshotService {
-  record(summary: ScanSummary, scope: Omit<SnapshotScope, "roots" | "accounting">, now: Date): Promise<SnapshotSummary>;
+  record(summary: ScanSummary, scope: RecordedScope, now: Date): Promise<SnapshotSummary>;
   list(): Promise<readonly SnapshotSummary[]>;
   /** The newest snapshot whose scope matches, for continuing work on one scan. */
   latestFor(scope: SnapshotScope): Promise<SnapshotSummary | undefined>;
@@ -60,20 +65,26 @@ export interface SnapshotDiff {
  * between different scopes reads exactly like real growth and there is no way
  * for the person looking at it to tell.
  */
-export function createSnapshotService(
-  store: SnapshotStore,
-  index: FileIndexPort,
-  accountingSort: EntrySort = "allocated",
-): SnapshotService {
+export function createSnapshotService(store: SnapshotStore, index: FileIndexPort): SnapshotService {
   return {
     async record(summary, scope, now) {
-      const directories = await topDirectories(index, summary.scanId, accountingSort);
+      // Rank and store the directories by the column the scan measured. Under
+      // apparent accounting the allocated-largest directories are a different
+      // set, and a sparse file that grew by gigabytes would not be among them.
+      const directories = await topDirectories(index, summary.scanId, summary.accounting);
       const snapshot: SnapshotSummary = {
         version: SNAPSHOT_VERSION,
         id: `snap-${now.toISOString().replace(/[:.]/g, "-")}-${summary.scanId.slice(-8)}`,
         scanId: summary.scanId,
         scannedAt: now.toISOString(),
-        scope: { ...scope, roots: summary.roots, accounting: summary.accounting },
+        scope: {
+          roots: summary.roots,
+          excludes: scope.excludes,
+          accounting: summary.accounting,
+          crossFilesystems: summary.crossFilesystems,
+          ...(summary.maxDepth === undefined ? {} : { maxDepth: summary.maxDepth.toString(10) }),
+          filesystems: summary.filesystems,
+        },
         totals: summary.totals,
         completeness: summary.completeness,
         directories,
@@ -123,6 +134,13 @@ export function incompatibilities(earlier: SnapshotScope, later: SnapshotScope):
   if (earlier.crossFilesystems !== later.crossFilesystems) {
     reasons.push("One scan crossed filesystem boundaries and the other did not.");
   }
+  if (earlier.maxDepth !== later.maxDepth) {
+    // A depth-limited scan of an unchanged tree otherwise reads as a large
+    // deletion, which is exactly what this refusal exists to prevent.
+    reasons.push(
+      `One scan stopped at depth ${earlier.maxDepth ?? "unlimited"} and the other at depth ${later.maxDepth ?? "unlimited"}.`,
+    );
+  }
   if (!samePathSet(earlier.roots, later.roots)) {
     reasons.push("The two scans covered different roots.");
   }
@@ -136,19 +154,27 @@ export function incompatibilities(earlier: SnapshotScope, later: SnapshotScope):
 }
 
 function compare(earlier: SnapshotSummary, later: SnapshotSummary): SnapshotDiff {
+  // Both sides ran under the same accounting mode, or they would not have
+  // reached this far. Reporting allocated bytes for an apparent-mode history
+  // would answer a question nobody asked.
+  const measured = (entry: DirectorySummary): bigint =>
+    later.scope.accounting === "apparent" ? entry.apparentBytes : entry.allocatedBytes;
+  const total = (snapshot: SnapshotSummary): bigint =>
+    later.scope.accounting === "apparent" ? snapshot.totals.apparentBytes : snapshot.totals.allocatedBytes;
+
   const before = new Map(earlier.directories.map((entry) => [entry.path.bytesBase64, entry]));
   const after = new Map(later.directories.map((entry) => [entry.path.bytesBase64, entry]));
   const changes: DirectoryChange[] = [];
 
   for (const [key, entry] of after) {
     const previous = before.get(key);
-    const earlierBytes = previous?.allocatedBytes ?? 0n;
-    const delta = entry.allocatedBytes - earlierBytes;
+    const earlierBytes = previous === undefined ? 0n : measured(previous);
+    const delta = measured(entry) - earlierBytes;
     changes.push({
       path: entry.path,
       kind: previous === undefined ? "added" : direction(delta),
       earlierBytes,
-      laterBytes: entry.allocatedBytes,
+      laterBytes: measured(entry),
       deltaBytes: delta,
     });
   }
@@ -159,9 +185,9 @@ function compare(earlier: SnapshotSummary, later: SnapshotSummary): SnapshotDiff
     changes.push({
       path: entry.path,
       kind: "removed",
-      earlierBytes: entry.allocatedBytes,
+      earlierBytes: measured(entry),
       laterBytes: 0n,
-      deltaBytes: -entry.allocatedBytes,
+      deltaBytes: -measured(entry),
     });
   }
 
@@ -184,7 +210,7 @@ function compare(earlier: SnapshotSummary, later: SnapshotSummary): SnapshotDiff
   return {
     earlier,
     later,
-    totalDeltaBytes: later.totals.allocatedBytes - earlier.totals.allocatedBytes,
+    totalDeltaBytes: total(later) - total(earlier),
     directories: changes,
     uncertain: uncertainty.length > 0,
     uncertainty,

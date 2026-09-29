@@ -92,6 +92,8 @@ impl Order {
 
 #[derive(Default)]
 pub struct EntryFilter {
+    /// Inclusive primary-key range covering one path and its whole subtree.
+    pub under: Option<(i64, i64)>,
     pub parent_id: Option<i64>,
     pub name_contains: Option<String>,
     pub extension: Option<String>,
@@ -240,6 +242,7 @@ fn type_totals(
     ];
     let mut arguments: Vec<Value> = vec![Value::Text(request.scan_id.clone())];
     let mut filter = EntryFilter {
+        under: request.filter.under,
         parent_id: request.filter.parent_id,
         name_contains: request.filter.name_contains.clone(),
         extension: request.filter.extension.clone(),
@@ -273,6 +276,11 @@ fn type_totals(
 }
 
 fn push_filters(filter: &EntryFilter, clauses: &mut Vec<String>, arguments: &mut Vec<Value>) {
+    if let Some((first, last)) = filter.under {
+        clauses.push("id >= ? AND id <= ?".to_owned());
+        arguments.push(Value::Integer(first));
+        arguments.push(Value::Integer(last));
+    }
     if let Some(parent) = filter.parent_id {
         clauses.push("parent_id = ?".to_owned());
         arguments.push(Value::Integer(parent));
@@ -513,5 +521,145 @@ mod tests {
             decode_cursor(&encode_cursor("4096", 12)).unwrap(),
             ("4096".to_owned(), 12)
         );
+    }
+}
+
+#[cfg(test)]
+mod subtree_tests {
+    use super::*;
+    use crate::index::{self, IndexWriter};
+    use crate::testing::Sandbox;
+    use crate::walk::{Accounting, ScanOptions, walk};
+    use std::os::unix::ffi::OsStrExt;
+    use std::sync::atomic::AtomicBool;
+
+    fn scan(sandbox: &Sandbox, label: &str) -> (Connection, String, std::path::PathBuf) {
+        let index_directory = sandbox.directory(b".disktop-index");
+        let scan_id = format!("scan-subtree-{label}");
+        let roots = vec![sandbox.path().as_os_str().as_bytes().to_vec()];
+        let limits = index::IndexLimits::default();
+        let mut writer =
+            IndexWriter::begin(&index_directory, &scan_id, &roots, "allocated", &limits).unwrap();
+        let options = ScanOptions {
+            roots,
+            cross_filesystems: false,
+            excludes: vec![index_directory.as_os_str().as_bytes().to_vec()],
+            accounting: Accounting::Allocated,
+            throttle_bytes_per_second: None,
+            max_depth: None,
+        };
+        let totals = walk(&options, &mut writer, &AtomicBool::new(false)).unwrap();
+        writer.finish(&totals, &limits).unwrap();
+        (
+            index::open(&index_directory).unwrap(),
+            scan_id,
+            index_directory,
+        )
+    }
+
+    #[test]
+    fn a_subtree_filter_returns_only_what_lives_under_that_path() {
+        let sandbox = Sandbox::new("query-subtree");
+        sandbox.file(b"outside.bin", 200_000);
+        sandbox.directory(b"inside");
+        sandbox.file(b"inside/small.bin", 1024);
+        sandbox.directory(b"inside/deeper");
+        sandbox.file(b"inside/deeper/leaf.bin", 2048);
+
+        let (connection, scan_id, _index) = scan(&sandbox, "filter");
+        let mut under = sandbox.bytes();
+        under.extend_from_slice(b"/inside");
+        let range = index::subtree_range(&connection, &scan_id, &under)
+            .unwrap()
+            .expect("the path is in this scan");
+
+        let page = query(
+            &connection,
+            &QueryRequest {
+                scan_id: scan_id.clone(),
+                filter: EntryFilter {
+                    under: Some(range),
+                    ..EntryFilter::default()
+                },
+                sort: Sort::Allocated,
+                order: Order::Descending,
+                limit: 100,
+                cursor: None,
+                include_type_totals: false,
+            },
+        )
+        .unwrap();
+
+        let names: Vec<String> = page
+            .entries
+            .iter()
+            .map(|entry| String::from_utf8_lossy(&entry.path).into_owned())
+            .collect();
+        assert!(names.iter().any(|name| name.ends_with("/inside")));
+        assert!(names.iter().any(|name| name.ends_with("/inside/small.bin")));
+        assert!(
+            names
+                .iter()
+                .any(|name| name.ends_with("/inside/deeper/leaf.bin"))
+        );
+        // The largest file in the tree sits outside the requested subtree and
+        // must not be listed as though it were inside it.
+        assert!(
+            !names.iter().any(|name| name.ends_with("/outside.bin")),
+            "a sibling outside the subtree was returned: {names:?}"
+        );
+    }
+
+    #[test]
+    fn a_path_that_is_not_in_the_scan_resolves_to_nothing_rather_than_everything() {
+        let sandbox = Sandbox::new("query-subtree-missing");
+        sandbox.file(b"a.bin", 10);
+        let (connection, scan_id, _index) = scan(&sandbox, "missing");
+
+        let mut absent = sandbox.bytes();
+        absent.extend_from_slice(b"/never-created");
+        assert_eq!(
+            index::subtree_range(&connection, &scan_id, &absent).unwrap(),
+            None
+        );
+
+        // A path above the scan root is not in the scan either.
+        assert_eq!(
+            index::subtree_range(&connection, &scan_id, b"/").unwrap(),
+            None
+        );
+    }
+
+    #[test]
+    fn a_file_resolves_to_itself_alone() {
+        let sandbox = Sandbox::new("query-subtree-file");
+        sandbox.file(b"only.bin", 4096);
+        sandbox.file(b"other.bin", 4096);
+        let (connection, scan_id, _index) = scan(&sandbox, "file");
+
+        let mut target = sandbox.bytes();
+        target.extend_from_slice(b"/only.bin");
+        let range = index::subtree_range(&connection, &scan_id, &target)
+            .unwrap()
+            .unwrap();
+
+        let page = query(
+            &connection,
+            &QueryRequest {
+                scan_id,
+                filter: EntryFilter {
+                    under: Some(range),
+                    ..EntryFilter::default()
+                },
+                sort: Sort::Allocated,
+                order: Order::Descending,
+                limit: 100,
+                cursor: None,
+                include_type_totals: false,
+            },
+        )
+        .unwrap();
+        assert_eq!(page.entries.len(), 1);
+        assert!(page.entries[0].path.ends_with(b"only.bin"));
     }
 }

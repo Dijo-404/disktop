@@ -149,6 +149,7 @@ function encodeSnapshot(snapshot: SnapshotSummary): Record<string, unknown> {
       excludes: snapshot.scope.excludes.map(encodePath),
       accounting: snapshot.scope.accounting,
       crossFilesystems: snapshot.scope.crossFilesystems,
+      ...(snapshot.scope.maxDepth === undefined ? {} : { maxDepth: snapshot.scope.maxDepth }),
       filesystems: [...snapshot.scope.filesystems],
     },
     totals: {
@@ -198,6 +199,7 @@ function decodeSnapshot(value: unknown): SnapshotSummary {
       excludes: expectPaths(scope.excludes, "excludes"),
       accounting,
       crossFilesystems: expectBoolean(scope.crossFilesystems, "crossFilesystems"),
+      ...(scope.maxDepth === undefined ? {} : { maxDepth: expectString(scope.maxDepth, "maxDepth") }),
       filesystems: expectStrings(scope.filesystems, "filesystems"),
     },
     totals: {

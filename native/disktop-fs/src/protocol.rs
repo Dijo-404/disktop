@@ -83,6 +83,8 @@ struct ScanArguments {
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct FilterArguments {
     #[serde(default)]
+    under_path: Option<String>,
+    #[serde(default)]
     parent_id: Option<String>,
     #[serde(default)]
     name_contains: Option<String>,
@@ -128,13 +130,18 @@ struct Channel {
 
 impl Channel {
     fn send(&self, event: &Value) {
+        // A poisoned lock means another thread panicked, possibly mid-write.
+        // Dropping every later event would lose the one thing a client cannot
+        // do without: a terminal event. A newline is written first instead, so
+        // a half-written line is closed and this event still parses on its own.
+        let poisoned = self.output.is_poisoned();
         let mut output = match self.output.lock() {
             Ok(output) => output,
-            // A poisoned lock means another thread panicked mid-write. The
-            // stream can no longer be trusted to be line-delimited, so this
-            // event is dropped rather than appended to a broken line.
-            Err(_) => return,
+            Err(held) => held.into_inner(),
         };
+        if poisoned {
+            let _ = output.write_all(b"\n");
+        }
         if serde_json::to_writer(&mut *output, event).is_ok() {
             let _ = output.write_all(b"\n");
             let _ = output.flush();
@@ -175,6 +182,18 @@ impl Responder {
     }
 }
 
+/// The cancellation registry, tolerating a poisoned lock.
+///
+/// Poisoning means another thread panicked, not that the map is unusable, and
+/// refusing to read it afterwards would leave every running scan uncancellable
+/// and unremovable.
+fn registry(server: &Server) -> std::sync::MutexGuard<'_, HashMap<String, Arc<AtomicBool>>> {
+    server
+        .cancellations
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
 struct Server {
     channel: Arc<Channel>,
     cancellations: Mutex<HashMap<String, Arc<AtomicBool>>>,
@@ -206,7 +225,7 @@ pub fn serve<R: BufRead, W: Write + Send + 'static>(mut input: R, output: W) -> 
     // Stdin closing means the client is gone. Every running scan is told to
     // stop and then waited for, so each one still writes its final event and
     // leaves a consistent index behind.
-    for flag in server.cancellations.lock().expect("registry").values() {
+    for flag in registry(&server).values() {
         flag.store(true, Ordering::Relaxed);
     }
     let workers = std::mem::take(&mut *server.workers.lock().expect("workers"));
@@ -330,7 +349,7 @@ fn cancel(server: &Arc<Server>, responder: &Responder, arguments: Map<String, Va
         Err(message) => return fail(responder, "invalid-arguments", &message),
     };
 
-    let registry = server.cancellations.lock().expect("registry");
+    let registry = registry(server);
     let Some(flag) = registry.get(&arguments.cancel_request_id) else {
         drop(registry);
         return fail(
@@ -364,12 +383,9 @@ fn scan(server: &Arc<Server>, responder: Responder, arguments: Map<String, Value
         Ok(path) => PathBuf::from(OsStr::from_bytes(&path)),
         Err(message) => return fail(&responder, "invalid-arguments", &message),
     };
-    let limits = IndexLimits {
-        max_bytes: parse_u64(arguments.max_index_bytes.as_deref())
-            .unwrap_or(IndexLimits::default().max_bytes),
-        keep_scans: parse_u64(arguments.keep_scans.as_deref())
-            .map(|value| value.clamp(1, 1000) as u32)
-            .unwrap_or(IndexLimits::default().keep_scans),
+    let limits = match index_limits(&arguments) {
+        Ok(limits) => limits,
+        Err(message) => return fail(&responder, "invalid-arguments", &message),
     };
 
     if let Err(error) = crate::sys::openat2_available() {
@@ -385,11 +401,7 @@ fn scan(server: &Arc<Server>, responder: Responder, arguments: Map<String, Value
 
     let scan_id = new_scan_id();
     let cancelled = Arc::new(AtomicBool::new(false));
-    server
-        .cancellations
-        .lock()
-        .expect("registry")
-        .insert(responder.request_id.clone(), Arc::clone(&cancelled));
+    registry(server).insert(responder.request_id.clone(), Arc::clone(&cancelled));
 
     responder.emit(
         "accepted",
@@ -399,19 +411,27 @@ fn scan(server: &Arc<Server>, responder: Responder, arguments: Map<String, Value
     let owned = Arc::clone(server);
     let worker = std::thread::spawn(move || {
         let request_id = responder.request_id.clone();
-        run_scan(
-            &responder,
-            &scan_id,
-            &index_directory,
-            &options,
-            &limits,
-            &cancelled,
-        );
-        owned
-            .cancellations
-            .lock()
-            .expect("registry")
-            .remove(&request_id);
+        // A panicking worker must still settle its request. A client waits for
+        // a terminal event and has no timeout, so a dropped one would hang it
+        // for as long as the helper lives.
+        let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            run_scan(
+                &responder,
+                &scan_id,
+                &index_directory,
+                &options,
+                &limits,
+                &cancelled,
+            );
+        }));
+        if outcome.is_err() {
+            fail(
+                &responder,
+                "internal-error",
+                "The scan failed unexpectedly and was abandoned. No file was changed.",
+            );
+        }
+        registry(&owned).remove(&request_id);
     });
     server.workers.lock().expect("workers").push(worker);
 }
@@ -495,6 +515,11 @@ fn scan_result(scan_id: &str, options: &ScanOptions, totals: &ScanTotals) -> Val
         "allocatedBytes": totals.allocated_bytes.to_string(),
         "apparentBytes": totals.apparent_bytes.to_string(),
         "sharedBytes": totals.shared_bytes.to_string(),
+        "filesystems": totals
+            .filesystems
+            .iter()
+            .map(|device| device.to_string())
+            .collect::<Vec<_>>(),
         "excludedMounts": totals
             .excluded_mounts
             .iter()
@@ -553,7 +578,7 @@ fn query_index(responder: &Responder, arguments: Map<String, Value>) {
         Err(message) => return fail(responder, "invalid-arguments", &message),
     };
 
-    let request = match query_request(&arguments) {
+    let mut request = match query_request(&arguments) {
         Ok(request) => request,
         Err(message) => return fail(responder, "invalid-arguments", &message),
     };
@@ -588,6 +613,32 @@ fn query_index(responder: &Responder, arguments: Map<String, Value>) {
                 "internal-error",
                 &format!("The index could not be read: {error}"),
             );
+        }
+    }
+
+    if let Some(encoded) = &arguments.filter.under_path {
+        let path = match decode_path(encoded) {
+            Ok(path) => path,
+            Err(message) => return fail(responder, "invalid-arguments", &message),
+        };
+        match crate::index::subtree_range(&connection, &request.scan_id, &path) {
+            // A path the scan never saw is refused by name. An empty page
+            // would read as "there is nothing under there".
+            Ok(None) => {
+                return fail(
+                    responder,
+                    "invalid-arguments",
+                    "That path is not in this scan. Scan it before exploring it.",
+                );
+            }
+            Ok(range) => request.filter.under = range,
+            Err(error) => {
+                return fail(
+                    responder,
+                    "internal-error",
+                    &format!("The subtree could not be resolved: {error}"),
+                );
+            }
         }
     }
 
@@ -665,6 +716,17 @@ fn query_index(responder: &Responder, arguments: Map<String, Value>) {
     responder.emit("complete", json!({ "result": Value::Object(result) }));
 }
 
+fn index_limits(arguments: &ScanArguments) -> Result<IndexLimits, String> {
+    let defaults = IndexLimits::default();
+    Ok(IndexLimits {
+        max_bytes: optional_u64(arguments.max_index_bytes.as_deref(), "maxIndexBytes")?
+            .unwrap_or(defaults.max_bytes),
+        keep_scans: optional_u64(arguments.keep_scans.as_deref(), "keepScans")?
+            .map(|value| value.clamp(1, 1000) as u32)
+            .unwrap_or(defaults.keep_scans),
+    })
+}
+
 fn scan_options(arguments: &ScanArguments) -> Result<ScanOptions, String> {
     if arguments.roots.is_empty() {
         return Err("A scan needs at least one root".to_owned());
@@ -693,10 +755,26 @@ fn scan_options(arguments: &ScanArguments) -> Result<ScanOptions, String> {
         cross_filesystems: arguments.cross_filesystems,
         excludes,
         accounting,
-        throttle_bytes_per_second: parse_u64(arguments.throttle_bytes_per_second.as_deref()),
-        max_depth: parse_u64(arguments.max_depth.as_deref())
+        throttle_bytes_per_second: optional_u64(
+            arguments.throttle_bytes_per_second.as_deref(),
+            "throttleBytesPerSecond",
+        )?,
+        max_depth: optional_u64(arguments.max_depth.as_deref(), "maxDepth")?
             .map(|depth| depth.min(u64::from(walk::MAX_DEPTH)) as u32),
     })
+}
+
+/// A decimal-string argument is either absent or valid. Falling back to a
+/// default on a malformed value would run a different operation than the one
+/// asked for, without saying so.
+fn optional_u64(value: Option<&str>, field: &str) -> Result<Option<u64>, String> {
+    match value {
+        None => Ok(None),
+        Some(text) => match parse_u64(Some(text)) {
+            Some(number) => Ok(Some(number)),
+            None => Err(format!("{field} must be a non-negative decimal integer")),
+        },
+    }
 }
 
 fn query_request(arguments: &QueryIndexArguments) -> Result<QueryRequest, String> {
@@ -726,14 +804,25 @@ fn query_request(arguments: &QueryIndexArguments) -> Result<QueryRequest, String
     Ok(QueryRequest {
         scan_id: arguments.scan_id.clone(),
         filter: EntryFilter {
-            parent_id: parse_u64(filter.parent_id.as_deref())
+            // Resolved against the index once the connection is open.
+            under: None,
+            parent_id: optional_u64(filter.parent_id.as_deref(), "parentId")?
                 .map(|id| id.min(i64::MAX as u64) as i64),
             name_contains: filter.name_contains.clone(),
             extension: filter.extension.clone(),
-            min_allocated_bytes: parse_u64(filter.min_allocated_bytes.as_deref()),
-            max_allocated_bytes: parse_u64(filter.max_allocated_bytes.as_deref()),
-            modified_before_nanoseconds: parse_u64(filter.modified_before_nanoseconds.as_deref()),
-            owner_id: parse_u64(filter.owner_id.as_deref()),
+            min_allocated_bytes: optional_u64(
+                filter.min_allocated_bytes.as_deref(),
+                "minAllocatedBytes",
+            )?,
+            max_allocated_bytes: optional_u64(
+                filter.max_allocated_bytes.as_deref(),
+                "maxAllocatedBytes",
+            )?,
+            modified_before_nanoseconds: optional_u64(
+                filter.modified_before_nanoseconds.as_deref(),
+                "modifiedBeforeNanoseconds",
+            )?,
+            owner_id: optional_u64(filter.owner_id.as_deref(), "ownerId")?,
             kinds,
         },
         sort,
@@ -1070,6 +1159,73 @@ mod tests {
         ));
         assert_eq!(output[0]["event"], "error");
         assert_eq!(output[0]["error"]["code"], "unknown-request");
+    }
+
+    #[test]
+    fn a_malformed_numeric_argument_is_refused_rather_than_ignored() {
+        let sandbox = Sandbox::new("protocol-numbers");
+        sandbox.directory(b"index");
+        let index = crate::base64::encode(sandbox.path().join("index").as_os_str().as_bytes());
+        let root = crate::base64::encode(&sandbox.bytes());
+
+        let output = responses(&format!(
+            "{{\"protocolVersion\":1,\"requestId\":\"scan-1\",\"operation\":\"scan\",\"arguments\":{{\
+               \"roots\":[\"{root}\"],\"crossFilesystems\":false,\"excludes\":[],\
+               \"accounting\":\"allocated\",\"indexDirectory\":\"{index}\",\"maxDepth\":\"deep\"}}}}\n",
+        ));
+        assert_eq!(output[0]["event"], "error");
+        assert_eq!(output[0]["error"]["code"], "invalid-arguments");
+        assert!(
+            output[0]["error"]["message"]
+                .as_str()
+                .unwrap()
+                .contains("maxDepth")
+        );
+    }
+
+    #[test]
+    fn a_subtree_that_was_never_scanned_is_refused_not_answered_with_an_empty_page() {
+        let sandbox = Sandbox::new("protocol-subtree");
+        sandbox.directory(b"index");
+        sandbox.file(b"a.txt", 32);
+        let index = sandbox.path().join("index");
+        let index_bytes = index.as_os_str().as_bytes();
+
+        let scan = session(
+            &[scan_request("scan-1", &sandbox.bytes(), index_bytes)],
+            |events| terminal(events, "scan-1"),
+        );
+        let scan_id = scan.last().unwrap()["result"]["scanId"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        // The scan reports the filesystem it read, which is what makes two
+        // snapshots comparable.
+        assert!(
+            !scan.last().unwrap()["result"]["filesystems"]
+                .as_array()
+                .unwrap()
+                .is_empty()
+        );
+
+        let mut absent = sandbox.bytes();
+        absent.extend_from_slice(b"/never-created");
+        let output = responses(&format!(
+            "{{\"protocolVersion\":1,\"requestId\":\"query-index-1\",\"operation\":\"query-index\",\
+              \"arguments\":{{\"scanId\":\"{scan_id}\",\"indexDirectory\":\"{}\",\
+              \"filter\":{{\"underPath\":\"{}\"}},\"sort\":\"allocated\",\"order\":\"descending\",\
+              \"limit\":\"10\"}}}}\n",
+            crate::base64::encode(index_bytes),
+            crate::base64::encode(&absent),
+        ));
+        assert_eq!(output[0]["event"], "error");
+        assert_eq!(output[0]["error"]["code"], "invalid-arguments");
+        assert!(
+            output[0]["error"]["message"]
+                .as_str()
+                .unwrap()
+                .contains("not in this scan")
+        );
     }
 
     #[test]

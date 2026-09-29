@@ -36,7 +36,6 @@ async function buildContext(): Promise<CliContext> {
       explore: services.explore,
       snapshots: services.snapshots,
       defaults: services.scanDefaults,
-      filesystemsUnder: (roots) => services.filesystemsUnder(roots),
     },
     // Ctrl+C asks a running command to stop at a safe boundary; it does not
     // tear the process down and leave the work unreported.

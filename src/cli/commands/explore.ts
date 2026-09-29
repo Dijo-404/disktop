@@ -1,8 +1,8 @@
 import { boundedLimit, olderThanNanoseconds, parseSize } from "../../application/explore.js";
 import type { EntryFilter, EntrySort, SortOrder } from "../../ports/scan.js";
 import type { SnapshotSummary } from "../../ports/snapshots.js";
-import { isWithin, pathBytes } from "../../domain/paths.js";
-import { rawPathFromUtf8 } from "../../domain/paths.js";
+import type { RawPath } from "../../domain/models.js";
+import { isWithin, pathBytes, rawPathFromUtf8 } from "../../domain/paths.js";
 import type { CliContext } from "../context.js";
 import {
   EXIT,
@@ -52,6 +52,18 @@ export async function runExplore(context: CliContext, options: ExploreOptions): 
     );
   }
 
+  if (options.cursor !== undefined && !/^[A-Za-z0-9._~-]{1,512}$/.test(options.cursor)) {
+    return refuse(
+      context,
+      options.asJson,
+      "invalid-input",
+      "'--cursor' takes a cursor Disktop printed. Run the command without it to start again.",
+    );
+  }
+  if (options.limit !== undefined && !/^[1-9][0-9]*$/.test(options.limit)) {
+    return refuse(context, options.asJson, "invalid-input", "'--limit' accepts a whole number of entries from 1 to 1000.");
+  }
+
   const filter = buildFilter(options, context.now());
   if (filter === "invalid-size") {
     return refuse(context, options.asJson, "invalid-input", "'--min-size' and '--max-size' accept a size such as 1GiB or 4096.");
@@ -62,7 +74,10 @@ export async function runExplore(context: CliContext, options: ExploreOptions): 
 
   const outcome = await context.storage.explore.page({
     scanId: snapshot.scanId,
-    filter,
+    // The path narrows the listing to that subtree. Using it only to choose a
+    // snapshot would answer with the largest entries in the whole scan while
+    // appearing to answer about this directory.
+    filter: { ...filter, underPath: wanted },
     sort: options.sort ?? "allocated",
     order: options.order ?? "descending",
     limit: boundedLimit(options.limit === undefined ? undefined : Number(options.limit)),
@@ -130,8 +145,8 @@ export async function runExplore(context: CliContext, options: ExploreOptions): 
 }
 
 /** The newest snapshot one of whose roots is the path or an ancestor of it. */
-async function newestCovering(context: CliContext, wanted: { bytesBase64: string }): Promise<SnapshotSummary | undefined> {
-  const target = pathBytes(wanted as never);
+async function newestCovering(context: CliContext, wanted: RawPath): Promise<SnapshotSummary | undefined> {
+  const target = pathBytes(wanted);
   const snapshots = await context.storage.snapshots.list();
   return snapshots.find((snapshot) => snapshot.scope.roots.some((root) => isWithin(pathBytes(root), target)));
 }
