@@ -19,6 +19,8 @@ application use cases --> domain models and policy
 
 `src/domain` contains data types, sizes, path representation, action policy, and errors without I/O. `src/ports` defines the interfaces an application use case needs. `src/application` coordinates inventory, scan, findings, snapshots, action planning, application, undo, and alerts. `src/cli` and `src/tui` call those use cases. They must not import a Linux command adapter or the native client to perform a feature directly.
 
+The dependency direction is enforced by the layer rules in `eslint.config.mjs` and checked by `tests/unit/dependency-rules.test.mjs`, not by review alone: domain imports nothing outside itself, application reaches adapters only through a port, CLI/TUI/reports cannot import the native client or a Linux adapter or spawn a process, and a provider can neither run a command nor import a destructive filesystem call.
+
 `src/platform/linux` implements device, mount, capacity, package, diagnostic, manager, and notification adapters. `src/providers` discovers user-facing findings, particularly development environments, caches, and large application data. `src/storage` owns Disktop's own config, compact snapshots, cached projections, and stored plan metadata. `src/native` communicates with the bundled Rust child process. Linux implementations belong behind ports so the boundary can host a future platform adapter; macOS behavior is outside the Linux `1.0.0` release.
 
 ## Why there is a Rust helper

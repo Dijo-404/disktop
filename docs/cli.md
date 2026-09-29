@@ -1,6 +1,6 @@
 # CLI contract
 
-Status: planned `1.0.0` command surface. In the current scaffold, only help and version are available; feature commands report not implemented. The exact parser, generated help, completions, and `schemas/cli/v1/` will become normative as they are implemented. See [PLAN.md](../PLAN.md#cli-and-outputs).
+Status: planned `1.0.0` command surface. In the current scaffold, only help and version are available; feature commands report not implemented. The JSON output contract in [`schemas/cli/v1/`](../schemas/cli/v1/) is normative now and is validated by `tests/contract/cli-schema.test.mjs`; the parser, generated help, and completions become normative as they are implemented. See [PLAN.md](../PLAN.md#cli-and-outputs).
 
 ## Command tree
 
@@ -35,7 +35,9 @@ The parser in `src/cli/parser.ts` will define commands and options once, and dri
 
 ## Machine output
 
-- JSON is versioned and validated against `schemas/cli/v1/`. Filesystem identities, counts, byte values, and nanosecond timestamps use decimal strings to avoid rounding. A raw path has a base64 byte value and a separately sanitized display value where lossless paths are needed.
+- Every `--json` command writes exactly one `envelope.json` object to stdout: `schemaVersion`, `command`, `generatedAt`, `status`, `exitCode`, optional `warnings`, and then `data` or, when the status is `error`, `error`. An incomplete result must carry at least one warning.
+- Filesystem identities, counts, byte values, and nanosecond timestamps are decimal strings, never JSON numbers. A path is `{bytesBase64, display, utf8?}`; only `bytesBase64` is lossless, and `display` cannot contain control characters. See [adr/0005](adr/0005-lossless-values-in-contracts.md).
+- Objects are closed to unknown fields, so new output requires a schema change in the same commit.
 - Structured output goes to stdout. Progress, diagnostics, and permission messages go to stderr. A failed JSON command still emits a schema-compatible error object when possible.
 - Every scan result includes scope, completeness, scanned entry count, inaccessible directory count, excluded mounts, and warnings. A missing optional tool or denied permission is a capability state, not an empty successful result.
 - CSV export quotes and escapes fields and prefixes dangerous spreadsheet-leading cells (`=`, `+`, `-`, `@`). HTML export escapes all file and provider text. Export formats label allocated versus apparent bytes, estimates, and partial scans.
