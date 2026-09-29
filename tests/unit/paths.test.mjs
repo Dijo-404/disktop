@@ -51,3 +51,23 @@ test("containment compares whole path segments, not string prefixes", () => {
   assert.equal(isWithin(utf8("/"), utf8("/etc")), true);
   assert.equal(isWithin(utf8("/home/example/.cache"), utf8("/home/example")), false);
 });
+
+test("display text also neutralizes C1 controls and bidirectional overrides", () => {
+  const dangerous = [
+    ["\u009b2K", "\u009b"],
+    ["‮gnp.exe", "‮"],
+    ["⁦spoof⁩", "⁦"],
+    ["a b", " "],
+    ["a‏b", "‏"],
+  ];
+  for (const [name, codePoint] of dangerous) {
+    const { display } = rawPathFromUtf8(`/home/example/${name}`);
+    assert.doesNotMatch(display, new RegExp(codePoint), name);
+    assert.match(display, /<U\+[0-9A-F]{4}>/, name);
+  }
+});
+
+test("legitimate text, including emoji sequences, is left intact", () => {
+  const name = "/home/example/famille \u{1F468}‍\u{1F469}‍\u{1F467}.txt";
+  assert.equal(rawPathFromUtf8(name).display, name);
+});

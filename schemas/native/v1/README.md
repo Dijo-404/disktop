@@ -7,13 +7,17 @@ shape the current helper build can produce.
 
 What the schemas fix now, before the operations exist:
 
-- Paths cross the boundary as base64 raw bytes only. A display string is not a valid
-  path value, so a target can never be reconstructed from sanitized text.
+- Wherever a path argument is specified, it is base64 raw bytes. A display string is not
+  a valid value for one, so a target can never be reconstructed from sanitized text.
 - Device and inode numbers, byte sizes, and nanosecond timestamps are base-10 strings,
   outside the range where a JSON number would round.
-- Every mutation request carries the reviewed `planId` and, per target, the
-  `{device, inode, mountId, kind, apparentBytes, modifiedNanoseconds}` the plan observed.
-  There is no shape for a mutation without a plan or without a fingerprint.
+- For the mutations whose arguments are fixed here — `trash`, `erase`, `empty-trash` —
+  the request carries the reviewed `planId` and, per target, the
+  `{device, inode, mountId, kind, apparentBytes, modifiedNanoseconds}` the plan observed;
+  there is no valid shape without both. `restore`, `copy-move`, `compress`, and
+  `dedup-hardlink` still validate as an open `arguments` object and must adopt
+  `common.json#/$defs/mutationArguments` in the phase that implements them. Until then the
+  schema does not constrain them, and the helper refuses them outright.
 - `scan` has no option to follow symlinks, because it never does.
 - Requests and events are closed to unknown fields, and `requestId` is restricted to an
   alphabet that is safe to echo into logs.

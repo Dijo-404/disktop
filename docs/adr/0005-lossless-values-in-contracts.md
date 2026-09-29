@@ -19,10 +19,18 @@ bytes and is the only value an operation may resolve, `display` is sanitized tex
 terminals, HTML, CSV, and logs, and `utf8` is present only when the bytes decode
 losslessly.
 
-Sanitizing replaces C0 control bytes with their Unicode Control Pictures and invalid
-sequences with U+FFFD, so two different names never render identically and a crafted
-filename cannot emit escape sequences. CSV additionally prefixes a cell beginning `=`,
-`+`, `-`, or `@`; HTML escapes every value.
+Sanitizing replaces C0 control bytes with their Unicode Control Pictures, DEL with its
+picture, and invalid sequences with U+FFFD. C1 controls, the line and paragraph
+separators, and the bidirectional marks, overrides, and isolates become `<U+XXXX>`,
+because U+009B is CSI to a terminal reading UTF-8 and U+202E makes one name render as
+another. Zero-width joiners are left alone: they carry meaning inside real emoji
+sequences. CSV additionally prefixes a cell beginning `=`, `+`, `-`, or `@`; HTML escapes
+every value.
+
+This makes display text safe to print. It does not make it unique — two byte sequences
+can still render the same — which is why an operation is identified by `bytesBase64` and
+never by what the user reads. A confirmation prompt therefore shows scope and counts, not
+a name alone.
 
 The JSON Schemas in `schemas/` enforce this: a byte total typed as a JSON number and a
 path given only as a display string both fail validation, and the negative examples in

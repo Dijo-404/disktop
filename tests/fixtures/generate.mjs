@@ -7,23 +7,38 @@
  */
 import { chmod, link, mkdir, mkdtemp, open, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join, resolve } from "node:path";
 
 const PREFIX = "disktop-fixture-";
 const SPARSE_BYTES = 1024 * 1024;
 
 const removed = new WeakSet();
 
+/**
+ * A sandbox is a direct child of the system temporary directory whose name
+ * starts with the fixture prefix. The path is resolved first, so a root
+ * carrying `..` cannot borrow a valid prefix to reach real data.
+ */
+function assertSandbox(root) {
+  const resolved = resolve(root);
+  if (dirname(resolved) !== resolve(tmpdir()) || !basenameOf(resolved).startsWith(PREFIX)) {
+    throw new Error(`${root} is not a Disktop fixture sandbox`);
+  }
+  return resolved;
+}
+
+function basenameOf(path) {
+  return path.slice(path.lastIndexOf("/") + 1);
+}
+
 function sandboxCleanup(fixture) {
   return async () => {
     if (removed.has(fixture)) {
       throw new Error(`Fixture ${fixture.root} was already removed`);
     }
-    if (!fixture.root.startsWith(join(tmpdir(), PREFIX))) {
-      throw new Error(`${fixture.root} is not a Disktop fixture sandbox`);
-    }
+    const resolved = assertSandbox(fixture.root);
     removed.add(fixture);
-    await rm(fixture.root, { recursive: true, force: true });
+    await rm(resolved, { recursive: true, force: true });
   };
 }
 
@@ -38,6 +53,21 @@ function bytePath(root, nameBytes) {
 
 export async function createStandardFixture() {
   const root = await sandbox();
+  try {
+    return await buildStandardFixture(root);
+  } catch (error) {
+    await restoreAndRemove(root);
+    throw error;
+  }
+}
+
+/** Make the tree removable again before deleting it: 0o000 defeats rm -rf. */
+export async function restoreAndRemove(root) {
+  await chmod(join(assertSandbox(root), "unreadable-directory"), 0o700).catch(() => undefined);
+  await rm(assertSandbox(root), { recursive: true, force: true });
+}
+
+async function buildStandardFixture(root) {
   const manifest = [];
   const record = (name, path, extra = {}) => {
     manifest.push({ name, path, ...extra });
@@ -104,9 +134,10 @@ export async function createStandardFixture() {
   record("changing-file", changing);
 
   const fixture = { root, manifest };
+  const remove = sandboxCleanup(fixture);
   fixture.cleanup = async () => {
-    await chmod(unreadable, 0o700).catch(() => undefined);
-    await sandboxCleanup(fixture)();
+    await chmod(join(assertSandbox(fixture.root), "unreadable-directory"), 0o700).catch(() => undefined);
+    await remove();
   };
   return fixture;
 }

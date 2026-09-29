@@ -26,15 +26,19 @@ exclude_windows_mounts = true
 excludes = ["/proc", "/sys", "/dev", "/run"]
 
 [find]
-# "Not modified since" threshold for stale candidates, in days.
+# "Not modified since" threshold for stale candidates, in days. 1 to 3650.
 stale_after_days = 183
 
 [snapshots]
-keep_latest = 20
+keep_latest = 20  # 1 to 1000
 
 [cleanup]
-# How long a reviewed plan stays applicable, in minutes.
+# How long a reviewed plan stays applicable, in minutes. 1 to 1440, so a typo
+# cannot leave a reviewed plan applicable indefinitely.
 plan_expiry_minutes = 60
-# Extra user-owned roots generic cleanup may act inside. A protected system
-# root is refused here; there is no setting that widens cleanup to one.
+# Extra user-owned roots generic cleanup may act inside. Refused here: a
+# protected system root, and a shared container root such as /home, /tmp,
+# /var/tmp, /mnt, /media or /run/media, since allowing /home would reach every
+# other account. A root listed here is the scope of cleanup, never a target
+# itself. There is no setting that widens cleanup past this.
 additional_allowed_roots = []

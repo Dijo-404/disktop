@@ -62,3 +62,31 @@ test("destructive filesystem calls are refused outside Disktop's own storage", a
   );
   await assertAccepted("src/storage/snapshots.ts", 'import { rm } from "node:fs/promises";\nexport const x = rm;\n');
 });
+
+test("the executable entry point and the ports are layered too", async () => {
+  await assertRefused("src/bin/disktop.ts", 'import { spawn } from "node:child_process";\nexport const x = spawn;\n', "entry point");
+  await assertRefused(
+    "src/bin/disktop.ts",
+    'import { linuxInventory } from "../platform/linux/inventory/index.js";\nexport const x = linuxInventory;\n',
+    "entry point",
+  );
+  await assertRefused(
+    "src/ports/scan.ts",
+    'import { linuxInventory } from "../platform/linux/inventory/index.js";\nexport const x = linuxInventory;\n',
+    "port",
+  );
+  await assertAccepted("src/ports/scan.ts", 'import type { RawPath } from "../domain/models.js";\nexport type X = RawPath;\n');
+});
+
+test("a destructive call cannot be reached through a computed or destructured name", async () => {
+  await assertRefused(
+    "src/cli/commands/clean.ts",
+    'import fs from "node:fs";\nexport const go = () => fs["rm"]("/tmp/x");\n',
+    "Rust helper",
+  );
+  await assertRefused(
+    "src/cli/commands/clean.ts",
+    'import fs from "node:fs";\nconst { rm } = fs;\nexport const go = () => rm("/tmp/x");\n',
+    "Rust helper",
+  );
+});

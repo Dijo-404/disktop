@@ -2,7 +2,7 @@
 
 Status: design contract. No cleanup is implemented in the current scaffold. The rules here apply to all future generic and manager-backed actions and are expanded in [PLAN.md](../PLAN.md#action-and-safety-architecture). [threat-model.md](threat-model.md) states the attackers and residual risks these rules answer to; [adr/0004](adr/0004-reviewed-action-pipeline.md) records why there is one pipeline and one journal.
 
-The refusal policy is code, not only prose: `src/domain/protected-paths.ts` classifies a target against protected roots, the home directory itself, mount roots, Trash, Disktop state, and the allowed roots, and refuses an unnormalized or relative path rather than resolving it. The helper repeats these checks independently against live descriptors.
+The refusal policy is code, not only prose: `src/domain/protected-paths.ts` classifies a target against protected roots, shared container roots such as `/home` and `/tmp`, the home directory itself, mount roots, Trash, Disktop state, and the allowed roots. An allowed root is the scope of cleanup and never a target itself; an unnormalized or relative path is refused rather than resolved; and an incomplete mount or excluded-root context refuses everything rather than skipping a rule. The policy sees only path bytes, so ownership and parent safety are checked by the helper against live descriptors.
 
 ## Trust boundaries
 
