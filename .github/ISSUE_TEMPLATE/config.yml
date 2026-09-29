@@ -1,0 +1,5 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Private security report
+    url: https://github.com/Dijo-404/disktop/security/advisories/new
+    about: Use private vulnerability reporting for exploitable or destructive bugs. If unavailable, follow SECURITY.md for a private contact route.

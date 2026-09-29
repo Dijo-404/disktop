@@ -1,0 +1,53 @@
+{
+  "name": "disktop",
+  "version": "0.0.0",
+  "private": true,
+  "description": "Development scaffold for a Linux terminal storage manager and analyzer",
+  "keywords": ["linux", "disk-usage", "storage", "tui", "cleanup"],
+  "type": "module",
+  "license": "Apache-2.0",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Dijo-404/disktop.git"
+  },
+  "homepage": "https://github.com/Dijo-404/disktop#readme",
+  "bugs": "https://github.com/Dijo-404/disktop/issues",
+  "bin": {
+    "disktop": "./dist/bin/disktop.js"
+  },
+  "files": [
+    "dist/",
+    "vendor/bin/",
+    "docs/",
+    "PLAN.md",
+    "AGENTS.md",
+    "CHANGELOG.md",
+    "CONTRIBUTING.md",
+    "SECURITY.md",
+    "README.md",
+    "LICENSE"
+  ],
+  "engines": {
+    "node": ">=24.0.0"
+  },
+  "os": [
+    "linux"
+  ],
+  "scripts": {
+    "build": "tsc -p tsconfig.json && node scripts/set-executable.mjs",
+    "build:native": "cargo build --locked --manifest-path native/disktop-fs/Cargo.toml",
+    "typecheck": "tsc --noEmit -p tsconfig.json",
+    "lint": "eslint src",
+    "test": "npm run build && node --test tests/unit/*.test.mjs tests/contract/*.test.mjs",
+    "test:integration": "npm run build && npm run build:native && node --test tests/integration/*.test.mjs",
+    "test:pty": "npm run build && node --test tests/pty/*.test.mjs",
+    "check": "npm run typecheck && npm run lint && npm test && npm run test:integration && npm run test:pty",
+    "prepack": "npm run build"
+  },
+  "devDependencies": {
+    "@types/node": "24.19.0",
+    "eslint": "10.11.0",
+    "typescript": "6.0.3",
+    "typescript-eslint": "8.71.0"
+  }
+}

@@ -1,0 +1,179 @@
+name: Publish the single initial npm release
+
+# Deliberately manual. Configure the npm-publish environment with a required
+# reviewer and the one-time granular NPM_TOKEN secret before dispatching.
+on:
+  workflow_dispatch:
+    inputs:
+      release_tag:
+        description: Reviewed release tag
+        required: true
+        type: choice
+        options:
+          - v1.0.0
+      expected_commit:
+        description: Full commit SHA pointed to by the reviewed tag
+        required: true
+        type: string
+      confirmation:
+        description: Type PUBLISH v1.0.0 after the Phase 8 gate passes
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: disktop-initial-npm-publish
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    name: Audit and publish v1.0.0
+    if: >-
+      ${{ github.repository == 'Dijo-404/disktop' &&
+          github.ref_name == github.event.repository.default_branch &&
+          inputs.release_tag == 'v1.0.0' &&
+          inputs.confirmation == 'PUBLISH v1.0.0' }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    environment: npm-publish
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - name: Require a public source repository
+        if: github.event.repository.private
+        run: |
+          echo '::error::npm provenance requires a public source repository.'
+          exit 1
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: refs/tags/v1.0.0
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: '24'
+          registry-url: https://registry.npmjs.org
+          package-manager-cache: false
+      - name: Install pinned Rust toolchain
+        run: rustup toolchain install 1.93.0 --profile minimal --component rustfmt clippy
+      - name: Verify reviewed tag and package metadata
+        env:
+          EXPECTED_COMMIT: ${{ inputs.expected_commit }}
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+          REPOSITORY: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          # workflow_dispatch attests GITHUB_SHA. It must be the tagged source.
+          test "$GITHUB_SHA" = "$EXPECTED_COMMIT"
+          test "$(git rev-parse HEAD)" = "$EXPECTED_COMMIT"
+          test "$(git rev-list -n 1 v1.0.0)" = "$EXPECTED_COMMIT"
+          git fetch origin "$DEFAULT_BRANCH"
+          git merge-base --is-ancestor HEAD FETCH_HEAD
+          node --input-type=module <<'NODE'
+          import fs from 'node:fs';
+          const pkg = JSON.parse(fs.readFileSync('package.json', 'utf8'));
+          const expectedRepository = `git+https://github.com/${process.env.REPOSITORY}.git`;
+          if (pkg.name !== 'disktop' || pkg.version !== '1.0.0' || pkg.private !== false) {
+            throw new Error('Tag must contain the public disktop@1.0.0 package');
+          }
+          if (pkg.repository?.url !== expectedRepository) {
+            throw new Error(`repository.url must be ${expectedRepository}`);
+          }
+          NODE
+      - name: Install locked npm dependencies
+        run: npm ci
+      - name: Run TypeScript and contract gates
+        run: |
+          npm run typecheck
+          npm run lint
+          npm test
+      - name: Run Rust gates
+        run: |
+          cargo fmt --manifest-path native/disktop-fs/Cargo.toml --all -- --check
+          cargo clippy --manifest-path native/disktop-fs/Cargo.toml --all-targets -- -D warnings
+          cargo test --manifest-path native/disktop-fs/Cargo.toml
+      - name: Run Linux integration and terminal gates
+        run: |
+          npm run test:integration
+          npm run test:pty
+      - name: Build the release package and four native targets
+        run: |
+          npm run build:native
+          npm run build
+      - name: Verify native checksums and executable bits
+        run: |
+          set -euo pipefail
+          cd vendor/bin
+          test -s SHA256SUMS
+          sha256sum --check SHA256SUMS
+          for binary in \
+            disktop-fs-linux-x64-gnu \
+            disktop-fs-linux-x64-musl \
+            disktop-fs-linux-arm64-gnu \
+            disktop-fs-linux-arm64-musl; do
+            test -x "$binary"
+          done
+      - name: Pack the exact artifact for review and publication
+        id: pack
+        run: |
+          set -euo pipefail
+          archive="$(npm pack --ignore-scripts --pack-destination "$RUNNER_TEMP" --silent)"
+          test "$archive" = 'disktop-1.0.0.tgz'
+          printf 'path=%s/%s\n' "$RUNNER_TEMP" "$archive" >> "$GITHUB_OUTPUT"
+          tar -tzf "$RUNNER_TEMP/$archive" | sed '/\/$/d' | sort > "$RUNNER_TEMP/package-files.txt"
+          for item in \
+            package/vendor/bin/SHA256SUMS \
+            package/vendor/bin/disktop-fs-linux-x64-gnu \
+            package/vendor/bin/disktop-fs-linux-x64-musl \
+            package/vendor/bin/disktop-fs-linux-arm64-gnu \
+            package/vendor/bin/disktop-fs-linux-arm64-musl; do
+            grep -Fx "$item" "$RUNNER_TEMP/package-files.txt"
+          done
+          if grep -Ev '^package/(dist/|vendor/bin/|docs/|PLAN\.md$|AGENTS\.md$|CHANGELOG\.md$|CONTRIBUTING\.md$|SECURITY\.md$|README\.md$|LICENSE$|package\.json$)' "$RUNNER_TEMP/package-files.txt"; then
+            echo '::error::Unexpected files in npm archive; update the audited allowlist only after review.'
+            exit 1
+          fi
+          mkdir -p "$RUNNER_TEMP/disktop-unpacked"
+          tar -xzf "$RUNNER_TEMP/$archive" -C "$RUNNER_TEMP/disktop-unpacked"
+          cd "$RUNNER_TEMP/disktop-unpacked/package/vendor/bin"
+          sha256sum --check SHA256SUMS
+          for binary in \
+            disktop-fs-linux-x64-gnu \
+            disktop-fs-linux-x64-musl \
+            disktop-fs-linux-arm64-gnu \
+            disktop-fs-linux-arm64-musl; do
+            test -x "$binary"
+          done
+          sha256sum "$RUNNER_TEMP/$archive"
+      - name: Install and smoke test the packed artifact
+        env:
+          ARCHIVE: ${{ steps.pack.outputs.path }}
+        run: |
+          set -euo pipefail
+          npm install --global --prefix "$RUNNER_TEMP/disktop-global" --ignore-scripts "$ARCHIVE"
+          "$RUNNER_TEMP/disktop-global/bin/disktop" --help
+          npm exec --yes --package "$ARCHIVE" -- disktop --help
+      - name: Require the one-time first-publish token
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: |
+          if [ -z "$NODE_AUTH_TOKEN" ]; then
+            echo '::error::Missing NPM_TOKEN in the protected npm-publish environment.'
+            exit 1
+          fi
+      - name: Publish audited v1.0.0 with provenance
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+          ARCHIVE: ${{ steps.pack.outputs.path }}
+        run: npm publish "$ARCHIVE" --ignore-scripts --provenance --access public
+      - name: Verify registry package and provenance
+        run: |
+          set -euo pipefail
+          test "$(npm view disktop@1.0.0 version)" = '1.0.0'
+          mkdir -p "$RUNNER_TEMP/disktop-registry-check"
+          npm install --prefix "$RUNNER_TEMP/disktop-registry-check" --ignore-scripts disktop@1.0.0
+          cd "$RUNNER_TEMP/disktop-registry-check"
+          npm audit signatures

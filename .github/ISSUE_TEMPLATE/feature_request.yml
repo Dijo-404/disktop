@@ -1,0 +1,43 @@
+name: Feature request
+description: Propose a user-facing capability or improvement for Disktop.
+title: "Feature: "
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Read [PLAN.md](https://github.com/Dijo-404/disktop/blob/main/PLAN.md) first. The Linux features in its acceptance matrix are already in scope for the single 1.0.0 release. Use this form to clarify a behavior or propose an additional need.
+  - type: textarea
+    id: user-goal
+    attributes:
+      label: User goal
+      description: What storage problem are you trying to solve, and what do you do today?
+    validations:
+      required: true
+  - type: textarea
+    id: proposed-behavior
+    attributes:
+      label: Proposed behavior
+      description: Describe the result or interaction a user should see. Include a sample command or TUI flow if helpful.
+    validations:
+      required: true
+  - type: textarea
+    id: scope
+    attributes:
+      label: Scope and plan link
+      description: Name the PLAN.md acceptance row or relevant module if known. This field is optional for users unfamiliar with the codebase.
+    validations:
+      required: false
+  - type: textarea
+    id: safety
+    attributes:
+      label: Safety and platform behavior
+      description: If this scans or changes files, describe expected permissions, preview, undo, and incomplete-result behavior. State any Linux tools or filesystems it depends on.
+    validations:
+      required: false
+  - type: textarea
+    id: acceptance
+    attributes:
+      label: Example acceptance check
+      description: Give a small example that would show the feature works, including output or ordering if relevant.
+    validations:
+      required: true

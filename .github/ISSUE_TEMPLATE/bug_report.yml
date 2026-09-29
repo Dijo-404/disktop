@@ -1,0 +1,77 @@
+name: Bug report
+description: Report a reproducible Disktop problem that can be discussed publicly.
+title: "Bug: "
+body:
+  - type: markdown
+    attributes:
+      value: |
+        If this may expose data or allow unintended deletion, protected-path bypass, restore corruption, or command injection, stop and report it privately using [SECURITY.md](https://github.com/Dijo-404/disktop/blob/main/SECURITY.md). Do not post exploitable steps, real paths, or personal data in a public issue.
+  - type: dropdown
+    id: area
+    attributes:
+      label: Affected area
+      options:
+        - Devices and capacity
+        - Scanning, index, or snapshots
+        - Findings and application inventory
+        - Cleanup, Trash, or undo
+        - CLI, TUI, or reports
+        - Installation or packaging
+        - Other
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: Version or source commit
+      description: Before 1.0.0, give the commit SHA if you built from source.
+      placeholder: "Example: commit 0123456"
+    validations:
+      required: true
+  - type: textarea
+    id: environment
+    attributes:
+      label: Linux environment
+      description: Include distribution, kernel, architecture, filesystem or mount type when relevant, and terminal details for display bugs. Omit private hostnames and paths.
+      placeholder: "Example: Fedora, Linux 6.x, x86-64, ext4, tmux at 80x24"
+    validations:
+      required: true
+  - type: textarea
+    id: reproduction
+    attributes:
+      label: Reproduction steps
+      description: Use a temporary fixture or harmless command. Do not run cleanup against real data to reproduce a bug.
+      placeholder: |
+        1. Create a small fixture under a temporary directory.
+        2. Run the command or open the view.
+        3. Observe the result.
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected behavior
+      description: Include expected counts, sizes, or action scope when they matter.
+    validations:
+      required: true
+  - type: textarea
+    id: actual
+    attributes:
+      label: Actual behavior
+      description: Include incomplete-result or permission messages as shown, with sensitive details removed.
+    validations:
+      required: true
+  - type: textarea
+    id: diagnostics
+    attributes:
+      label: Sanitized diagnostics
+      description: Optional CLI output, error text, or screenshot. Remove usernames, paths, filenames, tokens, and hostnames before posting.
+    validations:
+      required: false
+  - type: checkboxes
+    id: public-report
+    attributes:
+      label: Public report check
+      options:
+        - label: I read SECURITY.md and removed private data and exploitable security details from this report.
+          required: true
