@@ -63,6 +63,23 @@ test("destructive filesystem calls are refused outside Disktop's own storage", a
   await assertAccepted("src/storage/snapshots.ts", 'import { rm } from "node:fs/promises";\nexport const x = rm;\n');
 });
 
+test("only the composition root builds an adapter, and it imports no surface", async () => {
+  await assertAccepted(
+    "src/composition/root.ts",
+    'import { createLinuxInventory } from "../platform/linux/inventory/index.js";\nimport { createDashboardService } from "../application/dashboard.js";\nexport const x = [createLinuxInventory, createDashboardService];\n',
+  );
+  await assertRefused(
+    "src/composition/root.ts",
+    'import { runTui } from "../tui/app.js";\nexport const x = runTui;\n',
+    "never imports one",
+  );
+  await assertRefused(
+    "src/composition/root.ts",
+    'import { runCli } from "../cli/run.js";\nexport const x = runCli;\n',
+    "never imports one",
+  );
+});
+
 test("the executable entry point and the ports are layered too", async () => {
   await assertRefused("src/bin/disktop.ts", 'import { spawn } from "node:child_process";\nexport const x = spawn;\n', "entry point");
   await assertRefused(
@@ -76,6 +93,24 @@ test("the executable entry point and the ports are layered too", async () => {
     "port",
   );
   await assertAccepted("src/ports/scan.ts", 'import type { RawPath } from "../domain/models.js";\nexport type X = RawPath;\n');
+});
+
+test("a data field named like a destructive call is not a destructive call", async () => {
+  // lsblk's removable column is `rm`. Refusing to read it would push adapters
+  // into workarounds without preventing a single deletion.
+  await assertAccepted(
+    "src/platform/linux/inventory/lsblk.ts",
+    'export const removable = (row) => Boolean(row["rm"]);\n',
+  );
+  await assertAccepted(
+    "src/platform/linux/inventory/lsblk.ts",
+    'export const removable = (row) => Boolean(row.rm);\n',
+  );
+  await assertRefused(
+    "src/cli/commands/clean.ts",
+    'import fs from "node:fs";\nexport const go = () => fs.rm("/tmp/x");\n',
+    "Rust helper",
+  );
 });
 
 test("a destructive call cannot be reached through a computed or destructured name", async () => {

@@ -5,14 +5,20 @@ const DESTRUCTIVE_FS = ["rm", "rmSync", "rmdir", "rmdirSync", "unlink", "unlinkS
 const destructiveCallRefusal =
   "Only the Rust helper may mutate arbitrary filesystem paths. Route this through a reviewed action plan.";
 
-/** Refuse `fs.rm(...)` and friends reached through a namespace or default import. */
+/**
+ * Refuse `fs.rm(...)` and friends reached through a namespace or default import.
+ *
+ * Each selector is anchored to `.callee`, because `>` alone also matches a call's
+ * arguments: `parse(row["rm"])` reading an lsblk column is not a deletion, and a
+ * rule that refuses it teaches people to work around the rule.
+ */
 const noDestructiveMemberCalls = {
   "no-restricted-syntax": [
     "error",
     ...DESTRUCTIVE_FS.flatMap((name) => [
-      { selector: `CallExpression > MemberExpression[property.name='${name}']`, message: destructiveCallRefusal },
+      { selector: `CallExpression > MemberExpression.callee[property.name='${name}']`, message: destructiveCallRefusal },
       // fs["rm"](...) reaches the same function without a dotted name.
-      { selector: `CallExpression > MemberExpression[computed=true][property.value='${name}']`, message: destructiveCallRefusal },
+      { selector: `CallExpression > MemberExpression.callee[computed=true][property.value='${name}']`, message: destructiveCallRefusal },
       // const { rm } = fs; escapes no-restricted-imports, which sees only the default import.
       { selector: `ObjectPattern > Property[key.name='${name}']`, message: destructiveCallRefusal },
     ]),
@@ -66,7 +72,7 @@ export default tseslint.config(
     [
       {
         group: ["**/platform/**", "**/providers/**", "**/native/**"],
-        message: "The entry point bootstraps the CLI; it never reaches an adapter or the helper directly.",
+        message: "The entry point chooses a surface; adapters are built in src/composition, never here.",
       },
     ],
   ),
@@ -117,6 +123,19 @@ export default tseslint.config(
       {
         group: ["**/platform/**", "**/providers/**", "**/native/**"],
         message: "CLI, TUI, and reports call application use cases; they never reach an adapter or the helper directly.",
+      },
+    ],
+  ),
+
+  // The one layer allowed to build an adapter. Everything else receives what it
+  // needs as an argument, which is what lets the rules above forbid the reach.
+  layer(
+    ["src/composition/**/*.ts"],
+    [],
+    [
+      {
+        group: ["../cli/**", "../tui/**", "../reports/**", "**/cli/**", "**/tui/**", "**/reports/**"],
+        message: "The composition root builds services for a surface; it never imports one.",
       },
     ],
   ),

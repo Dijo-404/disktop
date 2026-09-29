@@ -42,3 +42,14 @@ and input decoding are exactly the parts that are easy to get subtly wrong.
 `tests/pty/` must cover 80×24, `NO_COLOR`, `TERM=dumb`, vim keys, mouse toggling, tmux,
 and restoration after `SIGINT` and after a thrown exception. The choice is not locked
 until those pass on a real PTY; ADR 0001 is revisited if `terminal-kit` fails any of them.
+
+Phase 1 evidence: `tests/pty/cli.test.mjs` drives a real 80×24 pseudo-terminal and covers
+the dashboard drawing, vim keys, `NO_COLOR`, `TERM=dumb`, quitting with `q`, and terminal
+restoration on the way out and after Ctrl+C. Keys are sent only once the program has taken
+the keyboard; sent sooner they are handled by the line discipline, which tests the kernel
+rather than Disktop. `terminal-kit` restores the cursor with the terminal's own sequence
+rather than a fixed `?25h`, so the assertion accepts either form.
+
+Still outstanding before the choice is locked: mouse toggling, tmux, and SSH, plus
+restoration after a thrown exception. The renderer registers that handler already; nothing
+in Phase 1 can throw inside the draw loop to exercise it.

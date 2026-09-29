@@ -1,4 +1,6 @@
-import { runCli, type CliOutput } from "./parser.js";
+import type { CliContext } from "./context.js";
+import type { CliOutput } from "./parser.js";
+import { runCli } from "./run.js";
 
 /** Match the Node versions tested and supported by the CLI. */
 export function isSupportedNodeVersion(version: string): boolean {
@@ -16,18 +18,26 @@ export function isSupportedNodeVersion(version: string): boolean {
   return match[1] === "24" ? minor >= 21 : minor >= 10;
 }
 
-export function bootstrapCli(
+export const UNSUPPORTED_RUNTIME_EXIT = 2;
+
+/**
+ * Refuse an untested runtime before anything reads a device.
+ *
+ * `engines` only warns unless npm is configured to enforce it, so the check
+ * happens here too rather than trusting the installer.
+ */
+export async function bootstrapCli(
   args: readonly string[],
-  packageVersion: string,
   nodeVersion: string,
   output: CliOutput,
-): number {
+  buildContext: () => Promise<CliContext>,
+): Promise<number> {
   if (!isSupportedNodeVersion(nodeVersion)) {
     output.stderr(
       `Disktop requires Node.js 24.21.0 or later in 24.x, or 26.10.0 or later in 26.x; found ${nodeVersion}.\n`,
     );
-    return 2;
+    return UNSUPPORTED_RUNTIME_EXIT;
   }
 
-  return runCli(args, packageVersion, output);
+  return runCli(args, await buildContext());
 }
