@@ -3,17 +3,26 @@
   "command": "dashboard",
   "generatedAt": "2026-09-29T08:15:04.117Z",
   "status": "complete",
-  "exitCode": 1,
+  "exitCode": 0,
   "data": {
-    "capability": { "status": "available", "explanation": "Capacity read from statfs for every visible filesystem." },
+    "capability": {
+      "status": "available",
+      "explanation": "Capacity read from statfs for every visible filesystem."
+    },
     "filesystems": [
       {
         "id": "fs-259-2",
         "type": "ext4",
         "source": "/dev/nvme0n1p2",
         "mounts": [
-          { "bytesBase64": "Lw==", "display": "/" },
-          { "bytesBase64": "L2hvbWU=", "display": "/home" }
+          {
+            "bytesBase64": "Lw==",
+            "display": "/"
+          },
+          {
+            "bytesBase64": "L2hvbWU=",
+            "display": "/home"
+          }
         ],
         "totalBytes": "981450162176",
         "freeBytes": "58887012352",

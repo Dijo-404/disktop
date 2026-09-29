@@ -3,67 +3,247 @@ export interface CliOutput {
   stderr(message: string): void;
 }
 
-const plannedCommands = [
-  "devices",
-  "scan",
-  "explore",
-  "find",
-  "clean",
-  "undo",
-  "history",
-  "snapshots",
-  "report",
-  "alerts",
-  "completion",
-] as const;
+export interface OptionSpec {
+  readonly name: string;
+  readonly alias?: string;
+  readonly summary: string;
+  /** A flag stands alone; a value option takes the next argument. */
+  readonly kind: "flag" | "value";
+  readonly placeholder?: string;
+  readonly choices?: readonly string[];
+}
 
-const help = `Disktop: Linux terminal storage manager and analyzer
+export interface CommandSpec {
+  /** Words that select this command, empty for the root command. */
+  readonly path: readonly string[];
+  readonly summary: string;
+  readonly operand?: { readonly name: string; readonly required: boolean };
+  readonly options: readonly OptionSpec[];
+  readonly implemented: boolean;
+}
 
-Status: development scaffold. Storage inspection and cleanup are not implemented.
+const JSON_OPTION: OptionSpec = { name: "json", summary: "Write one JSON object to stdout instead of text", kind: "flag" };
 
-Usage:
-  disktop --help             Show this help
-  disktop --version          Show the package version
+const UNITS_OPTION: OptionSpec = {
+  name: "units",
+  summary: "Human-readable unit base",
+  kind: "value",
+  placeholder: "iec|si",
+  choices: ["iec", "si"],
+};
 
-Planned commands for the complete 1.0.0 release:
-  devices    List devices, filesystems, free space, and health
-  scan       Scan selected paths and save a snapshot
-  explore    Sort and filter space usage
-  find       Find duplicates, stale files, empty folders, and broken links
-  clean      Review and apply cleanup plans
-  undo       Restore an eligible Trash action
-  history    Inspect the action journal
-  snapshots  Compare or prune scan snapshots
-  report     Export JSON, CSV, or HTML
-  alerts     Check capacity and inode thresholds
-  completion Generate shell completion scripts
+/**
+ * The single definition of the command surface. Help is rendered from it, the
+ * parser validates against it, and shell completions are generated from it, so
+ * a command cannot exist in one of those three and not the others.
+ */
+export const COMMANDS: readonly CommandSpec[] = [
+  { path: [], summary: "Open the dashboard, or print it as JSON without a terminal", options: [JSON_OPTION, UNITS_OPTION], implemented: true },
+  { path: ["devices"], summary: "List devices, filesystems, free space, and mounts", options: [JSON_OPTION, UNITS_OPTION], implemented: true },
+  {
+    path: ["alerts", "check"],
+    summary: "Check space and inode thresholds; exit 1 when reached",
+    options: [
+      JSON_OPTION,
+      UNITS_OPTION,
+      { name: "threshold", summary: "Used percentage that raises an alert", kind: "value", placeholder: "PERCENT" },
+    ],
+    implemented: true,
+  },
+  { path: ["scan"], summary: "Scan selected paths and save a snapshot", operand: { name: "PATH", required: false }, options: [JSON_OPTION], implemented: false },
+  { path: ["explore"], summary: "Sort and filter space usage", operand: { name: "PATH", required: false }, options: [JSON_OPTION], implemented: false },
+  { path: ["find"], summary: "Find duplicates, stale files, broken links", operand: { name: "KIND", required: true }, options: [JSON_OPTION], implemented: false },
+  { path: ["snapshots"], summary: "Compare or prune scan snapshots", operand: { name: "ACTION", required: true }, options: [JSON_OPTION], implemented: false },
+  { path: ["clean"], summary: "Review and apply cleanup plans", options: [JSON_OPTION], implemented: false },
+  { path: ["history"], summary: "Inspect the action journal", options: [JSON_OPTION], implemented: false },
+  { path: ["undo"], summary: "Restore an eligible Trash action", operand: { name: "ACTION_ID", required: true }, options: [JSON_OPTION], implemented: false },
+  { path: ["report"], summary: "Export JSON, CSV, or HTML", options: [JSON_OPTION], implemented: false },
+  { path: ["timer"], summary: "Install or remove the opt-in alert timer", operand: { name: "ACTION", required: true }, options: [], implemented: false },
+  { path: ["completion"], summary: "Generate a shell completion script", operand: { name: "SHELL", required: true }, options: [], implemented: false },
+];
 
-No files are changed by this scaffold.
-`;
+export interface ParsedCommand {
+  readonly command: CommandSpec;
+  readonly operand?: string;
+  readonly flags: ReadonlySet<string>;
+  readonly values: ReadonlyMap<string, string>;
+}
 
-/** Return an exit status; CLI output is injected so it can be tested without a terminal. */
-export function runCli(args: readonly string[], version: string, output: CliOutput): number {
-  if (args.length === 1 && (args[0] === "--help" || args[0] === "-h")) {
-    output.stdout(help);
-    return 0;
-  }
+export type ParseResult =
+  | { readonly kind: "command"; readonly parsed: ParsedCommand }
+  | { readonly kind: "help"; readonly command: CommandSpec }
+  | { readonly kind: "version" }
+  | { readonly kind: "error"; readonly message: string };
 
-  if (args.length === 1 && (args[0] === "--version" || args[0] === "-v")) {
-    output.stdout(`${version}\n`);
-    return 0;
-  }
+/** Every option that takes a value, so its value is never read as a command word. */
+const VALUE_OPTION_NAMES: ReadonlySet<string> = new Set(
+  COMMANDS.flatMap((command) =>
+    command.options
+      .filter((option) => option.kind === "value")
+      .flatMap((option) => (option.alias === undefined ? [option.name] : [option.name, option.alias])),
+  ),
+);
 
-  const command = args[0];
+/** Resolve the argument list against the command table without performing any work. */
+export function parseArguments(args: readonly string[]): ParseResult {
+  const words = commandWords(args);
+  const command = selectCommand(words.map((word) => word.value));
   if (command === undefined) {
-    output.stderr("Disktop TUI is not implemented yet. Run disktop --help.\n");
-    return 2;
+    return { kind: "error", message: `Unknown Disktop command '${words.map((word) => word.value).join(" ")}'. Run disktop --help.` };
   }
 
-  if (plannedCommands.includes(command as (typeof plannedCommands)[number]) || command === "--json") {
-    output.stderr(`Disktop feature '${command}' is not implemented yet. Run disktop --help.\n`);
-    return 2;
+  // Drop only the words that named the command; an option may sit anywhere.
+  const consumed = new Set(words.slice(0, command.path.length).map((word) => word.index));
+  const remaining = args.filter((_argument, index) => !consumed.has(index));
+  const flags = new Set<string>();
+  const values = new Map<string, string>();
+  let operand: string | undefined;
+
+  for (let index = 0; index < remaining.length; index += 1) {
+    const argument = remaining[index] as string;
+
+    if (argument === "--help" || argument === "-h") {
+      return { kind: "help", command };
+    }
+    if ((argument === "--version" || argument === "-v") && command.path.length === 0) {
+      return { kind: "version" };
+    }
+
+    if (!argument.startsWith("-")) {
+      if (command.operand === undefined) {
+        return { kind: "error", message: `'${command.path.join(" ") || "disktop"}' takes no argument, but received '${argument}'.` };
+      }
+      if (operand !== undefined) {
+        return { kind: "error", message: `'${command.path.join(" ")}' takes one ${command.operand.name}, but received more than one.` };
+      }
+      operand = argument;
+      continue;
+    }
+
+    const separator = argument.indexOf("=");
+    const name = (separator < 0 ? argument : argument.slice(0, separator)).replace(/^--?/, "");
+    const inlineValue = separator < 0 ? undefined : argument.slice(separator + 1);
+    const option = command.options.find((candidate) => candidate.name === name || candidate.alias === name);
+
+    if (option === undefined) {
+      return { kind: "error", message: `'${command.path.join(" ") || "disktop"}' does not accept the option '${argument}'.` };
+    }
+
+    if (option.kind === "flag") {
+      if (inlineValue !== undefined) {
+        return { kind: "error", message: `'--${option.name}' is a flag and takes no value.` };
+      }
+      flags.add(option.name);
+      continue;
+    }
+
+    const value = inlineValue ?? remaining[index + 1];
+    if (value === undefined || (inlineValue === undefined && value.startsWith("-"))) {
+      return { kind: "error", message: `'--${option.name}' needs a ${option.placeholder ?? "value"}.` };
+    }
+    if (option.choices !== undefined && !option.choices.includes(value)) {
+      return { kind: "error", message: `'--${option.name}' accepts ${option.choices.join(" or ")}, not '${value}'.` };
+    }
+    values.set(option.name, value);
+    if (inlineValue === undefined) {
+      index += 1;
+    }
   }
 
-  output.stderr(`Unknown Disktop command or option '${command}'. Run disktop --help.\n`);
-  return 2;
+  if (command.operand?.required === true && operand === undefined) {
+    return { kind: "error", message: `'${command.path.join(" ")}' needs a ${command.operand.name}.` };
+  }
+
+  return { kind: "command", parsed: { command, ...(operand === undefined ? {} : { operand }), flags, values } };
+}
+
+/** The longest command path the leading words match, so `alerts check` beats `alerts`. */
+function selectCommand(words: readonly string[]): CommandSpec | undefined {
+  let best: CommandSpec | undefined;
+  for (const command of COMMANDS) {
+    if (command.path.every((word, index) => words[index] === word)) {
+      if (best === undefined || command.path.length > best.path.length) {
+        best = command;
+      }
+    }
+  }
+  if (best !== undefined && best.path.length === 0 && words.length > 0) {
+    return undefined;
+  }
+  return best;
+}
+
+/**
+ * The arguments that could name a command, with their original positions.
+ *
+ * A value option consumes the argument after it, so `--units si devices` selects
+ * `devices` rather than treating `si` as a command name.
+ */
+function commandWords(args: readonly string[]): { value: string; index: number }[] {
+  const words: { value: string; index: number }[] = [];
+  for (let index = 0; index < args.length; index += 1) {
+    const argument = args[index] as string;
+    if (!argument.startsWith("-")) {
+      words.push({ value: argument, index });
+      continue;
+    }
+    const name = argument.replace(/^--?/, "");
+    if (!argument.includes("=") && VALUE_OPTION_NAMES.has(name)) {
+      index += 1;
+    }
+  }
+  return words;
+}
+
+export function renderHelp(command: CommandSpec = COMMANDS[0] as CommandSpec): string {
+  const lines: string[] = [];
+
+  if (command.path.length === 0) {
+    lines.push("Disktop: Linux terminal storage manager and analyzer", "");
+    lines.push("Usage:", "  disktop [COMMAND] [OPTIONS]", "");
+    lines.push("Commands:");
+    for (const entry of COMMANDS) {
+      if (entry.path.length === 0) {
+        continue;
+      }
+      const name = [...entry.path, entry.operand === undefined ? "" : entry.operand.name].join(" ").trim();
+      const note = entry.implemented ? "" : " [planned]";
+      lines.push(`  ${name.padEnd(22)} ${entry.summary}${note}`);
+    }
+    lines.push(
+      "",
+      "[planned] commands parse and validate their options, then report that they",
+      "are not implemented. With no command Disktop opens the dashboard; with --json",
+      "it prints the dashboard instead.",
+    );
+  } else {
+    lines.push(command.summary, "");
+    const operand = command.operand === undefined ? "" : ` ${command.operand.required ? command.operand.name : `[${command.operand.name}]`}`;
+    lines.push("Usage:", `  disktop ${command.path.join(" ")}${operand} [OPTIONS]`);
+    if (!command.implemented) {
+      lines.push("", "This command is declared but not implemented yet.");
+    }
+  }
+
+  lines.push("", "Options:");
+  for (const option of [...command.options, ...HELP_OPTIONS(command)]) {
+    const placeholder = option.kind === "value" ? ` ${option.placeholder ?? "VALUE"}` : "";
+    lines.push(`  --${option.name}${placeholder}`.padEnd(24) + ` ${option.summary}`);
+  }
+
+  lines.push(
+    "",
+    "Exit status: 0 complete, 1 alert threshold reached, 2 input or operational",
+    "error, 3 incomplete result, 130 interrupted.",
+    "",
+  );
+  return lines.join("\n");
+}
+
+function HELP_OPTIONS(command: CommandSpec): readonly OptionSpec[] {
+  const help: OptionSpec = { name: "help", alias: "h", summary: "Show this help", kind: "flag" };
+  if (command.path.length > 0) {
+    return [help];
+  }
+  return [help, { name: "version", alias: "v", summary: "Show the package version", kind: "flag" }];
 }

@@ -1,0 +1,14 @@
+{
+  "schemaVersion": "1",
+  "command": "alerts check",
+  "generatedAt": "2026-09-29T08:15:04.117Z",
+  "status": "complete",
+  "exitCode": 1,
+  "data": {
+    "capability": { "status": "available", "explanation": "Capacity read from statfs for every visible filesystem." },
+    "thresholdPercent": 150,
+    "inodeThresholdPercent": 90,
+    "alerts": [],
+    "filesystems": []
+  }
+}

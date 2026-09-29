@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { bootstrapCli, isSupportedNodeVersion } from "../../dist/cli/bootstrap.js";
+import { fakeContext } from "../support/cli-context.mjs";
 
 test("only supported Node 24 and 26 versions pass the runtime gate", () => {
   for (const version of ["24.21.0", "24.21.1", "24.22.0", "26.10.0", "26.10.1", "26.11.0"]) {
@@ -14,20 +15,29 @@ test("only supported Node 24 and 26 versions pass the runtime gate", () => {
   }
 });
 
-test("CLI bootstrap refuses unsupported runtimes before handling help", () => {
-  let stdout = "";
-  let stderr = "";
+test("an untested runtime is refused before anything reads a device", async () => {
+  const context = fakeContext();
+  let built = 0;
+  const captured = { stdout: "", stderr: "" };
   const output = {
-    stdout: (message) => { stdout += message; },
-    stderr: (message) => { stderr += message; },
+    stdout: (message) => { captured.stdout += message; },
+    stderr: (message) => { captured.stderr += message; },
   };
 
-  assert.equal(bootstrapCli(["--help"], "0.0.0", "25.0.0", output), 2);
-  assert.equal(stdout, "");
-  assert.match(stderr, /requires Node\.js 24\.21\.0.*26\.10\.0.*found 25\.0\.0/);
+  const status = await bootstrapCli(["--help"], "25.0.0", output, async () => {
+    built += 1;
+    return context;
+  });
 
-  stderr = "";
-  assert.equal(bootstrapCli(["--version"], "0.0.0", "26.10.0", output), 0);
-  assert.equal(stdout, "0.0.0\n");
-  assert.equal(stderr, "");
+  assert.equal(status, 2);
+  assert.equal(built, 0, "no service is built on an unsupported runtime");
+  assert.equal(captured.stdout, "");
+  assert.match(captured.stderr, /requires Node\.js 24\.21\.0.*26\.10\.0.*found 25\.0\.0/);
+});
+
+test("a supported runtime reaches the CLI", async () => {
+  const context = fakeContext();
+  const status = await bootstrapCli(["--version"], "26.10.0", context.output, async () => context);
+  assert.equal(status, 0);
+  assert.equal(context.captured.stdout, "1.2.3\n");
 });
