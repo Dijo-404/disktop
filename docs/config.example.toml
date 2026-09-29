@@ -1,0 +1,40 @@
+# Disktop configuration. Copy to $XDG_CONFIG_HOME/disktop/config.toml
+# (or ~/.config/disktop/config.toml) and change only what you need; every
+# omitted setting keeps its default. An unknown or misspelled key is an error
+# rather than a silently ignored line, so a typo cannot disable a guard.
+#
+# Supported syntax is a subset of TOML: tables, bare keys, double-quoted
+# strings, integers, booleans, and single-line arrays.
+
+# "iec" shows KiB/MiB/GiB; "si" shows kB/MB/GB.
+units = "iec"
+
+[alerts]
+space_threshold_percent = 90
+inode_threshold_percent = 90
+# Send a desktop notification when `disktop alerts check` crosses a threshold.
+# Requires notify-send; Disktop never schedules cleanup.
+notify = false
+
+[scan]
+# Scans stay inside one filesystem unless this is enabled.
+cross_filesystems = false
+# "allocated" counts st_blocks * 512; "apparent" counts st_size.
+accounting = "allocated"
+# On WSL, keep /mnt/c and friends out of scans unless selected explicitly.
+exclude_windows_mounts = true
+excludes = ["/proc", "/sys", "/dev", "/run"]
+
+[find]
+# "Not modified since" threshold for stale candidates, in days.
+stale_after_days = 183
+
+[snapshots]
+keep_latest = 20
+
+[cleanup]
+# How long a reviewed plan stays applicable, in minutes.
+plan_expiry_minutes = 60
+# Extra user-owned roots generic cleanup may act inside. A protected system
+# root is refused here; there is no setting that widens cleanup to one.
+additional_allowed_roots = []
