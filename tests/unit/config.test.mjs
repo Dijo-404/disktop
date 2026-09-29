@@ -32,7 +32,7 @@ test("out-of-range and wrongly typed values are refused", () => {
   assert.throws(() => parseConfigDocument("[alerts]\nspace_threshold_percent = 101\n"), /0 and 100/);
   assert.throws(() => parseConfigDocument("[alerts]\nspace_threshold_percent = true\n"), /integer/);
   assert.throws(() => parseConfigDocument('[scan]\naccounting = "guessed"\n'), /allocated/);
-  assert.throws(() => parseConfigDocument("[find]\nstale_after_days = 0\n"), /at least 1/);
+  assert.throws(() => parseConfigDocument("[find]\nstale_after_days = 0\n"), /between 1 and 3650/);
 });
 
 test("configuration cannot widen cleanup to a protected root", () => {
@@ -52,4 +52,27 @@ test("the shipped example config parses and matches the defaults it documents", 
   const { readFile } = await import("node:fs/promises");
   const config = parseConfigDocument(await readFile("docs/config.example.toml", "utf8"));
   assert.deepEqual(config, DEFAULT_CONFIG);
+});
+
+test("a prototype-named table cannot smuggle settings past the unknown-key check", () => {
+  assert.throws(() => parseConfigDocument('[__proto__]\nunits = "si"\n'), /__proto__/);
+  assert.throws(() => parseConfigDocument("[constructor]\nbogus = 1\n"), /constructor/);
+  assert.throws(() => parseConfigDocument("[alerts]\n__proto__ = 1\n"), /__proto__/);
+});
+
+test("a shared container root cannot be added to the cleanup allowlist", () => {
+  for (const root of ["/home", "/tmp", "/media", "/mnt"]) {
+    assert.throws(() => parseConfigDocument(`[cleanup]\nadditional_allowed_roots = ["${root}"]\n`), /protected|shared/, root);
+  }
+});
+
+test("integer settings have an upper bound, so a typo cannot disable plan expiry", () => {
+  assert.throws(() => parseConfigDocument("[cleanup]\nplan_expiry_minutes = 99999999999999999999\n"), /expected an integer/);
+  assert.throws(() => parseConfigDocument("[snapshots]\nkeep_latest = 100000\n"), /between/);
+  assert.throws(() => parseConfigDocument("[find]\nstale_after_days = 100000\n"), /between/);
+  assert.equal(parseConfigDocument("[cleanup]\nplan_expiry_minutes = 1440\n").cleanup.planExpiryMinutes, 1440);
+});
+
+test("an empty unknown table is still an unknown table", () => {
+  assert.throws(() => parseConfigDocument("[bogus]\n"), /bogus/);
 });

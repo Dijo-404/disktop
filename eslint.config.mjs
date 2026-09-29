@@ -9,10 +9,13 @@ const destructiveCallRefusal =
 const noDestructiveMemberCalls = {
   "no-restricted-syntax": [
     "error",
-    ...DESTRUCTIVE_FS.map((name) => ({
-      selector: `CallExpression > MemberExpression[property.name='${name}']`,
-      message: destructiveCallRefusal,
-    })),
+    ...DESTRUCTIVE_FS.flatMap((name) => [
+      { selector: `CallExpression > MemberExpression[property.name='${name}']`, message: destructiveCallRefusal },
+      // fs["rm"](...) reaches the same function without a dotted name.
+      { selector: `CallExpression > MemberExpression[computed=true][property.value='${name}']`, message: destructiveCallRefusal },
+      // const { rm } = fs; escapes no-restricted-imports, which sees only the default import.
+      { selector: `ObjectPattern > Property[key.name='${name}']`, message: destructiveCallRefusal },
+    ]),
   ],
 };
 
@@ -54,6 +57,34 @@ export default tseslint.config(
     ignores: ["src/storage/**/*.ts", "src/platform/**/*.ts"],
     rules: { "no-restricted-imports": ["error", { paths: destructiveImportRefusals }] },
   },
+
+  layer(
+    ["src/bin/**/*.ts"],
+    [
+      { name: "node:child_process", message: "The entry point bootstraps the CLI; it never runs a Linux command." },
+    ],
+    [
+      {
+        group: ["**/platform/**", "**/providers/**", "**/native/**"],
+        message: "The entry point bootstraps the CLI; it never reaches an adapter or the helper directly.",
+      },
+    ],
+  ),
+
+  layer(
+    ["src/ports/**/*.ts"],
+    [
+      { name: "node:child_process", message: "A port is an interface; it performs no I/O." },
+      { name: "node:fs", message: "A port is an interface; it performs no I/O." },
+      { name: "node:fs/promises", message: "A port is an interface; it performs no I/O." },
+    ],
+    [
+      {
+        group: ["../platform/**", "../providers/**", "../native/**", "../storage/**", "../application/**", "../cli/**", "../tui/**", "../reports/**"],
+        message: "A port names what application needs; it imports domain types only.",
+      },
+    ],
+  ),
 
   layer(
     ["src/domain/**/*.ts"],

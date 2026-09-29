@@ -9,8 +9,11 @@ Rules the schemas enforce rather than merely document:
 - Filesystem identities, counts, byte totals, and nanosecond timestamps are base-10
   strings (`common.json#/$defs/decimalInteger`), never JSON numbers.
 - A path is an object with lossless `bytesBase64` plus a sanitized `display` string.
-  `display` cannot contain C0 control bytes or DEL, so a crafted filename cannot inject
-  terminal escapes into a consumer.
+  `display` cannot contain C0 or C1 controls, DEL, the line and paragraph separators, or
+  the bidirectional marks, overrides, and isolates, so a crafted filename can neither
+  inject terminal escapes nor reorder what a consumer renders. It is safe to print, not
+  unique: two different names can still display the same, so nothing resolves a target
+  from `display`.
 - Every object is closed to unknown fields, so adding output requires a schema change.
 - `status: "error"` requires an `error` object; any other status requires `data`;
   `status: "incomplete"` requires at least one warning.

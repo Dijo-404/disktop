@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { lstat, readlink, stat } from "node:fs/promises";
+import { lstat, readlink, rm, stat } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { test } from "node:test";
 import { createLargeFixture, createStandardFixture } from "../fixtures/generate.mjs";
@@ -76,4 +76,24 @@ test("cleanup refuses a root it did not create", async () => {
   const fixture = await createStandardFixture();
   await fixture.cleanup();
   await assert.rejects(fixture.cleanup(), /already removed|not a Disktop fixture/);
+});
+
+test("cleanup rejects a root that only looks like a sandbox", async (t) => {
+  const fixture = await createStandardFixture();
+  t.after(() => rm(fixture.root, { recursive: true, force: true }).catch(() => undefined));
+
+  for (const forged of [`${fixture.root}/../../etc`, `${fixture.root}/nested`, "/home/example"]) {
+    const escaped = await createStandardFixture();
+    const cleanup = escaped.cleanup;
+    escaped.root = forged;
+    await assert.rejects(cleanup(), /not a Disktop fixture/, forged);
+    escaped.root = fixture.root;
+  }
+});
+
+test("the tree is removable with rm -rf after cleanup restores the unreadable directory", async () => {
+  const fixture = await createStandardFixture();
+  await fixture.cleanup();
+  const { access } = await import("node:fs/promises");
+  await assert.rejects(access(fixture.root), { code: "ENOENT" });
 });

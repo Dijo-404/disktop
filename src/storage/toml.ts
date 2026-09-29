@@ -8,10 +8,13 @@ export type TomlValue = string | number | boolean | readonly TomlValue[];
 export type TomlTable = { [key: string]: TomlValue | TomlTable };
 
 const BARE_KEY = /^[A-Za-z0-9_-]+$/;
+// A key that becomes an object's prototype would be invisible to the
+// unknown-key check, so it is refused at the parser instead.
+const RESERVED_KEYS = new Set(["__proto__", "constructor", "prototype"]);
 const INTEGER = /^[+-]?(0|[1-9][0-9]*)$/;
 
 export function parseToml(source: string): TomlTable {
-  const root: TomlTable = {};
+  const root = Object.create(null) as TomlTable;
   const seenTables = new Set<string>();
   let table = root;
   let tableName = "";
@@ -33,14 +36,14 @@ export function parseToml(source: string): TomlTable {
         throw fail(lineNumber, "unterminated table header");
       }
       const name = line.slice(1, -1).trim();
-      if (!BARE_KEY.test(name)) {
+      if (!BARE_KEY.test(name) || RESERVED_KEYS.has(name)) {
         throw fail(lineNumber, `unsupported table name '${name}'`);
       }
       if (seenTables.has(name)) {
         throw fail(lineNumber, `table '${name}' is defined twice`);
       }
       seenTables.add(name);
-      table = {};
+      table = Object.create(null) as TomlTable;
       root[name] = table;
       tableName = name;
       continue;
@@ -51,7 +54,7 @@ export function parseToml(source: string): TomlTable {
       throw fail(lineNumber, "expected 'key = value'");
     }
     const key = line.slice(0, separator).trim();
-    if (!BARE_KEY.test(key)) {
+    if (!BARE_KEY.test(key) || RESERVED_KEYS.has(key)) {
       throw fail(lineNumber, `unsupported key '${key}'`);
     }
     if (Object.hasOwn(table, key)) {
@@ -67,7 +70,11 @@ function stripComment(line: string, lineNumber: number): string {
   let inString = false;
   for (let index = 0; index < line.length; index += 1) {
     const character = line[index];
-    if (character === '"' && line[index - 1] !== "\\") {
+    if (inString && character === "\\") {
+      index += 1;
+      continue;
+    }
+    if (character === '"') {
       inString = !inString;
     } else if (character === "#" && !inString) {
       return line.slice(0, index);
@@ -112,8 +119,12 @@ function parseArray(text: string, lineNumber: number): readonly TomlValue[] {
   if (body === "") {
     return [];
   }
-  return splitTopLevel(body, lineNumber).map((element) => {
-    const value = parseValue(element.trim(), lineNumber);
+  const elements = splitTopLevel(body, lineNumber).map((element) => element.trim());
+  if (elements.at(-1) === "") {
+    elements.pop();
+  }
+  return elements.map((element) => {
+    const value = parseValue(element, lineNumber);
     if (Array.isArray(value)) {
       throw fail(lineNumber, "nested arrays are not supported");
     }
@@ -127,7 +138,12 @@ function splitTopLevel(body: string, lineNumber: number): string[] {
   let inString = false;
   for (let index = 0; index < body.length; index += 1) {
     const character = body[index] as string;
-    if (character === '"' && body[index - 1] !== "\\") {
+    if (inString && character === "\\") {
+      current += character + (body[index + 1] ?? "");
+      index += 1;
+      continue;
+    }
+    if (character === '"') {
       inString = !inString;
     }
     if (character === "," && !inString) {
@@ -151,6 +167,9 @@ function parseString(text: string, lineNumber: number): string {
   let value = "";
   for (let index = 1; index < text.length - 1; index += 1) {
     const character = text[index] as string;
+    if (character === '"') {
+      throw fail(lineNumber, "a string ends at its closing quote; separate array elements with a comma");
+    }
     if (character !== "\\") {
       value += character;
       continue;

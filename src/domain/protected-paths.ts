@@ -29,6 +29,34 @@ export const PROTECTED_ROOTS: readonly string[] = [
   "/var",
 ];
 
+/**
+ * Roots that hold many users' or many programs' data. They may be an ancestor
+ * of an allowed root, but they are never a target themselves and can never be
+ * added to the allowlist: `/home` would otherwise reach every other account.
+ */
+export const SHARED_CONTAINER_ROOTS: readonly string[] = [
+  "/home",
+  "/media",
+  "/mnt",
+  "/run/media",
+  "/tmp",
+  "/var/tmp",
+];
+
+/** True when a path may not be configured as a root generic cleanup acts in. */
+export function isRefusedAsAllowedRoot(path: string): boolean {
+  const bytes = pathBytes(rawPathFromUtf8(path));
+  if (!isAbsoluteNormalized(bytes)) {
+    return true;
+  }
+  if (containerRootBytes.some((root) => bytesEqual(root, bytes))) {
+    return true;
+  }
+  return protectedRootBytes.some((root) =>
+    bytesEqual(root, ROOT) ? bytesEqual(bytes, ROOT) : isWithin(root, bytes),
+  );
+}
+
 export interface ProtectedPathContext {
   readonly homeDirectory: RawPath;
   /** User-owned roots generic cleanup may act inside. */
@@ -44,18 +72,31 @@ export type TargetVerdict =
   | { readonly allowed: false; readonly code: OperationFailureCode; readonly reason: string };
 
 const protectedRootBytes = PROTECTED_ROOTS.map((root) => pathBytes(rawPathFromUtf8(root)));
+const containerRootBytes = SHARED_CONTAINER_ROOTS.map((root) => pathBytes(rawPathFromUtf8(root)));
 const ROOT = protectedRootBytes[0] as Uint8Array;
 
 /**
  * Pure policy over path bytes. It cannot see the filesystem, so it does not
  * prove mount identity, ownership, or that a parent is safe to write in; the
  * helper repeats and extends these checks against live descriptors.
+ *
+ * Every rule that depends on context fails closed: an empty `mountRoots` or
+ * `excludedRoots` is treated as a caller that could not read the system, not
+ * as a system with nothing to protect.
  */
 export function classifyGenericTarget(target: RawPath, context: ProtectedPathContext): TargetVerdict {
   const bytes = pathBytes(target);
 
+  if (context.mountRoots.length === 0 || context.excludedRoots.length === 0) {
+    return refuse("invalid-plan", "The mount and excluded-root context is incomplete, so no target can be cleared");
+  }
+
   if (!isAbsoluteNormalized(bytes)) {
     return refuse("invalid-plan", "A target must be an absolute path with no empty, '.', or '..' segment");
+  }
+
+  if (containerRootBytes.some((root) => bytesEqual(root, bytes))) {
+    return refuse("protected-path", "The target is a shared container root holding other accounts' or programs' data");
   }
 
   for (const root of protectedRootBytes) {
@@ -81,9 +122,16 @@ export function classifyGenericTarget(target: RawPath, context: ProtectedPathCon
     }
   }
 
-  const inAllowedRoot = context.allowedRoots.some((root) => isWithin(pathBytes(root), bytes));
-  if (!inAllowedRoot) {
+  if (context.allowedRoots.some((root) => bytesEqual(pathBytes(root), bytes))) {
+    return refuse("protected-path", "An allowed root is the scope of cleanup, never its target");
+  }
+
+  const container = context.allowedRoots.find((root) => isWithin(pathBytes(root), bytes));
+  if (container === undefined) {
     return refuse("protected-path", "The target is outside every allowed root");
+  }
+  if (containerRootBytes.some((root) => bytesEqual(root, pathBytes(container)))) {
+    return refuse("protected-path", "A shared container root cannot be widened into an allowed root");
   }
 
   return { allowed: true };

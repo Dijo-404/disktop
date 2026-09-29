@@ -1,5 +1,5 @@
 import { posix } from "node:path";
-import { PROTECTED_ROOTS } from "../domain/protected-paths.js";
+import { isRefusedAsAllowedRoot } from "../domain/protected-paths.js";
 import { parseToml, type TomlTable, type TomlValue } from "./toml.js";
 
 export interface DisktopConfig {
@@ -42,6 +42,8 @@ export const DEFAULT_CONFIG: DisktopConfig = {
   cleanup: { defaultOperation: "trash", planExpiryMinutes: 60, additionalAllowedRoots: [] },
 };
 
+const KNOWN_TABLES = new Set(["alerts", "scan", "find", "snapshots", "cleanup"]);
+
 export function parseConfigDocument(source: string): DisktopConfig {
   const document = parseToml(source);
   const reader = new Reader(document);
@@ -49,8 +51,8 @@ export function parseConfigDocument(source: string): DisktopConfig {
   const config: DisktopConfig = {
     units: reader.enumeration("", "units", ["iec", "si"], DEFAULT_CONFIG.units),
     alerts: {
-      spaceThresholdPercent: reader.percent("alerts", "space_threshold_percent", DEFAULT_CONFIG.alerts.spaceThresholdPercent),
-      inodeThresholdPercent: reader.percent("alerts", "inode_threshold_percent", DEFAULT_CONFIG.alerts.inodeThresholdPercent),
+      spaceThresholdPercent: reader.integer("alerts", "space_threshold_percent", DEFAULT_CONFIG.alerts.spaceThresholdPercent, 0, 100),
+      inodeThresholdPercent: reader.integer("alerts", "inode_threshold_percent", DEFAULT_CONFIG.alerts.inodeThresholdPercent, 0, 100),
       notify: reader.boolean("alerts", "notify", DEFAULT_CONFIG.alerts.notify),
     },
     scan: {
@@ -59,11 +61,11 @@ export function parseConfigDocument(source: string): DisktopConfig {
       excludeWindowsMounts: reader.boolean("scan", "exclude_windows_mounts", DEFAULT_CONFIG.scan.excludeWindowsMounts),
       excludes: reader.absolutePaths("scan", "excludes", DEFAULT_CONFIG.scan.excludes, false),
     },
-    find: { staleAfterDays: reader.positiveInteger("find", "stale_after_days", DEFAULT_CONFIG.find.staleAfterDays) },
-    snapshots: { keepLatest: reader.positiveInteger("snapshots", "keep_latest", DEFAULT_CONFIG.snapshots.keepLatest) },
+    find: { staleAfterDays: reader.integer("find", "stale_after_days", DEFAULT_CONFIG.find.staleAfterDays, 1, 3650) },
+    snapshots: { keepLatest: reader.integer("snapshots", "keep_latest", DEFAULT_CONFIG.snapshots.keepLatest, 1, 1000) },
     cleanup: {
       defaultOperation: DEFAULT_CONFIG.cleanup.defaultOperation,
-      planExpiryMinutes: reader.positiveInteger("cleanup", "plan_expiry_minutes", DEFAULT_CONFIG.cleanup.planExpiryMinutes),
+      planExpiryMinutes: reader.integer("cleanup", "plan_expiry_minutes", DEFAULT_CONFIG.cleanup.planExpiryMinutes, 1, 1440),
       additionalAllowedRoots: reader.absolutePaths(
         "cleanup",
         "additional_allowed_roots",
@@ -97,18 +99,17 @@ class Reader {
     return value;
   }
 
-  percent(table: string, key: string, fallback: number): number {
-    const value = this.#integer(table, key, fallback);
-    if (value < 0 || value > 100) {
-      throw invalid(table, key, "expected an integer between 0 and 100");
+  /** Every integer setting is bounded, so a typo cannot disable a guard. */
+  integer(table: string, key: string, fallback: number, minimum: number, maximum: number): number {
+    const value = this.#take(table, key);
+    if (value === undefined) {
+      return fallback;
     }
-    return value;
-  }
-
-  positiveInteger(table: string, key: string, fallback: number): number {
-    const value = this.#integer(table, key, fallback);
-    if (value < 1) {
-      throw invalid(table, key, "expected at least 1");
+    if (typeof value !== "number" || !Number.isSafeInteger(value)) {
+      throw invalid(table, key, "expected an integer");
+    }
+    if (value < minimum || value > maximum) {
+      throw invalid(table, key, `expected an integer between ${minimum} and ${maximum}`);
     }
     return value;
   }
@@ -137,8 +138,12 @@ class Reader {
       if (!posix.isAbsolute(path) || posix.normalize(path) !== path || (path !== "/" && path.endsWith("/"))) {
         throw invalid(table, key, `'${path}' must be an absolute, normalized path`);
       }
-      if (refuseProtected && isProtected(path)) {
-        throw invalid(table, key, `'${path}' is a protected system root and cannot be allowed for cleanup`);
+      if (refuseProtected && isRefusedAsAllowedRoot(path)) {
+        throw invalid(
+          table,
+          key,
+          `'${path}' is a protected system root or a shared container root and cannot be allowed for cleanup`,
+        );
       }
     }
     return paths;
@@ -146,27 +151,21 @@ class Reader {
 
   rejectUnread(): void {
     for (const [name, value] of Object.entries(this.#document)) {
-      if (isTable(value)) {
-        for (const key of Object.keys(value)) {
-          if (!this.#read.has(`${name}.${key}`)) {
-            throw new RangeError(`config.toml: unknown setting '${name}.${key}'`);
-          }
+      if (!isTable(value)) {
+        if (!this.#read.has(`.${name}`)) {
+          throw new RangeError(`config.toml: unknown setting '${name}'`);
         }
-      } else if (!this.#read.has(`.${name}`)) {
-        throw new RangeError(`config.toml: unknown setting '${name}'`);
+        continue;
+      }
+      if (!KNOWN_TABLES.has(name)) {
+        throw new RangeError(`config.toml: unknown section '${name}'`);
+      }
+      for (const key of Object.keys(value)) {
+        if (!this.#read.has(`${name}.${key}`)) {
+          throw new RangeError(`config.toml: unknown setting '${name}.${key}'`);
+        }
       }
     }
-  }
-
-  #integer(table: string, key: string, fallback: number): number {
-    const value = this.#take(table, key);
-    if (value === undefined) {
-      return fallback;
-    }
-    if (typeof value !== "number") {
-      throw invalid(table, key, "expected an integer");
-    }
-    return value;
   }
 
   #take(table: string, key: string): TomlValue | undefined {
@@ -185,10 +184,6 @@ class Reader {
     const value = section[key];
     return isTable(value) ? undefined : value;
   }
-}
-
-function isProtected(path: string): boolean {
-  return PROTECTED_ROOTS.some((root) => path === root || (root !== "/" && path.startsWith(`${root}/`)));
 }
 
 function isTable(value: TomlValue | TomlTable | undefined): value is TomlTable {

@@ -63,9 +63,18 @@ and backing mount and root identity are checked so an alias does not inherit the
 allowance. `/home/example-backup` is not inside `/home/example`.
 
 **Escalate through configuration.** `additional_allowed_roots` cannot name a protected
-root; the config reader refuses it. An unknown key is an error, so a misspelling cannot
-disable a guard by leaving it at a default the user believes they changed. There is no
-`--force` for a protected path.
+root, and it cannot name a shared container root either — `/home`, `/tmp`, `/var/tmp`,
+`/mnt`, `/media`, `/run/media` — because allowing `/home` would otherwise reach every
+other account on the machine. An allowed root is the scope of cleanup, never a target
+itself, so widening the allowlist cannot turn a whole root into one selection. An unknown
+key or section is an error, and a key that would become an object's prototype is refused
+at the parser, so a misspelling cannot disable a guard by leaving it at a default the user
+believes they changed. Every integer setting is bounded, so a typo cannot make a reviewed
+plan effectively never expire. There is no `--force` for a protected path.
+
+The policy works on path bytes and cannot see ownership, so a root the user configures
+inside their own home but which another account can write to is not detected here; the
+helper checks ownership and parent safety against live descriptors before acting.
 
 **Edit a stored plan.** A plan carries a checksum and an expiry, which detect corruption
 and staleness. They do not defend against deliberate editing by the same user — nothing
@@ -73,13 +82,20 @@ can, since the user owns the file — which is why revalidation against live fin
 happens at apply time regardless of what the plan claims, and why the helper repeats the
 protected-path check independently.
 
-**Inject through a filename.** A name containing `\u001b[2J`, a newline, or a leading `=`
-reaches a terminal, a log, an HTML report, and a CSV cell. Display text is sanitized at
-the boundary where it is created, not at each use: control bytes become Unicode Control
-Pictures, invalid UTF-8 becomes U+FFFD, HTML escapes every value, and CSV prefixes a cell
-starting `=`, `+`, `-`, or `@`. The lossless bytes travel separately and are what the
-operation uses. The schemas reject a display string containing a control character, so
-this cannot regress silently.
+**Inject through a filename.** A name containing `\u001b[2J`, `\u009b2K`, U+202E, a
+newline, or a leading `=` reaches a terminal, a log, an HTML report, and a CSV cell.
+Display text is sanitized at the boundary where it is created, not at each use: C0
+controls and DEL become Unicode Control Pictures, C1 controls, the line and paragraph
+separators, and the bidirectional marks, overrides and isolates become `<U+XXXX>`,
+invalid UTF-8 becomes U+FFFD, HTML escapes every value, and CSV prefixes a cell starting
+`=`, `+`, `-`, or `@`. The lossless bytes travel separately and are what the operation
+uses. The schemas reject a display string containing any of those characters, so this
+cannot regress silently.
+
+What this does *not* give is uniqueness: distinct byte sequences can render identically,
+and a file named `\u2400` looks like one containing a NUL byte. Two targets can therefore
+look alike in a prompt, which is why confirmation shows scope and counts rather than
+relying on a name.
 
 **Feed the parser a hostile response.** The helper rejects unknown fields, unknown
 operations, wrong protocol versions, malformed base64, out-of-range integers, and
@@ -121,6 +137,10 @@ successful destructive operation.
 - **Trash frees nothing immediately.** A Trash move on the same filesystem relocates data
   without increasing free space until Trash is emptied. This is stated in the preview and
   in the result.
+- **A caller that supplies an incomplete context.** `classifyGenericTarget` fails closed
+  on an empty mount or excluded-root list rather than skipping those rules, but it cannot
+  detect a context that is merely wrong — a stale mount list, for example. The helper's
+  independent checks are what catch that.
 - **Manager actions can be irreversible and imprecise.** A manager may not offer a
   preview or exact counts. Disktop refuses an action whose destructive scope cannot be
   bounded, and labels the rest honestly instead of inventing precision.

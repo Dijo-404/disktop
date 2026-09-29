@@ -30,10 +30,13 @@
       "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}\\.[0-9]{3}Z$"
     },
     "rawPath": {
-      "description": "A Linux path. `bytesBase64` is the only lossless form; `display` is sanitized for terminals, HTML, and CSV and must never be used to resolve a target.",
+      "description": "A Linux path. `bytesBase64` is the only lossless form and the only value an operation may resolve. `display` is sanitized for terminals, HTML, and CSV: it carries no character that can command a terminal or reorder what follows it. Sanitizing makes the text safe to print, not unique.",
       "type": "object",
       "additionalProperties": false,
-      "required": ["bytesBase64", "display"],
+      "required": [
+        "bytesBase64",
+        "display"
+      ],
       "properties": {
         "bytesBase64": {
           "type": "string",
@@ -41,9 +44,11 @@
         },
         "display": {
           "type": "string",
-          "pattern": "^[^\\u0000-\\u001F\\u007F]*$"
+          "pattern": "^[^\\u0000-\\u001F\\u007F-\\u009F\\u061C\\u200E\\u200F\\u2028-\\u202E\\u2066-\\u2069]*$"
         },
-        "utf8": { "type": "string" }
+        "utf8": {
+          "type": "string"
+        }
       }
     },
     "capabilityStatus": {
@@ -61,20 +66,36 @@
       "description": "Absent data is never reported as zero; it carries the reason it is absent.",
       "type": "object",
       "additionalProperties": false,
-      "required": ["status", "explanation"],
+      "required": [
+        "status",
+        "explanation"
+      ],
       "properties": {
-        "status": { "$ref": "#/$defs/capabilityStatus" },
-        "explanation": { "type": "string" }
+        "status": {
+          "$ref": "#/$defs/capabilityStatus"
+        },
+        "explanation": {
+          "type": "string"
+        }
       }
     },
     "warning": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["code", "message"],
+      "required": [
+        "code",
+        "message"
+      ],
       "properties": {
-        "code": { "$ref": "#/$defs/identifier" },
-        "message": { "type": "string" },
-        "path": { "$ref": "#/$defs/rawPath" }
+        "code": {
+          "$ref": "#/$defs/identifier"
+        },
+        "message": {
+          "type": "string"
+        },
+        "path": {
+          "$ref": "#/$defs/rawPath"
+        }
       }
     },
     "failureCode": {
@@ -95,13 +116,22 @@
     "failure": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["code", "message"],
+      "required": [
+        "code",
+        "message"
+      ],
       "properties": {
-        "code": { "$ref": "#/$defs/failureCode" },
-        "message": { "type": "string" },
+        "code": {
+          "$ref": "#/$defs/failureCode"
+        },
+        "message": {
+          "type": "string"
+        },
         "details": {
           "type": "object",
-          "additionalProperties": { "type": "string" }
+          "additionalProperties": {
+            "type": "string"
+          }
         }
       }
     },
@@ -109,14 +139,27 @@
       "description": "Every scan-shaped result states what it could not inspect.",
       "type": "object",
       "additionalProperties": false,
-      "required": ["complete", "scannedEntries", "inaccessibleDirectories", "excludedMounts"],
+      "required": [
+        "complete",
+        "scannedEntries",
+        "inaccessibleDirectories",
+        "excludedMounts"
+      ],
       "properties": {
-        "complete": { "type": "boolean" },
-        "scannedEntries": { "$ref": "#/$defs/decimalInteger" },
-        "inaccessibleDirectories": { "$ref": "#/$defs/decimalInteger" },
+        "complete": {
+          "type": "boolean"
+        },
+        "scannedEntries": {
+          "$ref": "#/$defs/decimalInteger"
+        },
+        "inaccessibleDirectories": {
+          "$ref": "#/$defs/decimalInteger"
+        },
         "excludedMounts": {
           "type": "array",
-          "items": { "$ref": "#/$defs/rawPath" }
+          "items": {
+            "$ref": "#/$defs/rawPath"
+          }
         }
       }
     },
@@ -135,60 +178,128 @@
         "removable"
       ],
       "properties": {
-        "id": { "$ref": "#/$defs/identifier" },
-        "type": { "type": "string" },
-        "source": { "type": "string" },
+        "id": {
+          "$ref": "#/$defs/identifier"
+        },
+        "type": {
+          "type": "string"
+        },
+        "source": {
+          "type": "string"
+        },
         "mounts": {
           "type": "array",
           "minItems": 1,
-          "items": { "$ref": "#/$defs/rawPath" }
+          "items": {
+            "$ref": "#/$defs/rawPath"
+          }
         },
-        "totalBytes": { "$ref": "#/$defs/decimalInteger" },
-        "freeBytes": { "$ref": "#/$defs/decimalInteger" },
-        "availableBytes": { "$ref": "#/$defs/decimalInteger" },
-        "totalInodes": { "$ref": "#/$defs/decimalInteger" },
-        "freeInodes": { "$ref": "#/$defs/decimalInteger" },
-        "network": { "type": "boolean" },
-        "removable": { "type": "boolean" },
-        "readOnly": { "type": "boolean" },
-        "deviceId": { "$ref": "#/$defs/identifier" }
+        "totalBytes": {
+          "$ref": "#/$defs/decimalInteger"
+        },
+        "freeBytes": {
+          "$ref": "#/$defs/decimalInteger"
+        },
+        "availableBytes": {
+          "$ref": "#/$defs/decimalInteger"
+        },
+        "totalInodes": {
+          "$ref": "#/$defs/decimalInteger"
+        },
+        "freeInodes": {
+          "$ref": "#/$defs/decimalInteger"
+        },
+        "network": {
+          "type": "boolean"
+        },
+        "removable": {
+          "type": "boolean"
+        },
+        "readOnly": {
+          "type": "boolean"
+        },
+        "deviceId": {
+          "$ref": "#/$defs/identifier"
+        }
       }
     },
     "device": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["id", "name", "kind", "removable", "sizeBytes", "partitions"],
+      "required": [
+        "id",
+        "name",
+        "kind",
+        "removable",
+        "sizeBytes",
+        "partitions"
+      ],
       "properties": {
-        "id": { "$ref": "#/$defs/identifier" },
-        "name": { "type": "string" },
+        "id": {
+          "$ref": "#/$defs/identifier"
+        },
+        "name": {
+          "type": "string"
+        },
         "kind": {
           "description": "`unknown` is reported when rotation data is absent; it is never guessed.",
           "type": "string",
-          "enum": ["ssd", "hdd", "unknown"]
+          "enum": [
+            "ssd",
+            "hdd",
+            "unknown"
+          ]
         },
-        "removable": { "type": "boolean" },
-        "sizeBytes": { "$ref": "#/$defs/decimalInteger" },
-        "model": { "type": "string" },
-        "transport": { "type": "string" },
+        "removable": {
+          "type": "boolean"
+        },
+        "sizeBytes": {
+          "$ref": "#/$defs/decimalInteger"
+        },
+        "model": {
+          "type": "string"
+        },
+        "transport": {
+          "type": "string"
+        },
         "partitions": {
           "type": "array",
-          "items": { "$ref": "#/$defs/identifier" }
+          "items": {
+            "$ref": "#/$defs/identifier"
+          }
         }
       }
     },
     "alert": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["filesystemId", "kind", "usedPercent", "thresholdPercent", "message"],
+      "required": [
+        "filesystemId",
+        "kind",
+        "usedPercent",
+        "thresholdPercent",
+        "message"
+      ],
       "properties": {
-        "filesystemId": { "$ref": "#/$defs/identifier" },
+        "filesystemId": {
+          "$ref": "#/$defs/identifier"
+        },
         "kind": {
           "type": "string",
-          "enum": ["low-space", "low-inodes"]
+          "enum": [
+            "low-space",
+            "low-inodes"
+          ]
         },
-        "usedPercent": { "$ref": "#/$defs/percent" },
-        "thresholdPercent": { "$ref": "#/$defs/percent" },
-        "message": { "type": "string" }
+        "usedPercent": {
+          "$ref": "#/$defs/percent"
+        },
+        "thresholdPercent": {
+          "$ref": "#/$defs/percent"
+        },
+        "message": {
+          "type": "string"
+        }
       }
     }
   }

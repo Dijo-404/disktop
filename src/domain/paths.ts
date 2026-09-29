@@ -29,9 +29,14 @@ export function pathBytes(path: RawPath): Uint8Array {
 }
 
 /**
- * Render bytes for terminals, HTML, CSV, and logs. Control bytes become their
- * Unicode Control Pictures so two different names never look identical, and
- * invalid UTF-8 becomes U+FFFD. Never resolve a target from this text.
+ * Render bytes for terminals, HTML, CSV, and logs. C0 controls become their
+ * Unicode Control Pictures, DEL becomes its picture, and every other character
+ * that can command a terminal or reorder what follows it becomes `<U+XXXX>`.
+ * Invalid UTF-8 becomes U+FFFD. Never resolve a target from this text.
+ *
+ * This makes the text safe to print; it does not make it unique. Distinct byte
+ * sequences can still render the same, so an operation is identified by its
+ * bytes and never by what the user reads.
  */
 export function sanitizeForDisplay(bytes: Uint8Array): string {
   let display = "";
@@ -41,11 +46,29 @@ export function sanitizeForDisplay(bytes: Uint8Array): string {
       display += DELETE_PICTURE;
     } else if (code < 0x20) {
       display += String.fromCodePoint(CONTROL_PICTURES + code);
+    } else if (isDisplayUnsafe(code)) {
+      display += `<U+${code.toString(16).toUpperCase().padStart(4, "0")}>`;
     } else {
       display += character;
     }
   }
   return display;
+}
+
+/**
+ * C1 controls (U+009B is CSI and U+009D is OSC to a terminal reading UTF-8),
+ * line and paragraph separators, and the bidirectional marks, embeddings,
+ * overrides, and isolates that let one name render as another. Zero-width
+ * joiners are left alone: they carry meaning inside real emoji sequences.
+ */
+function isDisplayUnsafe(code: number): boolean {
+  return (
+    (code >= 0x80 && code <= 0x9f) ||
+    code === 0x061c ||
+    (code >= 0x200e && code <= 0x200f) ||
+    (code >= 0x2028 && code <= 0x202e) ||
+    (code >= 0x2066 && code <= 0x2069)
+  );
 }
 
 /** Absolute, no empty segment, no `.` or `..`, no trailing slash except the root. */
