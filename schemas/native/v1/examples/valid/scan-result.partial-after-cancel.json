@@ -1,0 +1,38 @@
+{
+  "protocolVersion": 1,
+  "requestId": "scan-02",
+  "eventId": "77",
+  "event": "complete",
+  "result": {
+    "scanId": "scan-20260930-1b77e903",
+    "complete": false,
+    "roots": [
+      "L2hvbWUvZXhhbXBsZS9Qcm9qZWN0cw=="
+    ],
+    "accounting": "allocated",
+    "scannedEntries": "18422",
+    "inaccessibleDirectories": "3",
+    "allocatedBytes": "4294967296",
+    "apparentBytes": "4294930432",
+    "sharedBytes": "0",
+    "excludedMounts": [
+      "L2hvbWUvZXhhbXBsZS9Qcm9qZWN0cy9tbnQvZGF0YQ=="
+    ],
+    "warnings": [
+      {
+        "code": "cancelled",
+        "message": "The scan stopped at a directory boundary when cancellation was requested."
+      },
+      {
+        "code": "inaccessible-directory",
+        "message": "Permission denied.",
+        "path": "L2hvbWUvZXhhbXBsZS9Qcm9qZWN0cy9wcml2YXRl"
+      },
+      {
+        "code": "crossed-filesystem-skipped",
+        "message": "A nested mount was not descended into because crossFilesystems is false.",
+        "path": "L2hvbWUvZXhhbXBsZS9Qcm9qZWN0cy9tbnQvZGF0YQ=="
+      }
+    ]
+  }
+}

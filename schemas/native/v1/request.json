@@ -5,10 +5,19 @@
   "description": "One JSON object per line on the helper's stdin. Node spawns the helper directly and never builds a shell string.",
   "type": "object",
   "additionalProperties": false,
-  "required": ["protocolVersion", "requestId", "operation", "arguments"],
+  "required": [
+    "protocolVersion",
+    "requestId",
+    "operation",
+    "arguments"
+  ],
   "properties": {
-    "protocolVersion": { "$ref": "common.json#/$defs/protocolVersion" },
-    "requestId": { "$ref": "common.json#/$defs/requestId" },
+    "protocolVersion": {
+      "$ref": "common.json#/$defs/protocolVersion"
+    },
+    "requestId": {
+      "$ref": "common.json#/$defs/requestId"
+    },
     "operation": {
       "type": "string",
       "enum": [
@@ -32,28 +41,137 @@
         "journal-reconcile"
       ]
     },
-    "arguments": { "type": "object" }
+    "arguments": {
+      "type": "object"
+    }
   },
   "allOf": [
     {
-      "if": { "type": "object", "properties": { "operation": { "enum": ["hello", "probe", "journal-reconcile"] } }, "required": ["operation"] },
-      "then": { "properties": { "arguments": { "$ref": "#/$defs/noArguments" } } }
+      "if": {
+        "type": "object",
+        "properties": {
+          "operation": {
+            "enum": [
+              "hello",
+              "probe",
+              "journal-reconcile"
+            ]
+          }
+        },
+        "required": [
+          "operation"
+        ]
+      },
+      "then": {
+        "properties": {
+          "arguments": {
+            "$ref": "#/$defs/noArguments"
+          }
+        }
+      }
     },
     {
-      "if": { "type": "object", "properties": { "operation": { "const": "cancel" } }, "required": ["operation"] },
-      "then": { "properties": { "arguments": { "$ref": "#/$defs/cancelArguments" } } }
+      "if": {
+        "type": "object",
+        "properties": {
+          "operation": {
+            "const": "cancel"
+          }
+        },
+        "required": [
+          "operation"
+        ]
+      },
+      "then": {
+        "properties": {
+          "arguments": {
+            "$ref": "#/$defs/cancelArguments"
+          }
+        }
+      }
     },
     {
-      "if": { "type": "object", "properties": { "operation": { "const": "scan" } }, "required": ["operation"] },
-      "then": { "properties": { "arguments": { "$ref": "#/$defs/scanArguments" } } }
+      "if": {
+        "type": "object",
+        "properties": {
+          "operation": {
+            "const": "scan"
+          }
+        },
+        "required": [
+          "operation"
+        ]
+      },
+      "then": {
+        "properties": {
+          "arguments": {
+            "$ref": "#/$defs/scanArguments"
+          }
+        }
+      }
     },
     {
-      "if": { "type": "object", "properties": { "operation": { "enum": ["trash", "erase"] } }, "required": ["operation"] },
-      "then": { "properties": { "arguments": { "$ref": "common.json#/$defs/mutationArguments" } } }
+      "if": {
+        "type": "object",
+        "properties": {
+          "operation": {
+            "enum": [
+              "trash",
+              "erase"
+            ]
+          }
+        },
+        "required": [
+          "operation"
+        ]
+      },
+      "then": {
+        "properties": {
+          "arguments": {
+            "$ref": "common.json#/$defs/mutationArguments"
+          }
+        }
+      }
     },
     {
-      "if": { "type": "object", "properties": { "operation": { "const": "empty-trash" } }, "required": ["operation"] },
-      "then": { "properties": { "arguments": { "$ref": "#/$defs/emptyTrashArguments" } } }
+      "if": {
+        "type": "object",
+        "properties": {
+          "operation": {
+            "const": "empty-trash"
+          }
+        },
+        "required": [
+          "operation"
+        ]
+      },
+      "then": {
+        "properties": {
+          "arguments": {
+            "$ref": "#/$defs/emptyTrashArguments"
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "type": "object",
+        "properties": {
+          "operation": {
+            "const": "query-index"
+          }
+        },
+        "required": [
+          "operation"
+        ]
+      },
+      "then": {
+        "properties": {
+          "arguments": {
+            "$ref": "#/$defs/queryIndexArguments"
+          }
+        }
+      }
     }
   ],
   "$defs": {
@@ -65,44 +183,119 @@
       "description": "Stops another in-flight request at a safe item boundary; the cancelled request still emits a final event.",
       "type": "object",
       "additionalProperties": false,
-      "required": ["cancelRequestId"],
-      "properties": { "cancelRequestId": { "$ref": "common.json#/$defs/requestId" } }
+      "required": [
+        "cancelRequestId"
+      ],
+      "properties": {
+        "cancelRequestId": {
+          "$ref": "common.json#/$defs/requestId"
+        }
+      }
     },
     "scanArguments": {
       "description": "Symlinks are never followed, so there is no option to enable it.",
       "type": "object",
       "additionalProperties": false,
-      "required": ["roots", "crossFilesystems", "excludes", "accounting"],
+      "required": [
+        "roots",
+        "crossFilesystems",
+        "excludes",
+        "accounting"
+      ],
       "properties": {
         "roots": {
           "type": "array",
           "minItems": 1,
           "maxItems": 64,
-          "items": { "$ref": "common.json#/$defs/pathBytes" }
+          "items": {
+            "$ref": "common.json#/$defs/pathBytes"
+          }
         },
-        "crossFilesystems": { "type": "boolean" },
+        "crossFilesystems": {
+          "type": "boolean"
+        },
         "excludes": {
           "type": "array",
-          "items": { "$ref": "common.json#/$defs/pathBytes" }
+          "items": {
+            "$ref": "common.json#/$defs/pathBytes"
+          }
         },
         "accounting": {
           "type": "string",
-          "enum": ["allocated", "apparent"]
+          "enum": [
+            "allocated",
+            "apparent"
+          ]
         },
-        "throttleBytesPerSecond": { "$ref": "common.json#/$defs/decimalInteger" },
-        "maxDepth": { "$ref": "common.json#/$defs/decimalInteger" }
+        "throttleBytesPerSecond": {
+          "$ref": "common.json#/$defs/decimalInteger"
+        },
+        "maxDepth": {
+          "$ref": "common.json#/$defs/decimalInteger"
+        }
       }
     },
     "emptyTrashArguments": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["planId", "trashDirectories"],
+      "required": [
+        "planId",
+        "trashDirectories"
+      ],
       "properties": {
-        "planId": { "$ref": "common.json#/$defs/planId" },
+        "planId": {
+          "$ref": "common.json#/$defs/planId"
+        },
         "trashDirectories": {
           "type": "array",
           "minItems": 1,
-          "items": { "$ref": "common.json#/$defs/pathBytes" }
+          "items": {
+            "$ref": "common.json#/$defs/pathBytes"
+          }
+        }
+      }
+    },
+    "queryIndexArguments": {
+      "description": "One page of an existing scan index. The helper never returns the whole tree.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "scanId",
+        "sort",
+        "order",
+        "limit"
+      ],
+      "properties": {
+        "scanId": {
+          "$ref": "common.json#/$defs/scanId"
+        },
+        "filter": {
+          "$ref": "common.json#/$defs/entryFilter"
+        },
+        "sort": {
+          "type": "string",
+          "enum": [
+            "allocated",
+            "apparent",
+            "modified",
+            "name"
+          ]
+        },
+        "order": {
+          "type": "string",
+          "enum": [
+            "ascending",
+            "descending"
+          ]
+        },
+        "limit": {
+          "$ref": "common.json#/$defs/decimalInteger"
+        },
+        "cursor": {
+          "$ref": "common.json#/$defs/cursor"
+        },
+        "includeTypeTotals": {
+          "type": "boolean"
         }
       }
     }

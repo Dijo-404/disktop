@@ -1,0 +1,25 @@
+{
+  "protocolVersion": 1,
+  "requestId": "query-index-5",
+  "eventId": "1",
+  "event": "complete",
+  "result": {
+    "scanId": "scan-20260930-8f2ac1d4",
+    "entries": [
+      {
+        "id": "1",
+        "path": "/home/example/notes.txt",
+        "kind": "file",
+        "device": "2049",
+        "inode": "7",
+        "mountId": "29",
+        "linkCount": "1",
+        "apparentBytes": "1024",
+        "allocatedBytes": "4096",
+        "ownerId": "1000",
+        "modifiedNanoseconds": "1759190400000000000",
+        "shared": false
+      }
+    ]
+  }
+}

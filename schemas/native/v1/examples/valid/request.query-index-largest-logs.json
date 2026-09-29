@@ -1,0 +1,19 @@
+{
+  "protocolVersion": 1,
+  "requestId": "query-index-3",
+  "operation": "query-index",
+  "arguments": {
+    "scanId": "scan-20260930-8f2ac1d4",
+    "filter": {
+      "extension": "log",
+      "minAllocatedBytes": "1073741824",
+      "kinds": [
+        "file"
+      ]
+    },
+    "sort": "allocated",
+    "order": "descending",
+    "limit": "50",
+    "includeTypeTotals": true
+  }
+}
