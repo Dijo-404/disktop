@@ -3,9 +3,12 @@
   "requestId": "scan-02",
   "operation": "scan",
   "arguments": {
-    "roots": ["/home/example/Projects"],
+    "roots": [
+      "/home/example/Projects"
+    ],
     "crossFilesystems": false,
     "excludes": [],
-    "accounting": "allocated"
+    "accounting": "allocated",
+    "indexDirectory": "L2hvbWUvZXhhbXBsZS8uY2FjaGUvZGlza3RvcA=="
   }
 }
