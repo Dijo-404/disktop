@@ -1,3 +1,4 @@
+import { readFile } from "node:fs/promises";
 import { posix } from "node:path";
 import { isRefusedAsAllowedRoot } from "../domain/protected-paths.js";
 import { parseToml, type TomlTable, type TomlValue } from "./toml.js";
@@ -193,4 +194,39 @@ function isTable(value: TomlValue | TomlTable | undefined): value is TomlTable {
 function invalid(table: string, key: string, message: string): RangeError {
   const name = table === "" ? key : `${table}.${key}`;
   return new RangeError(`config.toml: '${name}' ${message}`);
+}
+
+export interface LoadedConfig {
+  readonly config: DisktopConfig;
+  readonly source: "file" | "defaults";
+  readonly problem?: string;
+}
+
+/**
+ * Read `config.toml` when it exists.
+ *
+ * A missing file is normal and yields the defaults. A file that exists but
+ * cannot be parsed is reported rather than ignored: silently falling back to
+ * defaults would run with thresholds and excludes the user did not choose.
+ */
+export async function loadConfigFile(configFile: string): Promise<LoadedConfig> {
+  let source: string;
+  try {
+    source = await readFile(configFile, "utf8");
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") {
+      return { config: DEFAULT_CONFIG, source: "defaults" };
+    }
+    return { config: DEFAULT_CONFIG, source: "defaults", problem: `${configFile} could not be read: ${describeError(error)}` };
+  }
+
+  try {
+    return { config: parseConfigDocument(source), source: "file" };
+  } catch (error) {
+    return { config: DEFAULT_CONFIG, source: "defaults", problem: `${configFile} was not applied: ${describeError(error)}` };
+  }
+}
+
+function describeError(error: unknown): string {
+  return error instanceof Error ? error.message : "unknown error";
 }

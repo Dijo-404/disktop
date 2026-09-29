@@ -88,3 +88,13 @@ export interface Finding {
   readonly capability: Capability;
   readonly availableActionIds: readonly string[];
 }
+
+export type AlertKind = "low-space" | "low-inodes";
+
+export interface Alert {
+  readonly filesystemId: string;
+  readonly kind: AlertKind;
+  readonly usedPercent: number;
+  readonly thresholdPercent: number;
+  readonly message: string;
+}

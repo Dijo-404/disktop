@@ -1,6 +1,19 @@
 # CLI contract
 
-Status: planned `1.0.0` command surface. In the current scaffold, only help and version are available; feature commands report not implemented. The JSON output contract in [`schemas/cli/v1/`](../schemas/cli/v1/) is normative now and is validated by `tests/contract/cli-schema.test.mjs`; the parser, generated help, and completions become normative as they are implemented. See [PLAN.md](../PLAN.md#cli-and-outputs).
+Status: planned `1.0.0` command surface. `devices`, the `--json` dashboard, and `alerts check` are implemented; every other command is declared in the parser and refuses with `not-implemented`. The JSON output contract in [`schemas/cli/v1/`](../schemas/cli/v1/) is normative and is validated by `tests/contract/cli-schema.test.mjs` against examples and by `tests/integration/cli-output.test.mjs` against what the CLI actually writes on a running host. The parser and generated help are normative now; completions become normative when they are implemented. See [PLAN.md](../PLAN.md#cli-and-outputs).
+
+## What works today
+
+| Command | Behaviour |
+| --- | --- |
+| `disktop` | Opens the 80×24 dashboard when stdin and stdout are both terminals, and prints the text dashboard otherwise. |
+| `disktop --json` | One `dashboard.json` envelope: capability, filesystems, and alerts. |
+| `disktop devices [--json]` | Physical disks counted once with their partitions, plus every mounted filesystem joined to its backing disk. |
+| `disktop alerts check [--threshold PERCENT] [--json]` | Space and inode thresholds. Exits `1` when one is reached. |
+| `disktop --units iec\|si` | Switches human-readable units. Byte values in JSON never change. |
+| `disktop --help`, `disktop --version` | Generated from the one command table in `src/cli/parser.ts`. |
+
+Everything else parses, validates its options, and then refuses with `not-implemented` and exit `2`, in the same envelope shape a working command uses.
 
 ## Command tree
 
@@ -53,7 +66,9 @@ The parser in `src/cli/parser.ts` will define commands and options once, and dri
 | `3` | Scan or action ended incomplete, including partial results. |
 | `130` | Interrupted before a completed or partial result could be reported. |
 
-An alert threshold is an expected monitoring outcome, so `1` is reserved for that command. Incomplete action reporting takes precedence over ordinary success. Contract tests must check stdout, stderr, status, and schema together.
+An alert threshold is an expected monitoring outcome, so `1` is reserved for that command: `disktop --json` reports the same alerts and still exits `0`. Incomplete reporting takes precedence over both, so an `alerts check` that reached a threshold on readings it could not complete exits `3` rather than `1`; an alert drawn from partial readings is not the whole picture. Contract tests must check stdout, stderr, status, and schema together.
+
+An inventory is incomplete whenever anything could not be read: a mount whose `statfs` was denied, a missing `lsblk`, an unparsable `mountinfo` line, or a configuration file that could not be applied. Each one adds a warning naming what was missed, and no missing reading is ever reported as a zero.
 
 ## Configuration and scheduled alerts
 

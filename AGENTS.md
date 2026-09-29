@@ -1,6 +1,6 @@
 # Agent guide for Disktop
 
-Read [PLAN.md](PLAN.md) before implementation. It is the product scope, target folder structure, interface map, phase gates, and acceptance checklist. **Phase 0 is complete; Phase 1 is the next gate.** The contracts are normative and enforced:
+Read [PLAN.md](PLAN.md) before implementation. It is the product scope, target folder structure, interface map, phase gates, and acceptance checklist. **Phases 0 and 1 are complete; Phase 2 is the next gate.** The contracts are normative and enforced:
 `schemas/cli/v1/` and `schemas/native/v1/` define public JSON and the helper protocol,
 `src/domain/paths.ts` and `src/domain/protected-paths.ts` define path bytes and the refusal
 policy, `src/storage/` defines configuration, `eslint.config.mjs` enforces the dependency rule,
@@ -8,10 +8,12 @@ policy, `src/storage/` defines configuration, `eslint.config.mjs` enforces the d
 `docs/adr/` record the reasoning. Change a contract and its schema, examples, tests, and docs
 in the same commit.
 
-The TypeScript CLI still handles `--help` and `--version` only; the Rust helper still handles
-only `hello` and `probe` and refuses every other operation. All storage, cleanup, and TUI
-capabilities remain planned. Use the package scripts for checks and the phase gates in the plan
-for feature completion.
+The TypeScript CLI implements `devices`, the `--json` dashboard, `alerts check`, and the 80×24
+dashboard TUI against real `lsblk`, `/proc/self/mountinfo`, and `statfs` readings. Every other
+command is declared in `src/cli/parser.ts` and refuses with `not-implemented`. The Rust helper
+still handles only `hello` and `probe` and refuses every other operation, so no scan, index,
+cleanup, snapshot, or export capability exists yet. Use the package scripts for checks and the
+phase gates in the plan for feature completion.
 
 ## Release rule
 
@@ -20,6 +22,7 @@ All requested Linux capabilities must pass the plan's acceptance matrix before o
 ## Architecture boundaries
 
 - `src/domain` is pure data and policy. `src/application` uses ports. Linux adapters, providers, storage, and the native client implement ports. CLI and TUI call application services only.
+- `src/composition` is the only layer allowed to build an adapter. Everything else, including `src/bin`, receives its services as arguments. Adding a feature means wiring it there, not importing a platform module from a surface.
 - Providers discover findings and propose plans. They never delete or invoke cleanup commands directly.
 - The Rust `native/disktop-fs` helper owns arbitrary-path traversal, the detailed index, hashing, user-file mutation, and the sole durable action journal. Manager-owned cleanup runs through fixed-argument adapters and journal operations in the same reviewed action pipeline. Node may still write its own config, reports, cache, and user timer units.
 - Raw filesystem paths are bytes. Use `src/domain/paths.ts`: `bytesBase64` is the only value an operation may resolve, `display` is sanitized text. Byte totals use `bigint` internally and decimal strings in public JSON. See `docs/adr/0005-lossless-values-in-contracts.md`.
