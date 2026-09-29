@@ -1,0 +1,31 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/Dijo-404/disktop/schemas/cli/v1/dashboard.json",
+  "title": "disktop --json",
+  "type": "object",
+  "allOf": [{ "$ref": "envelope.json" }],
+  "properties": {
+    "command": { "const": "dashboard" },
+    "data": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["capability", "filesystems", "alerts"],
+      "properties": {
+        "capability": { "$ref": "common.json#/$defs/capability" },
+        "filesystems": {
+          "type": "array",
+          "items": { "$ref": "common.json#/$defs/filesystem" }
+        },
+        "alerts": {
+          "type": "array",
+          "items": { "$ref": "common.json#/$defs/alert" }
+        },
+        "cachedFindings": {
+          "description": "Findings reused from a previous scan; absent when no compatible scan is cached.",
+          "type": "array",
+          "items": { "$ref": "common.json#/$defs/identifier" }
+        }
+      }
+    }
+  }
+}

@@ -1,0 +1,28 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/Dijo-404/disktop/schemas/cli/v1/devices.json",
+  "title": "disktop devices --json",
+  "type": "object",
+  "allOf": [{ "$ref": "envelope.json" }],
+  "properties": {
+    "command": { "const": "devices" },
+    "data": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["capability", "devices", "filesystems"],
+      "properties": {
+        "capability": { "$ref": "common.json#/$defs/capability" },
+        "devices": {
+          "description": "Physical block devices counted once. Loop and pseudo devices are excluded.",
+          "type": "array",
+          "items": { "$ref": "common.json#/$defs/device" }
+        },
+        "filesystems": {
+          "description": "Mounted filesystems from /proc/self/mountinfo joined with statfs. One filesystem can have several mounts.",
+          "type": "array",
+          "items": { "$ref": "common.json#/$defs/filesystem" }
+        }
+      }
+    }
+  }
+}

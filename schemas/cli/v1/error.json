@@ -1,0 +1,12 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/Dijo-404/disktop/schemas/cli/v1/error.json",
+  "title": "Failed --json command",
+  "description": "A command that cannot produce its payload still emits a schema-compatible envelope.",
+  "type": "object",
+  "allOf": [{ "$ref": "envelope.json" }],
+  "properties": {
+    "status": { "const": "error" },
+    "exitCode": { "const": 2 }
+  }
+}
