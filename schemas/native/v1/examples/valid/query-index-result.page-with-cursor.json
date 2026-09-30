@@ -1,0 +1,56 @@
+{
+  "protocolVersion": 1,
+  "requestId": "query-index-3",
+  "eventId": "1",
+  "event": "complete",
+  "result": {
+    "scanId": "scan-20260930-8f2ac1d4",
+    "entries": [
+      {
+        "id": "9182",
+        "parentId": "41",
+        "path": "L2hvbWUvZXhhbXBsZS8uY2FjaGUvcGlwL2h0dHAtdjI=",
+        "kind": "directory",
+        "device": "2049",
+        "inode": "1442113",
+        "mountId": "29",
+        "linkCount": "14",
+        "apparentBytes": "6442450944",
+        "allocatedBytes": "6443008000",
+        "ownerId": "1000",
+        "modifiedNanoseconds": "1759190400123456789",
+        "shared": false
+      },
+      {
+        "id": "9183",
+        "parentId": "41",
+        "path": "L2hvbWUvZXhhbXBsZS8uY2FjaGUvaHVnZ2luZ2ZhY2UvaHVi",
+        "kind": "directory",
+        "device": "2049",
+        "inode": "1442250",
+        "mountId": "29",
+        "linkCount": "6",
+        "apparentBytes": "3221225472",
+        "allocatedBytes": "3221520384",
+        "ownerId": "1000",
+        "modifiedNanoseconds": "1758585600000000000",
+        "shared": false
+      }
+    ],
+    "nextCursor": "YWxsb2NhdGVkOjMyMjE1MjAzODQ6OTE4Mw",
+    "typeTotals": [
+      {
+        "extension": "log",
+        "entries": "1204",
+        "allocatedBytes": "12884901888",
+        "apparentBytes": "12884377600"
+      },
+      {
+        "extension": "",
+        "entries": "88",
+        "allocatedBytes": "4194304",
+        "apparentBytes": "4091904"
+      }
+    ]
+  }
+}

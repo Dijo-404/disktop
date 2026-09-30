@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 
 import { readFileSync } from "node:fs";
+import { resolve } from "node:path";
 import { bootstrapCli } from "../cli/bootstrap.js";
 import type { CliContext } from "../cli/context.js";
 import { createServices } from "../composition/root.js";
@@ -30,6 +31,25 @@ async function buildContext(): Promise<CliContext> {
     output,
     settings: services.settings,
     dashboard: services.dashboard,
+    storage: {
+      scan: services.scan,
+      explore: services.explore,
+      snapshots: services.snapshots,
+      defaults: services.scanDefaults,
+    },
+    // Ctrl+C asks a running command to stop at a safe boundary; it does not
+    // tear the process down and leave the work unreported.
+    signals: {
+      listen: (handler) => {
+        process.on("SIGINT", handler);
+        process.on("SIGTERM", handler);
+      },
+      stop: (handler) => {
+        process.off("SIGINT", handler);
+        process.off("SIGTERM", handler);
+      },
+    },
+    resolvePath: (path) => resolve(process.cwd(), path),
     now: () => new Date(),
     interactive,
     launchTui: (settings) =>

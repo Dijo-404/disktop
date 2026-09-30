@@ -1,0 +1,12 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/Dijo-404/disktop/schemas/native/v1/scan-result.json",
+  "title": "disktop-fs scan completion",
+  "description": "The terminal event of a scan request. A cancelled scan still completes with `complete: false` rather than vanishing.",
+  "type": "object",
+  "allOf": [{ "$ref": "event.json" }],
+  "properties": {
+    "event": { "const": "complete" },
+    "result": { "$ref": "common.json#/$defs/scanResult" }
+  }
+}

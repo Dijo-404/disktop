@@ -1,0 +1,78 @@
+{
+  "schemaVersion": "1",
+  "command": "explore",
+  "generatedAt": "2026-09-30T09:14:02.551Z",
+  "status": "complete",
+  "exitCode": 0,
+  "data": {
+    "capability": {
+      "status": "available",
+      "explanation": "The index answered from a stored scan."
+    },
+    "scanId": "scan-1759223564-0a1b2c3d",
+    "snapshotId": "snap-2026-09-30T09-12-44-008Z-0a1b2c3d",
+    "sort": "allocated",
+    "order": "descending",
+    "entries": [
+      {
+        "id": "9182",
+        "parentId": "41",
+        "path": {
+          "bytesBase64": "L2hvbWUvZXhhbXBsZS9wcm9qZWN0cy9ub2RlX21vZHVsZXM=",
+          "display": "/home/example/projects/node_modules",
+          "utf8": "/home/example/projects/node_modules"
+        },
+        "kind": "directory",
+        "device": "2049",
+        "inode": "1442113",
+        "mountId": "29",
+        "linkCount": "14",
+        "apparentBytes": "19756775424",
+        "allocatedBytes": "19757268992",
+        "ownerId": "1000",
+        "modifiedNanoseconds": "1759190400123456789",
+        "shared": false
+      },
+      {
+        "id": "9310",
+        "parentId": "9182",
+        "path": {
+          "bytesBase64": "L2hvbWUvZXhhbXBsZS9wcm9qZWN0cy9iYWNrdXAudGFy",
+          "display": "/home/example/projects/backup.tar",
+          "utf8": "/home/example/projects/backup.tar"
+        },
+        "kind": "file",
+        "device": "2049",
+        "inode": "1442990",
+        "mountId": "29",
+        "linkCount": "2",
+        "apparentBytes": "8589934592",
+        "allocatedBytes": "8589938688",
+        "ownerId": "1000",
+        "modifiedNanoseconds": "1758585600000000000",
+        "shared": true
+      }
+    ],
+    "nextCursor": "616c6c6f6361746564003933313000",
+    "typeTotals": [
+      {
+        "extension": "log",
+        "entries": "1204",
+        "allocatedBytes": "12884901888",
+        "apparentBytes": "12884377600"
+      },
+      {
+        "extension": "",
+        "entries": "88",
+        "allocatedBytes": "4194304",
+        "apparentBytes": "4091904"
+      }
+    ],
+    "completeness": {
+      "complete": true,
+      "scannedEntries": "431204",
+      "inaccessibleDirectories": "0",
+      "excludedMounts": []
+    }
+  }
+}

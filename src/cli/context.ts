@@ -1,8 +1,43 @@
 import type { DashboardService, DashboardSettings } from "../application/dashboard.js";
+import type { ExploreService } from "../application/explore.js";
+import type { ScanService } from "../application/scan.js";
+import type { SnapshotService } from "../application/snapshots.js";
+import type { RawPath } from "../domain/models.js";
+import type { Accounting } from "../ports/scan.js";
+import type { RetentionLimits } from "../ports/snapshots.js";
 import type { CliOutput } from "./parser.js";
 
 /** The CLI shows what the application already decided; it owns no settings of its own. */
 export type CliSettings = DashboardSettings;
+
+export interface ScanDefaults {
+  readonly accounting: Accounting;
+  readonly crossFilesystems: boolean;
+  readonly excludes: readonly RawPath[];
+  readonly retention: RetentionLimits;
+}
+
+/**
+ * The scan, index, and snapshot services a handler may reach, with the scan
+ * settings the configuration already resolved.
+ */
+export interface StorageServices {
+  readonly scan: ScanService;
+  readonly explore: ExploreService;
+  readonly snapshots: SnapshotService;
+  readonly defaults: ScanDefaults;
+}
+
+/**
+ * Interruption, as something a handler asks for rather than reaches for.
+ *
+ * A long command has to stop cleanly on Ctrl+C, and a test has to be able to
+ * drive that without sending itself a signal.
+ */
+export interface InterruptSource {
+  listen(handler: () => void): void;
+  stop(handler: () => void): void;
+}
 
 /**
  * Everything a command handler is allowed to reach. Services arrive already
@@ -14,7 +49,11 @@ export interface CliContext {
   readonly output: CliOutput;
   readonly settings: CliSettings;
   readonly dashboard: DashboardService;
+  readonly storage: StorageServices;
+  readonly signals: InterruptSource;
   readonly now: () => Date;
+  /** Resolve a path the user typed against the working directory. */
+  resolvePath(path: string): string;
   /** False when stdout is redirected, which also means no interactive surface. */
   readonly interactive: boolean;
   /** Settings are passed in, so a `--units` given on the command line reaches the TUI. */

@@ -50,7 +50,9 @@
     "test:pty": "npm run build && node --test tests/pty/*.test.mjs",
     "fixtures": "node scripts/generate-fixtures.mjs",
     "check": "npm run typecheck && npm run lint && npm test && npm run test:integration && npm run test:pty",
-    "prepack": "npm run build"
+    "prepack": "npm run build",
+    "test:performance": "npm run build && node --test tests/performance/*.test.mjs",
+    "bench": "npm run build && cargo build --release --locked --manifest-path native/disktop-fs/Cargo.toml && DISKTOP_BENCH_ENTRIES=1000000 node --test tests/performance/*.test.mjs"
   },
   "devDependencies": {
     "@types/node": "24.19.0",

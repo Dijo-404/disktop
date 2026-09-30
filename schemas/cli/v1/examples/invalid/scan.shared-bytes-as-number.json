@@ -1,0 +1,33 @@
+{
+  "schemaVersion": "1",
+  "command": "scan",
+  "generatedAt": "2026-09-30T09:12:44.008Z",
+  "status": "complete",
+  "exitCode": 0,
+  "data": {
+    "capability": {
+      "status": "available",
+      "explanation": "ok"
+    },
+    "scanId": "scan-1",
+    "accounting": "allocated",
+    "roots": [
+      {
+        "bytesBase64": "L2hvbWUvZXhhbXBsZQ==",
+        "display": "/home/example",
+        "utf8": "/home/example"
+      }
+    ],
+    "totals": {
+      "allocatedBytes": "1",
+      "apparentBytes": "1",
+      "sharedBytes": 2097152
+    },
+    "completeness": {
+      "complete": true,
+      "scannedEntries": "431204",
+      "inaccessibleDirectories": "0",
+      "excludedMounts": []
+    }
+  }
+}

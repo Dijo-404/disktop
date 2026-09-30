@@ -1,0 +1,24 @@
+{
+  "protocolVersion": 1,
+  "requestId": "scan-03",
+  "eventId": "9",
+  "event": "complete",
+  "result": {
+    "scanId": "scan-20260930-0000dead",
+    "complete": false,
+    "roots": [
+      "L2hvbWUvZXhhbXBsZQ=="
+    ],
+    "accounting": "allocated",
+    "scannedEntries": "10",
+    "inaccessibleDirectories": "4",
+    "allocatedBytes": "0",
+    "apparentBytes": "0",
+    "sharedBytes": "0",
+    "excludedMounts": [],
+    "warnings": [],
+    "filesystems": [
+      "2049"
+    ]
+  }
+}

@@ -1,4 +1,5 @@
 import type { CliContext } from "./context.js";
+import { EXIT, buildEnvelope, writeEnvelope } from "./output.js";
 import type { CliOutput } from "./parser.js";
 import { runCli } from "./run.js";
 
@@ -39,5 +40,36 @@ export async function bootstrapCli(
     return UNSUPPORTED_RUNTIME_EXIT;
   }
 
-  return runCli(args, await buildContext());
+  try {
+    return await runCli(args, await buildContext());
+  } catch (error) {
+    return reportUnexpected(args, output, error);
+  }
+}
+
+/**
+ * Turn an unexpected failure into the envelope shape every other outcome uses.
+ *
+ * Without this a bad `--cursor` reaches the terminal as a stack trace, with
+ * nothing on stdout and exit `1` — which in Disktop's own exit codes means
+ * "alert threshold reached", so a script cannot tell a crash from a full disk.
+ */
+function reportUnexpected(args: readonly string[], output: CliOutput, error: unknown): number {
+  const message = error instanceof Error ? error.message : "The command failed for an unknown reason.";
+  if (args.includes("--json")) {
+    writeEnvelope(
+      output.stdout,
+      buildEnvelope({
+        command: "disktop",
+        generatedAt: new Date(),
+        status: "error",
+        exitCode: EXIT.operationalError,
+        warnings: [],
+        failure: { code: "internal-error", message },
+      }),
+    );
+  } else {
+    output.stderr(`Disktop could not complete that command: ${message}\n`);
+  }
+  return EXIT.operationalError;
 }

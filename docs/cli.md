@@ -1,6 +1,6 @@
 # CLI contract
 
-Status: planned `1.0.0` command surface. `devices`, the `--json` dashboard, and `alerts check` are implemented; every other command is declared in the parser and refuses with `not-implemented`. The JSON output contract in [`schemas/cli/v1/`](../schemas/cli/v1/) is normative and is validated by `tests/contract/cli-schema.test.mjs` against examples and by `tests/integration/cli-output.test.mjs` against what the CLI actually writes on a running host. The parser and generated help are normative now; completions become normative when they are implemented. See [PLAN.md](../PLAN.md#cli-and-outputs).
+Status: planned `1.0.0` command surface. `devices`, the `--json` dashboard, `alerts check`, `scan`, `explore`, and `snapshots list|diff` are implemented; every other command is declared in the parser and refuses with `not-implemented`. The JSON output contract in [`schemas/cli/v1/`](../schemas/cli/v1/) is normative and is validated by `tests/contract/cli-schema.test.mjs` against examples and by `tests/integration/cli-output.test.mjs` against what the CLI actually writes on a running host. The parser and generated help are normative now; completions become normative when they are implemented. See [PLAN.md](../PLAN.md#cli-and-outputs).
 
 ## What works today
 
@@ -10,10 +10,35 @@ Status: planned `1.0.0` command surface. `devices`, the `--json` dashboard, and 
 | `disktop --json` | One `dashboard.json` envelope: capability, filesystems, and alerts. |
 | `disktop devices [--json]` | Physical disks counted once with their partitions, plus every mounted filesystem joined to its backing disk. |
 | `disktop alerts check [--threshold PERCENT] [--json]` | Space and inode thresholds. Exits `1` when one is reached. |
+| `disktop scan [PATH] [--json]` | Walks `PATH` (the working directory by default) through the helper, writes the detailed index, and saves a snapshot. `--accounting allocated\|apparent`, `--cross-filesystems`, `--throttle RATE`, `--max-depth DEPTH`. Ctrl+C stops it at a directory boundary and still reports what was measured. |
+| `disktop explore [PATH] [--json]` | One page of `PATH` and everything below it, from the most recent scan covering it. `--sort`, `--order`, `--kind`, `--min-size`, `--max-size`, `--ext`, `--name`, `--older-than DAYS`, `--limit`, `--cursor`, `--type-totals`. |
+| `disktop snapshots list\|diff [--json]` | Lists saved snapshots, or compares two of them (`--from`, `--to`; the two most recent by default). |
 | `disktop --units iec\|si` | Switches human-readable units. Byte values in JSON never change. |
 | `disktop --help`, `disktop --version` | Generated from the one command table in `src/cli/parser.ts`. |
 
 Everything else parses, validates its options, and then refuses with `not-implemented` and exit `2`, in the same envelope shape a working command uses.
+
+## Scanning, exploring, and growth
+
+`scan` does not delete or move anything. It walks the tree through the Rust helper, which opens every directory with `openat2` containment: it never follows a symlink, and without `--cross-filesystems` it refuses to descend into a nested mount, including a bind mount of the same filesystem. A directory it cannot open is counted and named, never treated as empty, and any scan that missed something reports `complete: false` with at least one warning.
+
+Bytes are counted once per inode. A second hardlink to an inode the scan already counted is listed with `shared: true`, and its bytes are reported as `sharedBytes` rather than added to the totals, because deleting that path frees nothing.
+
+A directory's `allocatedBytes` and `apparentBytes` are the totals for its whole subtree; a file's are its own. Per-extension totals cover regular files only, for the same reason: adding directory rows to them would count the same bytes twice.
+
+`explore` never scans. It reads the index a previous `scan` wrote, and the path narrows the listing to that directory and everything below it, so exploring `~/Downloads` after scanning `~` answers about Downloads. If no stored scan covers the path, or the path was not in the scan, it says so and names the command that would produce one.
+
+A scan of a tree with many unreadable directories reports every one of them in `inaccessibleDirectories`, but lists at most a few hundred individually and then summarises the rest as a `warnings-truncated` warning giving the count per code. Nothing is hidden; the list is bounded so that the output, the index, and every stored snapshot do not grow with the filesystem.
+
+`snapshots diff` compares two snapshots only when they measured the same thing: same roots, same excludes, same accounting mode, same mount policy, same depth limit, and the same filesystems — the ones the walk actually read, which is not the same as the ones the roots sit on once a scan is allowed to cross a mount. The comparison reports the column the scan measured, so an apparent-accounting history shows apparent growth; a sparse image that grows by gigabytes without allocating a block is exactly why that matters. Anything else is refused, because subtracting a scan that excluded a directory from one that did not produces a number indistinguishable from real growth. A diff is marked `uncertain` whenever either scan was partial or a directory appears on only one side, since that is also what a rename looks like.
+
+### Comparing against `du`
+
+`disktop scan --json` reports `allocatedBytes` on the same basis as `du -x --block-size=1`: `st_blocks × 512`, each inode counted once, no mount crossing. The two agree exactly on the same tree, and `tests/integration/scan.test.mjs` asserts it.
+
+`sharedBytes` is reported in the same unit as the totals beside it, so the two can be compared directly.
+
+Apparent bytes are not comparable against `du`. `du --apparent-size` leaves the directories' own `st_size` out of its total and Disktop includes it, so the two are answering different questions. Neither figure is what `df` reports either: reflinks, compression, snapshots, and open-but-deleted files all make a tree's size differ from a filesystem's free space.
 
 ## Command tree
 
@@ -21,7 +46,7 @@ Everything else parses, validates its options, and then refuses with `not-implem
 disktop                                      Open the TUI
 disktop --json                               Dashboard without a TTY
 disktop devices --json
-disktop scan [PATH] --json
+disktop scan [PATH] --accounting allocated|apparent --cross-filesystems --json
 disktop explore [PATH] --sort allocated --min-size 1GiB --ext log --json
 disktop find duplicates|stale|empty|broken [PATH] --json
 disktop snapshots list|diff --json

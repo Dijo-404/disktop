@@ -1,6 +1,6 @@
 # Agent guide for Disktop
 
-Read [PLAN.md](PLAN.md) before implementation. It is the product scope, target folder structure, interface map, phase gates, and acceptance checklist. **Phases 0 and 1 are complete; Phase 2 is the next gate.** The contracts are normative and enforced:
+Read [PLAN.md](PLAN.md) before implementation. It is the product scope, target folder structure, interface map, phase gates, and acceptance checklist. **Phases 0, 1, and 2 are complete; Phase 3 is the next gate.** The contracts are normative and enforced:
 `schemas/cli/v1/` and `schemas/native/v1/` define public JSON and the helper protocol,
 `src/domain/paths.ts` and `src/domain/protected-paths.ts` define path bytes and the refusal
 policy, `src/storage/` defines configuration, `eslint.config.mjs` enforces the dependency rule,
@@ -8,12 +8,21 @@ policy, `src/storage/` defines configuration, `eslint.config.mjs` enforces the d
 `docs/adr/` record the reasoning. Change a contract and its schema, examples, tests, and docs
 in the same commit.
 
-The TypeScript CLI implements `devices`, the `--json` dashboard, `alerts check`, and the 80×24
-dashboard TUI against real `lsblk`, `/proc/self/mountinfo`, and `statfs` readings. Every other
-command is declared in `src/cli/parser.ts` and refuses with `not-implemented`. The Rust helper
-still handles only `hello` and `probe` and refuses every other operation, so no scan, index,
-cleanup, snapshot, or export capability exists yet. Use the package scripts for checks and the
-phase gates in the plan for feature completion.
+The TypeScript CLI implements `devices`, the `--json` dashboard, `alerts check`, the 80×24
+dashboard TUI, and `scan`, `explore`, and `snapshots list|diff` against real `lsblk`,
+`/proc/self/mountinfo`, `statfs`, and helper readings. Every other command is declared in
+`src/cli/parser.ts` and refuses with `not-implemented`. The Rust helper implements the read
+operations `hello`, `probe`, `scan`, `query-index`, and `cancel`, and refuses every operation
+that would change a user file, so no cleanup, journal, or export capability exists yet. Use
+the package scripts for checks and the phase gates in the plan for feature completion.
+
+Phase 2's contracts: `scan` and `query-index` take an `indexDirectory` because a query usually
+runs in a different helper process from the scan that wrote the index. A directory row's byte
+totals are its whole subtree and a file row's are its own, so per-extension totals cover
+regular files only. A second hardlink is indexed with `shared: true` and its bytes reported as
+`sharedBytes`, never added. A result with `complete: false` is invalid without a warning
+saying what was missed. `npm run bench` measures the budget in
+`docs/adr/0002-native-helper-and-index.md`; a regression is investigated, not restated.
 
 ## Release rule
 
