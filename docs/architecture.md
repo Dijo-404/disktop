@@ -37,12 +37,14 @@ Node may write its own config, snapshots, reports, scan cache metadata, and user
 | Task | Flow | Persistent data |
 | --- | --- | --- |
 | Device dashboard | `lsblk -J -b`, `/proc/self/mountinfo`, and `statfs` joined by the Linux inventory adapter, through `InventoryPort` to `application/dashboard.ts`, to the CLI or TUI | Optional cached view. |
-| Tree exploration | Application scan to native helper to paginated index queries | Current detailed SQLite scan index; compact snapshots for growth. |
+| Tree exploration | `application/scan.ts` through `ScanPort` to the helper's `openat2` walk and SQLite index; `application/explore.ts` through `FileIndexPort` to keyset-paginated `query-index` pages | Current detailed SQLite scan index under `$XDG_CACHE_HOME`, bounded by scan count and byte budget; compact snapshots under `$XDG_DATA_HOME` for growth. |
 | Footprint finding | Providers and Linux package adapters to application footprint service | Findings can be recomputed; selected plan is stored separately. |
 | Cleanup | Provider or explicit path to immutable plan, confirmation, revalidation, helper or fixed-argument manager adapter, journal, verification | Expiring reviewed plan and durable native journal. |
 | Report | Application query to JSON/CSV/HTML renderer | Only an explicitly requested output file. |
 
-Scans stream progress and can end incomplete. The detailed index stays disk-backed so Node memory does not grow with every file. Snapshots hold directory aggregates and top entries, not copies of all indexed files. Compare snapshots only when root, filesystem identity, excludes, and accounting mode match.
+Scans stream progress and can end incomplete. The detailed index stays disk-backed so Node memory does not grow with every file; [adr/0002](adr/0002-native-helper-and-index.md) records the measurements. Snapshots hold directory aggregates and top entries, not copies of all indexed files. Compare snapshots only when root, filesystem identity, excludes, accounting mode, and mount policy match; `application/snapshots.ts` refuses anything else and names every reason, because subtracting two different scopes produces a number that reads exactly like real growth.
+
+Cancellation runs the same way at every layer. The CLI turns Ctrl+C into an `AbortSignal`, the native client sends `cancel` by request ID and keeps reading, and the helper stops at a directory boundary and emits its final event. A partial result is reported as partial with the reason; it is never returned as a smaller tree, and a missing final event is never read as success.
 
 ## Shared contracts
 

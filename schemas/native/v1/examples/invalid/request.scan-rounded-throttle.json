@@ -3,10 +3,13 @@
   "requestId": "scan-03",
   "operation": "scan",
   "arguments": {
-    "roots": ["L2hvbWUvZXhhbXBsZQ=="],
+    "roots": [
+      "L2hvbWUvZXhhbXBsZQ=="
+    ],
     "crossFilesystems": false,
     "excludes": [],
     "accounting": "allocated",
-    "throttleBytesPerSecond": 52428800
+    "throttleBytesPerSecond": 52428800,
+    "indexDirectory": "L2hvbWUvZXhhbXBsZS8uY2FjaGUvZGlza3RvcA=="
   }
 }

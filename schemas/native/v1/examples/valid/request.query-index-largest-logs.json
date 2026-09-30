@@ -1,0 +1,21 @@
+{
+  "protocolVersion": 1,
+  "requestId": "query-index-3",
+  "operation": "query-index",
+  "arguments": {
+    "scanId": "scan-20260930-8f2ac1d4",
+    "indexDirectory": "L2hvbWUvZXhhbXBsZS8uY2FjaGUvZGlza3RvcA==",
+    "filter": {
+      "extension": "log",
+      "minAllocatedBytes": "1073741824",
+      "kinds": [
+        "file"
+      ],
+      "underPath": "L2hvbWUvZXhhbXBsZS8uY2FjaGU="
+    },
+    "sort": "allocated",
+    "order": "descending",
+    "limit": "50",
+    "includeTypeTotals": true
+  }
+}

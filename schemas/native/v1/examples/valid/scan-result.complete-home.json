@@ -1,0 +1,24 @@
+{
+  "protocolVersion": 1,
+  "requestId": "scan-01",
+  "eventId": "512",
+  "event": "complete",
+  "result": {
+    "scanId": "scan-20260930-8f2ac1d4",
+    "complete": true,
+    "roots": [
+      "L2hvbWUvZXhhbXBsZQ=="
+    ],
+    "accounting": "allocated",
+    "scannedEntries": "431204",
+    "inaccessibleDirectories": "0",
+    "allocatedBytes": "91268055040",
+    "apparentBytes": "90993422336",
+    "sharedBytes": "2097152",
+    "excludedMounts": [],
+    "warnings": [],
+    "filesystems": [
+      "2049"
+    ]
+  }
+}

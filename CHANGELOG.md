@@ -4,6 +4,92 @@ All public changes will be recorded here when the first complete Linux release i
 
 ## Unreleased
 
+### Phase 2: scanner, index, search, and growth history
+
+- The Rust helper walks a tree with `openat2` containment: `RESOLVE_BENEATH`,
+  `RESOLVE_NO_SYMLINKS`, and `RESOLVE_NO_MAGICLINKS` on every descent, plus
+  `RESOLVE_NO_XDEV` unless the scan asked to cross filesystems, so a symlink, a `..`, a
+  procfs magic link, or a bind mount of the same filesystem cannot move it out of the
+  subtree it was given. A kernel that refuses `openat2` gets `unsupported-kernel` and no
+  scan; there is no fallback that drops the guarantee.
+- The walk holds one open directory stream per level, so its descriptors and memory
+  follow the tree's depth rather than its entry count, and it aggregates each directory
+  on the way back up so directories can be ranked by subtree size without a second pass.
+- Bytes are counted once per `(device, inode)`. A second hardlink is listed with
+  `shared: true` and its bytes reported as `sharedBytes` rather than added to the totals,
+  because deleting that path frees nothing.
+- A directory that cannot be opened is counted and named, never rolled up as zero, and
+  any scan that missed something reports `complete: false` with at least one warning.
+  The schema rejects a partial result that carries no warning.
+- Added the bounded SQLite index inside the helper: names as `BLOB` bytes with a separate
+  normalized searchable column, parent IDs instead of repeated absolute paths, indexed
+  size, extension, timestamp and owner columns, and pruning by scan count and byte
+  budget. Paths are rebuilt one page at a time, so neither process holds the tree.
+- Added `query-index`: keyset-paginated, filtered, sorted pages with an opaque cursor, so
+  page 900 costs what page 1 costs and no row is repeated or skipped when the index is
+  pruned between pages. Per-extension totals cover regular files only, because directory
+  rows carry their subtree and would count the same bytes twice.
+- The protocol now runs a scan on its own thread and emits `accepted`, `progress`, and a
+  single `complete`. `cancel` stops a named scan at a directory boundary; it still writes
+  its totals and emits a final event, so an interrupted scan leaves a usable index rather
+  than nothing. Cancelling a request that is not in flight answers `unknown-request`.
+- Implemented `disktop scan`, `disktop explore`, and `disktop snapshots list|diff`.
+  Ctrl+C during a scan exits `130` with the partial result and its reasons. `explore`
+  never scans: with no stored scan covering the path it names the command that makes one.
+- Added versioned compact snapshots under `$XDG_DATA_HOME`, written to a temporary name
+  and renamed into place so a crash mid-write cannot leave a truncated file that would
+  later read as a smaller filesystem. Retention is by count and by byte budget, and never
+  removes the only snapshot.
+- `snapshots diff` compares two snapshots only when they measured the same thing: same
+  roots, excludes, accounting mode, mount policy, and filesystems. Anything else is
+  refused with every reason named. A diff is marked uncertain when either scan was
+  partial or a directory appears on only one side, which is also what a rename looks
+  like.
+- Recorded the measured memory and latency budget in
+  `docs/adr/0002-native-helper-and-index.md`: on a one-million-entry tree, Node's peak
+  RSS is 70.6 MiB against 66.2 MiB at a tenth the size, the helper's is 14.9 MiB, first
+  progress arrives in 148 ms, and an index page returns in 176 ms including process
+  start. `npm run bench` reproduces them.
+- Allocated totals are asserted equal to `du -x` over the same tree. Apparent totals are
+  not compared: `du --apparent-size` excludes directories' own `st_size` and Disktop
+  includes it.
+
+After review, in the same phase:
+
+- `disktop explore PATH` now narrows the listing to that path and everything below it.
+  It previously used the path only to choose which scan to read, and then ranked the
+  whole scan — so exploring one directory after scanning a home directory answered about
+  the home directory while appearing to answer about the directory. The index records a
+  subtree's primary-key range as the depth-first walk closes each directory, so the
+  filter costs a key range rather than a descendant search.
+- A scan's warning list is capped. One unreadable directory produced one warning with a
+  full path, with no bound: 3,000 of them made a 1.7 MB JSON line and a 966 KB snapshot,
+  and scanning `/` as an ordinary user is worse. Every occurrence is still counted, and
+  the overflow is summarised per code as a `warnings-truncated` warning.
+- Growth history follows the accounting mode the scan used. It previously reported
+  allocated bytes whatever was asked for, so a sparse image growing 200 GiB of apparent
+  size showed as no growth at all — the question `--accounting apparent` exists to answer.
+- A scan's depth limit is part of a snapshot's scope. Without it, a depth-limited scan of
+  an unchanged tree compared against a full one as a large deletion.
+- A snapshot records the filesystems the walk actually read, reported by the helper,
+  rather than the ones the roots sit on. Under `--cross-filesystems` the two differ, and
+  two scans that traversed different mounts compared as though they had measured the same
+  thing.
+- `sharedBytes` is reported in the unit the scan was asked for. Under apparent accounting
+  it was still allocated bytes, putting two units in one totals object and making a
+  200 MiB second hardlink read as 4 KiB.
+- An unexpected failure now writes one error envelope and exits `2`. A mangled `--cursor`
+  previously printed a stack trace, wrote nothing to stdout, and exited `1` — which in
+  Disktop's own exit codes means an alert threshold was reached, so a script could not
+  tell a crash from a full disk. `--cursor` and `--limit` are validated before the helper
+  is reached.
+- A malformed `throttleBytesPerSecond`, `maxDepth`, `keepScans`, or filter integer is
+  refused as `invalid-arguments` instead of silently falling back to a default, which
+  would have run a different scan than the one asked for.
+- A panicking scan worker still emits a terminal event, and a poisoned writer lock no
+  longer swallows one. A client waits for a terminal event and has no timeout, so a
+  dropped one hung it for as long as the helper lived.
+
 ### Phase 1: vertical slice and inventory
 
 - The command surface is defined once in `src/cli/parser.ts` and drives parsing, option

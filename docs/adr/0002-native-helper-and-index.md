@@ -35,14 +35,31 @@ read as success, and an interrupted action is reconciled from the journal at sta
 `node:sqlite` is not used. Its Node 24 API is still a release candidate, and putting the
 index in Node would defeat the memory property this decision exists for.
 
-**Budget, fixed here and measured in Phase 2:** on a one-million-entry reference tree
-from `tests/fixtures/generate.mjs`, Node's peak RSS stays under 256 MiB and does not grow
-with entry count; the helper's stays under 512 MiB; the first progress event arrives
-within 2 seconds; and a paginated index query over the finished scan returns within
-200 ms. Measurement is `/usr/bin/time -v` for RSS and the CLI's own timings for latency,
-on the reference fixture, compared against `du -x` over the same scope where the
-semantics match. A regression is investigated before release rather than restated as a
-new budget.
+**Budget, measured in Phase 2.** On a one-million-entry reference tree from
+`tests/fixtures/generate.mjs`, built from a release helper and measured by
+`tests/performance/scan-memory.test.mjs`:
+
+| Figure | Budget | Observed |
+| --- | --- | --- |
+| Node peak RSS | under 256 MiB, flat in entry count | 66.2 MiB at 100,000 entries, 70.6 MiB at 1,000,000 |
+| Helper peak RSS | under 512 MiB | 14.9 MiB |
+| First progress event | within 2 s | 148 ms |
+| One paginated index page | within 200 ms | 176 ms, including Node startup and spawning the helper |
+
+Memory is read from each process's own `VmHWM` in `/proc`, by PID, so Node's
+figure never includes the helper's. Node's peak rises by under 7% for ten times
+the entries, which is the property this decision exists for. The test asserts
+the budgets and also fails if the larger tree's peak exceeds the smaller one's
+by more than half, so a regression that reintroduces per-entry accumulation
+fails rather than being restated as a new budget.
+
+Two figures are deliberately conservative. The index page is timed end to end,
+including starting Node and spawning the helper, because that is what a person
+running `disktop explore` waits for. `du -x` agreement is asserted for
+allocated bytes only; `du --apparent-size` excludes directories' own `st_size`
+and Disktop includes it, so the apparent totals answer different questions.
+Numbers were taken on one developer machine with a Btrfs working tree and a
+tmpfs `/tmp`; they are a regression baseline, not a promise about every host.
 
 ## Alternatives considered
 
@@ -54,7 +71,12 @@ lifecycle, permissions, and stale-state problems for a tool that runs interactiv
 
 ## Evidence and follow-up
 
-Phase 2's gate: the million-entry memory measurement, `du -x` comparison, invalid-byte
-names, bind mounts, inaccessible directories, and cancel/restart. The budget numbers
-above are targets until that gate produces measurements; the first measured run replaces
-them with observed figures in this ADR.
+Phase 2's gate is met and its figures are recorded above. The measurements come from
+`tests/performance/scan-memory.test.mjs` (`npm run bench` for the million-entry tree);
+`du -x` agreement, invalid-byte names, bind mounts, inaccessible directories, and
+cancel-and-continue come from `tests/integration/scan.test.mjs`. SQLite is `rusqlite`
+with the `bundled` feature, so the helper carries its own copy and does not depend on
+the host's `libsqlite3`.
+
+A regression against these numbers is investigated before release. Restating a worse
+figure as the new budget is the failure this section exists to prevent.

@@ -1,0 +1,122 @@
+{
+  "schemaVersion": "1",
+  "command": "snapshots diff",
+  "generatedAt": "2026-09-30T09:20:00.000Z",
+  "status": "complete",
+  "exitCode": 0,
+  "data": {
+    "earlier": {
+      "id": "snap-2026-09-01T00-00-00-000Z-11112222",
+      "scanId": "scan-1756684800-11112222",
+      "scannedAt": "2026-09-01T00:00:00.000Z",
+      "scope": {
+        "roots": [
+          {
+            "bytesBase64": "L2hvbWUvZXhhbXBsZS9wcm9qZWN0cw==",
+            "display": "/home/example/projects",
+            "utf8": "/home/example/projects"
+          }
+        ],
+        "excludes": [
+          {
+            "bytesBase64": "L3Byb2M=",
+            "display": "/proc",
+            "utf8": "/proc"
+          },
+          {
+            "bytesBase64": "L3N5cw==",
+            "display": "/sys",
+            "utf8": "/sys"
+          }
+        ],
+        "accounting": "allocated",
+        "crossFilesystems": false,
+        "filesystems": [
+          "fs-259-2"
+        ]
+      },
+      "totals": {
+        "allocatedBytes": "91268055040",
+        "apparentBytes": "90993422336",
+        "sharedBytes": "2097152"
+      },
+      "completeness": {
+        "complete": true,
+        "scannedEntries": "431204",
+        "inaccessibleDirectories": "0",
+        "excludedMounts": []
+      }
+    },
+    "later": {
+      "id": "snap-2026-09-30T09-12-44-008Z-0a1b2c3d",
+      "scanId": "scan-1759223564-0a1b2c3d",
+      "scannedAt": "2026-09-30T09:12:44.008Z",
+      "scope": {
+        "roots": [
+          {
+            "bytesBase64": "L2hvbWUvZXhhbXBsZS9wcm9qZWN0cw==",
+            "display": "/home/example/projects",
+            "utf8": "/home/example/projects"
+          }
+        ],
+        "excludes": [
+          {
+            "bytesBase64": "L3Byb2M=",
+            "display": "/proc",
+            "utf8": "/proc"
+          },
+          {
+            "bytesBase64": "L3N5cw==",
+            "display": "/sys",
+            "utf8": "/sys"
+          }
+        ],
+        "accounting": "allocated",
+        "crossFilesystems": false,
+        "filesystems": [
+          "fs-259-2"
+        ]
+      },
+      "totals": {
+        "allocatedBytes": "94596055040",
+        "apparentBytes": "94321422336",
+        "sharedBytes": "2097152"
+      },
+      "completeness": {
+        "complete": true,
+        "scannedEntries": "431204",
+        "inaccessibleDirectories": "0",
+        "excludedMounts": []
+      }
+    },
+    "totalDeltaBytes": "3328000000",
+    "directories": [
+      {
+        "path": {
+          "bytesBase64": "L2hvbWUvZXhhbXBsZS9wcm9qZWN0cy9ub2RlX21vZHVsZXM=",
+          "display": "/home/example/projects/node_modules",
+          "utf8": "/home/example/projects/node_modules"
+        },
+        "kind": "grew",
+        "earlierBytes": "16429268992",
+        "laterBytes": "19757268992",
+        "deltaBytes": "3328000000"
+      },
+      {
+        "path": {
+          "bytesBase64": "L2hvbWUvZXhhbXBsZS9wcm9qZWN0cy9vbGQtYnVpbGQ=",
+          "display": "/home/example/projects/old-build",
+          "utf8": "/home/example/projects/old-build"
+        },
+        "kind": "removed",
+        "earlierBytes": "524288000",
+        "laterBytes": "0",
+        "deltaBytes": "-524288000"
+      }
+    ],
+    "uncertain": true,
+    "uncertainty": [
+      "A directory present on only one side may have been created, removed, renamed, or simply pushed out of the snapshot top entries."
+    ]
+  }
+}

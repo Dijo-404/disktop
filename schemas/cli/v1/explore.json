@@ -1,0 +1,78 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/Dijo-404/disktop/schemas/cli/v1/explore.json",
+  "title": "disktop explore --json",
+  "description": "One page of a scan index. There is no response shape that returns a whole tree; `nextCursor` continues the listing.",
+  "type": "object",
+  "allOf": [
+    {
+      "$ref": "envelope.json"
+    }
+  ],
+  "properties": {
+    "command": {
+      "const": "explore"
+    },
+    "data": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "capability",
+        "scanId",
+        "snapshotId",
+        "sort",
+        "order",
+        "entries"
+      ],
+      "properties": {
+        "capability": {
+          "$ref": "common.json#/$defs/capability"
+        },
+        "scanId": {
+          "$ref": "common.json#/$defs/identifier"
+        },
+        "snapshotId": {
+          "$ref": "common.json#/$defs/identifier"
+        },
+        "sort": {
+          "type": "string",
+          "enum": [
+            "allocated",
+            "apparent",
+            "modified",
+            "name"
+          ]
+        },
+        "order": {
+          "type": "string",
+          "enum": [
+            "ascending",
+            "descending"
+          ]
+        },
+        "entries": {
+          "type": "array",
+          "maxItems": 1000,
+          "items": {
+            "$ref": "common.json#/$defs/indexedEntry"
+          }
+        },
+        "nextCursor": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 512
+        },
+        "typeTotals": {
+          "type": "array",
+          "items": {
+            "$ref": "common.json#/$defs/typeTotal"
+          }
+        },
+        "completeness": {
+          "description": "The completeness of the scan this page came from. A page of a partial scan is not a picture of the whole tree.",
+          "$ref": "common.json#/$defs/completeness"
+        }
+      }
+    }
+  }
+}
