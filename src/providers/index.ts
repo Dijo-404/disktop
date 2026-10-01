@@ -1,4 +1,6 @@
+import type { PackageInventoryPort } from "../ports/packages.js";
 import type { FindingProvider } from "../ports/providers.js";
+import { createInstalledAppsProvider } from "./apps/index.js";
 import {
   createCondaProvider,
   createNodeVersionsProvider,
@@ -29,7 +31,11 @@ import {
  * nothing: registration happens here and nowhere else, which keeps the set a
  * release discovers readable in one place.
  */
-export function createBuiltInProviders(): readonly FindingProvider[] {
+export interface BuiltInProviderPorts {
+  readonly packages: PackageInventoryPort;
+}
+
+export function createBuiltInProviders(ports: BuiltInProviderPorts): readonly FindingProvider[] {
   return [
     createCondaProvider(),
     createPythonEnvsProvider(),
@@ -47,5 +53,6 @@ export function createBuiltInProviders(): readonly FindingProvider[] {
     createVirtualMachineProvider(),
     createSystemSnapshotsProvider(),
     createSwapProvider(),
+    createInstalledAppsProvider(ports.packages),
   ];
 }
