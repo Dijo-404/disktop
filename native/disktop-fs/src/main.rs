@@ -1,3 +1,4 @@
+mod actions;
 mod base64;
 mod guard;
 mod index;

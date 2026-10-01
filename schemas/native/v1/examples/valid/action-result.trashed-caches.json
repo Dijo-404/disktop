@@ -1,0 +1,18 @@
+{
+  "protocolVersion": 1,
+  "requestId": "trash-01",
+  "eventId": "4",
+  "event": "complete",
+  "result": {
+    "journalId": "act-1759305679004-9f2c1ab07d4e5610",
+    "state": "partial",
+    "completed": "1",
+    "skipped": "1",
+    "failed": "0",
+    "selectedBytes": "7318306816",
+    "bytesMovedToTrash": "7314112512",
+    "freeBytesBefore": "42949672960",
+    "freeBytesAfter": "42949672960",
+    "undoAvailable": true
+  }
+}

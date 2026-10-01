@@ -7,11 +7,6 @@
 //! refuses mount points, including bind mounts. There is no fallback path that
 //! drops those guarantees: a kernel that cannot provide them refuses the scan.
 
-// The write primitives below are called by the mutation operations, which
-// arrive in the next commit. Until then the binary reads only, which the
-// dead-code lint sees as unused; the attribute goes away with the first caller.
-#![allow(dead_code)]
-
 use std::ffi::{CString, c_void};
 use std::io;
 use std::os::unix::io::RawFd;
@@ -240,15 +235,11 @@ pub fn renameat_no_replace(
     Ok(())
 }
 
-pub struct SpaceReading {
-    /// Blocks free on the filesystem, including the ones reserved for root.
-    pub free_bytes: u64,
-    /// Blocks an unprivileged process can actually use. This is what `df`
-    /// calls available and what a person means by free space.
-    pub available_bytes: u64,
-}
-
-pub fn statvfs_at(path: &[u8]) -> io::Result<SpaceReading> {
+/// Space an unprivileged process can still use on the filesystem holding
+/// `path`: what `df` calls available and what a person means by free space.
+/// The blocks reserved for root are left out, because they are not space this
+/// user could reclaim.
+pub fn available_bytes_at(path: &[u8]) -> io::Result<u64> {
     let name = cstring(path)?;
     let mut buffer = std::mem::MaybeUninit::<libc::statvfs>::zeroed();
     let result = unsafe { libc::statvfs(name.as_ptr(), buffer.as_mut_ptr()) };
@@ -261,10 +252,7 @@ pub fn statvfs_at(path: &[u8]) -> io::Result<SpaceReading> {
     } else {
         stat.f_frsize
     };
-    Ok(SpaceReading {
-        free_bytes: stat.f_bfree.saturating_mul(unit),
-        available_bytes: stat.f_bavail.saturating_mul(unit),
-    })
+    Ok(stat.f_bavail.saturating_mul(unit))
 }
 
 /// Make a file's bytes durable before anything else depends on them existing.

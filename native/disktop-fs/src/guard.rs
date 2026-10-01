@@ -11,11 +11,6 @@
 //! without ever following a symlink, and its live identity is compared against
 //! the fingerprint the reviewed plan recorded.
 
-// The mutation operations are this module's callers and arrive in the next
-// commits; until then the binary resolves and guards nothing, which the
-// dead-code lint sees as unused. This attribute goes away with the first one.
-#![allow(dead_code)]
-
 use crate::sys::{self, EntryKind, Metadata};
 use std::io;
 use std::os::unix::ffi::OsStrExt;
@@ -84,7 +79,6 @@ pub struct Fingerprint {
 pub struct ResolvedParent {
     descriptor: RawFd,
     pub name: Vec<u8>,
-    pub path: Vec<u8>,
 }
 
 impl ResolvedParent {
@@ -140,10 +134,6 @@ impl Guard {
             mount_roots,
             excluded,
         })
-    }
-
-    pub fn home(&self) -> &[u8] {
-        &self.home
     }
 
     /// The policy no option overrides.
@@ -253,7 +243,6 @@ pub fn resolve_parent(target: &[u8]) -> Result<ResolvedParent, Refusal> {
     Ok(ResolvedParent {
         descriptor,
         name: name.to_vec(),
-        path: target[..target.len() - name.len() - 1].to_vec(),
     })
 }
 
@@ -311,9 +300,7 @@ pub fn revalidate(parent: &ResolvedParent, expected: &Fingerprint) -> Result<Met
 /// `path`. Read before and after an action so the result can report what
 /// actually changed instead of what was selected.
 pub fn free_bytes(path: &[u8]) -> Option<u64> {
-    sys::statvfs_at(path)
-        .ok()
-        .map(|space| space.available_bytes)
+    sys::available_bytes_at(path).ok()
 }
 
 /// Mount points as the kernel currently reports them, including bind mounts.
@@ -531,7 +518,7 @@ mod tests {
     fn the_home_directory_itself_is_never_a_target_but_what_is_under_it_can_be() {
         let sandbox = Sandbox::new("guard-home");
         let guard = guard(&sandbox);
-        let home = guard.home().to_vec();
+        let home = home_directory().expect("this machine has a home directory");
         assert_eq!(
             guard
                 .classify(&home)

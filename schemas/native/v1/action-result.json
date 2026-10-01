@@ -1,0 +1,20 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/Dijo-404/disktop/schemas/native/v1/action-result.json",
+  "title": "disktop-fs action completion",
+  "description": "The terminal event of a request that changed user files. Every item it counts has a durable journal outcome behind it.",
+  "type": "object",
+  "allOf": [
+    {
+      "$ref": "event.json"
+    }
+  ],
+  "properties": {
+    "event": {
+      "const": "complete"
+    },
+    "result": {
+      "$ref": "common.json#/$defs/actionResult"
+    }
+  }
+}

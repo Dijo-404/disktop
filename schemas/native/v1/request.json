@@ -114,10 +114,7 @@
         "type": "object",
         "properties": {
           "operation": {
-            "enum": [
-              "trash",
-              "erase"
-            ]
+            "const": "erase"
           }
         },
         "required": [
@@ -188,6 +185,26 @@
         "properties": {
           "arguments": {
             "$ref": "#/$defs/journalArguments"
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "type": "object",
+        "properties": {
+          "operation": {
+            "const": "trash"
+          }
+        },
+        "required": [
+          "operation"
+        ]
+      },
+      "then": {
+        "properties": {
+          "arguments": {
+            "$ref": "#/$defs/trashArguments"
           }
         }
       }
@@ -354,6 +371,36 @@
         },
         "limit": {
           "$ref": "common.json#/$defs/decimalInteger"
+        }
+      }
+    },
+    "trashArguments": {
+      "description": "A Trash move. `homeTrashDirectory` is `$XDG_DATA_HOME/Trash`; a target on another filesystem goes to that mount's own Trash instead, and refuses rather than falling back to removal.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "planId",
+        "journalDirectory",
+        "homeTrashDirectory",
+        "targets"
+      ],
+      "properties": {
+        "planId": {
+          "$ref": "common.json#/$defs/planId"
+        },
+        "journalDirectory": {
+          "$ref": "common.json#/$defs/pathBytes"
+        },
+        "homeTrashDirectory": {
+          "$ref": "common.json#/$defs/pathBytes"
+        },
+        "targets": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 100000,
+          "items": {
+            "$ref": "common.json#/$defs/mutationTarget"
+          }
         }
       }
     }
