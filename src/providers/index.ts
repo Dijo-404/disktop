@@ -27,6 +27,7 @@ import {
   createCrashProvider,
   createLogProvider,
   createOpenDeletedProvider,
+  createPerUserProvider,
   createSmartProvider,
   createWindowsSubsystemProvider,
 } from "./diagnostics/index.js";
@@ -66,5 +67,6 @@ export function createBuiltInProviders(ports: BuiltInProviderPorts): readonly Fi
     createOpenDeletedProvider(),
     createSmartProvider(),
     createWindowsSubsystemProvider(),
+    createPerUserProvider(),
   ];
 }

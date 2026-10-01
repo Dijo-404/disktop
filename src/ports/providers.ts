@@ -59,8 +59,25 @@ export interface IndexSearch {
   readonly searched: boolean;
 }
 
+/** One owner's share of a stored scan, with how complete that scan was. */
+export interface OwnerUsage {
+  readonly ownerId: bigint;
+  readonly entries: bigint;
+  readonly allocatedBytes: Bytes;
+  readonly apparentBytes: Bytes;
+}
+
+export interface OwnerUsageReading {
+  readonly owners: readonly OwnerUsage[];
+  /** False when no stored scan covers the root, which is not "nobody owns anything". */
+  readonly searched: boolean;
+  /** False when the scan these totals come from did not reach everything. */
+  readonly complete: boolean;
+}
+
 export interface IndexSearchPort {
   directoriesNamed(names: readonly string[], limit: number): Promise<IndexSearch>;
+  ownerTotals(limit: number): Promise<OwnerUsageReading>;
 }
 
 /**

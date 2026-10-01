@@ -2,7 +2,13 @@ import { CapabilityUnavailable } from "../../domain/errors.js";
 import type { RawPath, Warning } from "../../domain/models.js";
 import { isWithin, pathBytes } from "../../domain/paths.js";
 import type { Accounting, FileIndexPort, ScanPort } from "../../ports/scan.js";
-import type { FootprintMeasurement, FootprintPort, FootprintReading, IndexSearchPort } from "../../ports/providers.js";
+import type {
+  FootprintMeasurement,
+  FootprintPort,
+  FootprintReading,
+  IndexSearchPort,
+  OwnerUsageReading,
+} from "../../ports/providers.js";
 import type { SnapshotStore } from "../../ports/snapshots.js";
 
 export interface IndexFootprintOptions {
@@ -121,6 +127,33 @@ export function createIndexFootprint(options: IndexFootprintOptions): FootprintP
       }
       return { paths: found.slice(0, limit), searched: true };
     },
+
+    async ownerTotals(limit): Promise<OwnerUsageReading> {
+      const home = options.home;
+      if (home === undefined) {
+        return { owners: [], searched: false, complete: false };
+      }
+      const covering = await newestCoveringSnapshot(options.snapshots, home);
+      if (covering === undefined) {
+        return { owners: [], searched: false, complete: false };
+      }
+
+      const page = await options.index.query({
+        scanId: covering.scanId,
+        filter: { underPath: home },
+        sort: "allocated",
+        order: "descending",
+        // The page itself is not wanted; the aggregate is.
+        limit: 1,
+        includeOwnerTotals: true,
+      });
+
+      return {
+        owners: (page.ownerTotals ?? []).slice(0, limit),
+        searched: true,
+        complete: covering.complete,
+      };
+    },
   };
 }
 
@@ -182,12 +215,22 @@ async function newestCovering(
   snapshots: Pick<SnapshotStore, "list">,
   wanted: RawPath,
 ): Promise<string | undefined> {
+  return (await newestCoveringSnapshot(snapshots, wanted))?.scanId;
+}
+
+async function newestCoveringSnapshot(
+  snapshots: Pick<SnapshotStore, "list">,
+  wanted: RawPath,
+): Promise<{ readonly scanId: string; readonly complete: boolean } | undefined> {
   const target = pathBytes(wanted);
   const stored = await snapshots.list();
   const covering = stored.find((snapshot) =>
     snapshot.scope.roots.some((root) => isWithin(pathBytes(root), target)),
   );
-  return covering?.scanId;
+  if (covering === undefined) {
+    return undefined;
+  }
+  return { scanId: covering.scanId, complete: covering.completeness?.complete ?? true };
 }
 
 function lastSegment(path: RawPath): string {
