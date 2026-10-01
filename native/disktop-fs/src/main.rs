@@ -1,5 +1,6 @@
 mod base64;
 mod index;
+mod journal;
 mod protocol;
 mod query;
 mod sys;

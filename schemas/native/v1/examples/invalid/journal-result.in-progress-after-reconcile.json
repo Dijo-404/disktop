@@ -1,0 +1,31 @@
+{
+  "protocolVersion": 1,
+  "requestId": "journal-02",
+  "eventId": "1",
+  "event": "complete",
+  "result": {
+    "reconciled": "1",
+    "records": [
+      {
+        "id": "act-1759305100112-3a7bd4e9c0f28513",
+        "planId": "plan-01HQ8Z0000000000",
+        "operation": "erase",
+        "startedAtMilliseconds": "1759305100112",
+        "state": "partial",
+        "completed": "0",
+        "skipped": "0",
+        "failed": "0",
+        "selectedBytes": "0",
+        "bytesMovedToTrash": "0",
+        "items": [
+          {
+            "position": "0",
+            "path": "L2hvbWUvZXhhbXBsZS9qdW5r",
+            "outcome": "in-progress",
+            "bytes": "0"
+          }
+        ]
+      }
+    ]
+  }
+}

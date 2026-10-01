@@ -1,0 +1,57 @@
+{
+  "protocolVersion": 1,
+  "requestId": "journal-01",
+  "eventId": "1",
+  "event": "complete",
+  "result": {
+    "reconciled": "1",
+    "records": [
+      {
+        "id": "act-1759305679004-9f2c1ab07d4e5610",
+        "planId": "plan-01HQ8Z3M4K5N6P7Q",
+        "operation": "trash",
+        "startedAtMilliseconds": "1759305679004",
+        "finishedAtMilliseconds": "1759305679231",
+        "state": "complete",
+        "completed": "1",
+        "skipped": "0",
+        "failed": "0",
+        "selectedBytes": "7314112512",
+        "bytesMovedToTrash": "7314112512",
+        "freeBytesBefore": "42949672960",
+        "freeBytesAfter": "42949672960",
+        "items": [
+          {
+            "position": "0",
+            "path": "L2hvbWUvZXhhbXBsZS8uY2FyZ28vcmVnaXN0cnk=",
+            "destination": "L2hvbWUvZXhhbXBsZS8ubG9jYWwvc2hhcmUvVHJhc2gvZmlsZXMvcmVnaXN0cnk=",
+            "outcome": "completed",
+            "bytes": "7314112512"
+          }
+        ]
+      },
+      {
+        "id": "act-1759305100112-3a7bd4e9c0f28513",
+        "planId": "plan-01HQ8Z0000000000",
+        "operation": "erase",
+        "startedAtMilliseconds": "1759305100112",
+        "state": "uncertain",
+        "completed": "0",
+        "skipped": "0",
+        "failed": "0",
+        "selectedBytes": "0",
+        "bytesMovedToTrash": "0",
+        "items": [
+          {
+            "position": "0",
+            "path": "L2hvbWUvZXhhbXBsZS9qdW5r",
+            "outcome": "uncertain",
+            "message": "Disktop stopped around this operation and cannot tell whether it happened.",
+            "bytes": "0"
+          }
+        ]
+      }
+    ],
+    "nextCursor": "3137353933303531303031313200616374"
+  }
+}
