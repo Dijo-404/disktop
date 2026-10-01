@@ -21,7 +21,26 @@ export interface EntryFingerprint {
 export interface PlannedEntry {
   readonly path: RawPath;
   readonly expected: EntryFingerprint;
+  /**
+   * What this entry measured at review time. The helper renames a subtree in
+   * one syscall rather than re-measuring it, so this is the number a result
+   * reports back, partitioned by what became of the entry.
+   */
+  readonly reviewedBytes: Bytes;
 }
+
+/**
+ * Whether what this plan does can be taken back.
+ *
+ * Trash can: the bytes are still there under another name, and the journal
+ * says where. Everything else in this list cannot, which is why the operation
+ * is fixed at review time and `--permanent` at apply time acknowledges a plan
+ * rather than changing one.
+ */
+export type Reversibility = "undo-from-trash" | "irreversible";
+
+/** Who has to be asked before the action can run. */
+export type ActionPermission = "user" | "manager-privilege";
 
 export interface ActionPlan {
   readonly id: string;
@@ -29,9 +48,20 @@ export interface ActionPlan {
   readonly createdAt: string;
   readonly expiresAt: string;
   readonly providerId: string;
+  /** The finding this plan came from, when it came from one. */
+  readonly findingId?: string;
+  /** What a person reads to recognise the scope: "3 directories under ~/.cache". */
+  readonly scopeSummary: string;
+  readonly reversibility: Reversibility;
+  readonly permission: ActionPermission;
+  /** Absent for a manager plan, which cannot promise a count. */
   readonly exactItemCount?: bigint;
-  readonly estimatedBytes?: Bytes;
+  /** The sum of what the entries measured at review time. */
+  readonly selectedBytes: Bytes;
   readonly entries?: readonly PlannedEntry[];
+  /** A bounded manager selection, never a shell line. */
+  readonly managerScope?: string;
+  readonly regenerationCost?: string;
   readonly warnings: readonly string[];
 }
 
@@ -40,9 +70,125 @@ export interface ActionResult {
   readonly completed: bigint;
   readonly skipped: bigint;
   readonly failed: bigint;
-  readonly selectedBytes?: Bytes;
-  readonly bytesMovedToTrash?: Bytes;
-  readonly observedFreeSpaceChange?: bigint;
+  /** What the plan reviewed, whatever became of it. */
+  readonly selectedBytes: Bytes;
+  /** The reviewed size of what actually moved. Usually frees nothing yet. */
+  readonly bytesMovedToTrash: Bytes;
+  /** Space available before the first item and after the last, when readable. */
+  readonly freeBytesBefore?: Bytes;
+  readonly freeBytesAfter?: Bytes;
+  readonly state: "complete" | "partial" | "uncertain";
   readonly journalId: string;
   readonly undoAvailable: boolean;
+}
+
+export interface PlanInput {
+  readonly operation: ActionOperation;
+  readonly providerId: string;
+  readonly findingId?: string;
+  readonly scopeSummary: string;
+  readonly createdAt: Date;
+  readonly expiryMinutes: number;
+  readonly entries: readonly PlannedEntry[];
+  readonly managerScope?: string;
+  readonly regenerationCost?: string;
+  readonly warnings: readonly string[];
+  readonly id?: string;
+  readonly random?: () => string;
+}
+
+const IRREVERSIBLE: readonly ActionOperation[] = ["permanent", "dedup-hardlink"];
+
+const IRREVERSIBLE_WARNING =
+  "This cannot be undone. The bytes are released rather than moved, and no journal entry can bring them back.";
+
+/**
+ * A plan identifier the helper will also accept.
+ *
+ * The helper's `planId` rule is the narrower of the two, so matching it here
+ * means a plan never has to be renamed to cross the process boundary.
+ */
+export function newPlanId(createdAt: Date, random: () => string): string {
+  const stamp = createdAt.toISOString().replace(/[-:.TZ]/g, "");
+  const suffix = random().replace(/[^A-Za-z0-9]/g, "").slice(0, 16);
+  return `plan-${stamp}-${suffix.padEnd(8, "0")}`;
+}
+
+/**
+ * Freeze a reviewed action.
+ *
+ * Everything an apply needs is decided here: the operation, the exact entries
+ * with the identity each one had at review time, whether it can be undone, and
+ * when it stops being a description of this filesystem. Nothing downstream may
+ * add to it, which is the whole reason it exists as a value rather than as a
+ * set of arguments.
+ */
+export function buildPlan(input: PlanInput): ActionPlan {
+  const manager = input.operation === "manager";
+  if (!manager && input.entries.length === 0) {
+    throw new RangeError("A plan needs at least one reviewed entry");
+  }
+  if (manager && (input.managerScope === undefined || input.managerScope.trim() === "")) {
+    throw new RangeError("A manager plan needs the bounded selection it would run");
+  }
+  if (input.expiryMinutes <= 0) {
+    throw new RangeError("A plan has to expire at some point after it was made");
+  }
+
+  const reversibility: Reversibility = IRREVERSIBLE.includes(input.operation)
+    ? "irreversible"
+    : "undo-from-trash";
+  const warnings = [...input.warnings];
+  if (reversibility === "irreversible" && !warnings.includes(IRREVERSIBLE_WARNING)) {
+    warnings.push(IRREVERSIBLE_WARNING);
+  }
+
+  const selectedBytes = input.entries.reduce((total, entry) => total + entry.reviewedBytes, 0n);
+  const expiresAt = new Date(input.createdAt.getTime() + input.expiryMinutes * 60_000);
+
+  return {
+    id: input.id ?? newPlanId(input.createdAt, input.random ?? defaultRandom),
+    operation: input.operation,
+    createdAt: input.createdAt.toISOString(),
+    expiresAt: expiresAt.toISOString(),
+    providerId: input.providerId,
+    ...(input.findingId === undefined ? {} : { findingId: input.findingId }),
+    scopeSummary: input.scopeSummary,
+    reversibility,
+    permission: manager ? "manager-privilege" : "user",
+    // A manager reports what it did; it cannot promise a count beforehand, and
+    // a number here would read as one.
+    ...(manager ? {} : { exactItemCount: BigInt(input.entries.length) }),
+    selectedBytes,
+    ...(manager ? {} : { entries: [...input.entries] }),
+    ...(input.managerScope === undefined ? {} : { managerScope: input.managerScope }),
+    ...(input.regenerationCost === undefined ? {} : { regenerationCost: input.regenerationCost }),
+    warnings,
+  };
+}
+
+/**
+ * A plan describes a filesystem at a moment. Past its expiry it describes a
+ * filesystem that may no longer exist, so it is refused rather than revalidated
+ * item by item and applied to whatever is there now.
+ */
+export function isExpired(plan: ActionPlan, now: Date): boolean {
+  return now.getTime() >= Date.parse(plan.expiresAt);
+}
+
+/**
+ * Whether applying this plan needs its irreversibility acknowledged.
+ *
+ * The acknowledgement says "I know this one cannot be taken back". It never
+ * turns a Trash plan into a permanent one: that choice was made at review time
+ * and lives in the plan.
+ */
+export function requiresAcknowledgement(plan: ActionPlan): boolean {
+  return plan.reversibility === "irreversible";
+}
+
+function defaultRandom(): string {
+  // Not cryptographic: a plan ID only has to be unique among this user's own
+  // plans, and it is never a capability.
+  return Math.random().toString(36).slice(2).padEnd(8, "0");
 }
