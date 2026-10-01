@@ -1,4 +1,12 @@
 import type { FindingProvider } from "../ports/providers.js";
+import {
+  createCondaProvider,
+  createNodeVersionsProvider,
+  createProjectArtifactsProvider,
+  createPyenvProvider,
+  createPythonEnvsProvider,
+  createRustupProvider,
+} from "./dev/index.js";
 
 /**
  * Every detector Disktop ships, in one list.
@@ -8,5 +16,12 @@ import type { FindingProvider } from "../ports/providers.js";
  * release discovers readable in one place.
  */
 export function createBuiltInProviders(): readonly FindingProvider[] {
-  return [];
+  return [
+    createCondaProvider(),
+    createPythonEnvsProvider(),
+    createPyenvProvider(),
+    createNodeVersionsProvider(),
+    createRustupProvider(),
+    createProjectArtifactsProvider(),
+  ];
 }
