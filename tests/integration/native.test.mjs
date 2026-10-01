@@ -33,11 +33,13 @@ function exchange(requests) {
 test("native hello reports only the implemented operations", async () => {
   const [response] = await exchange([handshakeRequest("hello-1")]);
   const result = parseHandshakeResponse(JSON.stringify(response), "hello-1");
-  assert.deepEqual(result.supportedOperations, ["hello", "probe", "cancel", "scan", "query-index", "trash", "journal-reconcile"]);
+  assert.deepEqual(result.supportedOperations, ["hello", "probe", "cancel", "scan", "query-index", "trash", "erase", "empty-trash", "journal-reconcile"]);
   // Trash is implemented; the operations whose phase has not arrived are not
   // listed, so a client cannot discover one by name and assume it works.
-  assert.equal(result.supportedOperations.includes("trash"), true);
-  for (const mutation of ["erase", "copy-move", "empty-trash", "restore"]) {
+  for (const implemented of ["trash", "erase", "empty-trash"]) {
+    assert.equal(result.supportedOperations.includes(implemented), true);
+  }
+  for (const mutation of ["copy-move", "compress", "restore", "dedup-hardlink"]) {
     assert.equal(result.supportedOperations.includes(mutation), false);
   }
   assert.equal(typeof result.kernelCapabilities.openat2.available, "boolean");
@@ -50,8 +52,8 @@ test("native helper rejects a planned destructive operation without changing a f
     await writeFile(target, "data stays here\n");
     const [response] = await exchange([{
       protocolVersion: 1,
-      requestId: "erase-1",
-      operation: "erase",
+      requestId: "compress-1",
+      operation: "compress",
       arguments: { path: target },
     }]);
     assert.equal(response.event, "error");
