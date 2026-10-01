@@ -80,17 +80,6 @@ export interface IndexedEntry {
   readonly shared: boolean;
 }
 
-export interface Finding {
-  readonly id: string;
-  readonly providerId: string;
-  readonly category: string;
-  readonly title: string;
-  readonly evidence: readonly string[];
-  readonly estimatedBytes?: Bytes;
-  readonly capability: Capability;
-  readonly availableActionIds: readonly string[];
-}
-
 export type AlertKind = "low-space" | "low-inodes";
 
 export interface Alert {
