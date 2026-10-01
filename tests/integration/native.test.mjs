@@ -33,7 +33,7 @@ function exchange(requests) {
 test("native hello reports only the implemented operations", async () => {
   const [response] = await exchange([handshakeRequest("hello-1")]);
   const result = parseHandshakeResponse(JSON.stringify(response), "hello-1");
-  assert.deepEqual(result.supportedOperations, ["hello", "probe", "cancel", "scan", "query-index"]);
+  assert.deepEqual(result.supportedOperations, ["hello", "probe", "cancel", "scan", "query-index", "journal-reconcile"]);
   // Nothing that changes a user file is listed, because nothing does yet.
   for (const mutation of ["trash", "erase", "copy-move", "empty-trash"]) {
     assert.equal(result.supportedOperations.includes(mutation), false);

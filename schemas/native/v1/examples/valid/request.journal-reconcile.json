@@ -1,0 +1,9 @@
+{
+  "protocolVersion": 1,
+  "requestId": "journal-01",
+  "operation": "journal-reconcile",
+  "arguments": {
+    "journalDirectory": "L2hvbWUvZXhhbXBsZS8ubG9jYWwvc3RhdGUvZGlza3RvcA==",
+    "limit": "50"
+  }
+}

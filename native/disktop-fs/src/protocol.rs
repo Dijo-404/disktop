@@ -1,9 +1,9 @@
 //! Versioned JSON-lines boundary for the filesystem helper.
 //!
-//! Reads are implemented: `hello`, `probe`, `scan`, `query-index`, and
-//! `cancel`. Every operation that changes a user file is still refused
-//! explicitly, because the reviewed plan, guard, and journal it would have to
-//! go through do not exist yet.
+//! Reads are implemented: `hello`, `probe`, `scan`, `query-index`, `cancel`,
+//! and `journal-reconcile`. Every operation that changes a user file is still
+//! refused explicitly, because the reviewed plan and guard it would have to go
+//! through do not exist yet.
 //!
 //! A scan runs on its own thread so that `cancel` can be read and acted on
 //! while it is still walking. Every event goes out through one lock, so two
@@ -11,6 +11,7 @@
 //! event IDs are monotonic from 1.
 
 use crate::index::{IndexLimits, IndexWriter};
+use crate::journal::{self, Journal};
 use crate::query::{self, EntryFilter, Order, QueryRequest, Sort};
 use crate::sys::EntryKind;
 use crate::walk::{
@@ -29,8 +30,15 @@ use std::thread::JoinHandle;
 
 const PROTOCOL_VERSION: u16 = 1;
 const MAX_REQUEST_BYTES: usize = 1024 * 1024;
-const SUPPORTED_OPERATIONS: [&str; 5] = ["hello", "probe", "cancel", "scan", "query-index"];
-const PLANNED_OPERATIONS: [&str; 13] = [
+const SUPPORTED_OPERATIONS: [&str; 6] = [
+    "hello",
+    "probe",
+    "cancel",
+    "scan",
+    "query-index",
+    "journal-reconcile",
+];
+const PLANNED_OPERATIONS: [&str; 12] = [
     "hash-candidates",
     "inspect",
     "trash",
@@ -43,7 +51,6 @@ const PLANNED_OPERATIONS: [&str; 13] = [
     "manager-begin",
     "manager-append",
     "manager-finish",
-    "journal-reconcile",
 ];
 
 #[derive(Deserialize)]
@@ -59,6 +66,16 @@ struct Request {
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct CancelArguments {
     cancel_request_id: String,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct JournalArguments {
+    journal_directory: String,
+    #[serde(default)]
+    cursor: Option<String>,
+    #[serde(default)]
+    limit: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -316,6 +333,7 @@ fn handle_request(server: &Arc<Server>, line: &[u8]) {
     }
 
     match request.operation.as_str() {
+        "journal-reconcile" => journal_reconcile(&responder, request.arguments),
         "hello" | "probe" if request.arguments.is_empty() => {
             responder.emit("complete", json!({ "result": hello_result() }));
         }
@@ -746,6 +764,132 @@ fn query_index(responder: &Responder, arguments: Map<String, Value>) {
     responder.emit("complete", json!({ "result": Value::Object(result) }));
 }
 
+/// Resolve every record an interrupted run left behind, then answer with a
+/// page of history.
+///
+/// Reconciling and listing are one operation on purpose: `docs/safety.md`
+/// requires unfinished records to be resolved before undo is offered or an
+/// action is called complete, and a caller that could list without reconciling
+/// would be reading a history that still claims an abandoned action is running.
+fn journal_reconcile(responder: &Responder, arguments: Map<String, Value>) {
+    let arguments: JournalArguments = match decode(arguments) {
+        Ok(arguments) => arguments,
+        Err(message) => return fail(responder, "invalid-arguments", &message),
+    };
+    let directory = match decode_path(&arguments.journal_directory) {
+        Ok(path) => PathBuf::from(OsStr::from_bytes(&path)),
+        Err(message) => return fail(responder, "invalid-arguments", &message),
+    };
+    let limit = match optional_u64(arguments.limit.as_deref(), "limit") {
+        Ok(limit) => limit.unwrap_or(50).min(u64::from(journal::MAX_LIMIT)) as u32,
+        Err(message) => return fail(responder, "invalid-arguments", &message),
+    };
+
+    let journal = match Journal::open(&directory) {
+        Ok(journal) => journal,
+        Err(error) => {
+            return fail(
+                responder,
+                "journal-write-failed",
+                &format!("The action journal could not be opened: {error}"),
+            );
+        }
+    };
+    let reconciled = match journal.reconcile() {
+        Ok(count) => count,
+        Err(error) => {
+            return fail(
+                responder,
+                "journal-write-failed",
+                &format!("Interrupted records could not be resolved: {error}"),
+            );
+        }
+    };
+    let page = match journal.page(arguments.cursor.as_deref(), limit) {
+        Ok(page) => page,
+        Err(error) => {
+            return fail(
+                responder,
+                "invalid-arguments",
+                &format!("The journal could not be read: {error}"),
+            );
+        }
+    };
+
+    let mut result = Map::new();
+    result.insert("reconciled".to_owned(), reconciled.to_string().into());
+    result.insert(
+        "records".to_owned(),
+        Value::Array(page.records.iter().map(journal_record).collect()),
+    );
+    if let Some(cursor) = page.next_cursor {
+        result.insert("nextCursor".to_owned(), cursor.into());
+    }
+    responder.emit("complete", json!({ "result": Value::Object(result) }));
+}
+
+pub fn journal_record(record: &journal::ActionRecord) -> Value {
+    let mut object = Map::new();
+    object.insert("id".to_owned(), record.id.clone().into());
+    object.insert("planId".to_owned(), record.plan_id.clone().into());
+    object.insert("operation".to_owned(), record.operation.clone().into());
+    object.insert(
+        "startedAtMilliseconds".to_owned(),
+        record.started_at_milliseconds.to_string().into(),
+    );
+    if let Some(finished) = record.finished_at_milliseconds {
+        object.insert(
+            "finishedAtMilliseconds".to_owned(),
+            finished.to_string().into(),
+        );
+    }
+    object.insert("state".to_owned(), record.state.as_str().into());
+    object.insert("completed".to_owned(), record.completed.to_string().into());
+    object.insert("skipped".to_owned(), record.skipped.to_string().into());
+    object.insert("failed".to_owned(), record.failed.to_string().into());
+    object.insert(
+        "selectedBytes".to_owned(),
+        record.selected_bytes.to_string().into(),
+    );
+    object.insert(
+        "bytesMovedToTrash".to_owned(),
+        record.trashed_bytes.to_string().into(),
+    );
+    if let Some(before) = record.free_bytes_before {
+        object.insert("freeBytesBefore".to_owned(), before.to_string().into());
+    }
+    if let Some(after) = record.free_bytes_after {
+        object.insert("freeBytesAfter".to_owned(), after.to_string().into());
+    }
+    object.insert(
+        "items".to_owned(),
+        Value::Array(
+            record
+                .items
+                .iter()
+                .map(|item| {
+                    let mut entry = Map::new();
+                    entry.insert("position".to_owned(), item.position.to_string().into());
+                    entry.insert("path".to_owned(), crate::base64::encode(&item.path).into());
+                    if let Some(destination) = &item.destination {
+                        entry.insert(
+                            "destination".to_owned(),
+                            crate::base64::encode(destination).into(),
+                        );
+                    }
+                    entry.insert("outcome".to_owned(), item.outcome.as_str().into());
+                    if let Some(reason) = &item.reason {
+                        entry.insert("message".to_owned(), reason.clone().into());
+                    }
+                    entry.insert("bytes".to_owned(), item.bytes.to_string().into());
+                    Value::Object(entry)
+                })
+                .collect(),
+        ),
+    );
+    Value::Object(object)
+}
+
 fn index_limits(arguments: &ScanArguments) -> Result<IndexLimits, String> {
     let defaults = IndexLimits::default();
     Ok(IndexLimits {
@@ -1065,8 +1209,31 @@ mod tests {
         assert_eq!(output[0]["event"], "complete");
         assert_eq!(
             output[0]["result"]["supportedOperations"],
-            json!(["hello", "probe", "cancel", "scan", "query-index"])
+            json!([
+                "hello",
+                "probe",
+                "cancel",
+                "scan",
+                "query-index",
+                "journal-reconcile"
+            ])
         );
+    }
+
+    #[test]
+    fn journal_reconcile_answers_with_a_page_of_history() {
+        let sandbox = crate::testing::Sandbox::new("protocol-journal");
+        let directory = sandbox.directory(b"state");
+        let output = responses(&format!(
+            "{{\"protocolVersion\":1,\"requestId\":\"journal-1\",\
+               \"operation\":\"journal-reconcile\",\
+               \"arguments\":{{\"journalDirectory\":\"{}\"}}}}\n",
+            crate::base64::encode(directory.as_os_str().as_bytes()),
+        ));
+        assert_eq!(output.len(), 1);
+        assert_eq!(output[0]["event"], "complete");
+        assert_eq!(output[0]["result"]["reconciled"], "0");
+        assert_eq!(output[0]["result"]["records"], json!([]));
     }
 
     #[test]

@@ -528,10 +528,12 @@
         "unknown-request",
         "protected-path",
         "changed-target",
+        "unsafe-parent",
         "permission-denied",
         "unsupported-kernel",
         "unsupported-filesystem",
         "no-safe-trash",
+        "expired-plan",
         "journal-write-failed",
         "cancelled",
         "internal-error"
@@ -559,6 +561,185 @@
         },
         "apparentBytes": {
           "$ref": "#/$defs/decimalInteger"
+        }
+      }
+    },
+    "actionState": {
+      "description": "`uncertain` is what an interrupted action reads as until reconciliation can tell whether its last item happened. It is never promoted to `complete`.",
+      "type": "string",
+      "enum": [
+        "in-progress",
+        "complete",
+        "partial",
+        "uncertain"
+      ]
+    },
+    "itemOutcome": {
+      "type": "string",
+      "enum": [
+        "in-progress",
+        "completed",
+        "skipped",
+        "failed",
+        "uncertain"
+      ]
+    },
+    "journalItem": {
+      "description": "One reviewed item as the journal holds it. `destination` is where a move put it, which is what an undo reads to find the file again.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "position",
+        "path",
+        "outcome",
+        "bytes"
+      ],
+      "properties": {
+        "position": {
+          "$ref": "#/$defs/decimalInteger"
+        },
+        "path": {
+          "$ref": "#/$defs/pathBytes"
+        },
+        "destination": {
+          "$ref": "#/$defs/pathBytes"
+        },
+        "outcome": {
+          "$ref": "#/$defs/itemOutcome"
+        },
+        "message": {
+          "type": "string"
+        },
+        "bytes": {
+          "$ref": "#/$defs/decimalInteger"
+        }
+      }
+    },
+    "journalRecord": {
+      "description": "One action the helper performed. Times are unix milliseconds as decimal strings, like every other number here; the helper has no calendar and Node formats the public timestamp.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "planId",
+        "operation",
+        "startedAtMilliseconds",
+        "state",
+        "completed",
+        "skipped",
+        "failed",
+        "selectedBytes",
+        "bytesMovedToTrash",
+        "items"
+      ],
+      "properties": {
+        "id": {
+          "$ref": "#/$defs/planId"
+        },
+        "planId": {
+          "$ref": "#/$defs/planId"
+        },
+        "operation": {
+          "type": "string"
+        },
+        "startedAtMilliseconds": {
+          "$ref": "#/$defs/decimalInteger"
+        },
+        "finishedAtMilliseconds": {
+          "$ref": "#/$defs/decimalInteger"
+        },
+        "state": {
+          "$ref": "#/$defs/actionState"
+        },
+        "completed": {
+          "$ref": "#/$defs/decimalInteger"
+        },
+        "skipped": {
+          "$ref": "#/$defs/decimalInteger"
+        },
+        "failed": {
+          "$ref": "#/$defs/decimalInteger"
+        },
+        "selectedBytes": {
+          "$ref": "#/$defs/decimalInteger"
+        },
+        "bytesMovedToTrash": {
+          "description": "Bytes this action moved into Trash. On one filesystem that is usually not space anybody got back, which is why it is reported apart from the free-space readings.",
+          "$ref": "#/$defs/decimalInteger"
+        },
+        "freeBytesBefore": {
+          "$ref": "#/$defs/decimalInteger"
+        },
+        "freeBytesAfter": {
+          "$ref": "#/$defs/decimalInteger"
+        },
+        "items": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/journalItem"
+          }
+        }
+      },
+      "allOf": [
+        {
+          "if": {
+            "type": "object",
+            "properties": {
+              "state": {
+                "enum": [
+                  "complete",
+                  "partial",
+                  "uncertain"
+                ]
+              }
+            },
+            "required": [
+              "state"
+            ]
+          },
+          "then": {
+            "description": "A record that has been judged holds no item still claiming to be running.",
+            "properties": {
+              "items": {
+                "type": "array",
+                "items": {
+                  "type": "object",
+                  "properties": {
+                    "outcome": {
+                      "not": {
+                        "const": "in-progress"
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      ]
+    },
+    "journalResult": {
+      "description": "A page of action history, after every record an interrupted run left behind has been resolved.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "reconciled",
+        "records"
+      ],
+      "properties": {
+        "reconciled": {
+          "description": "How many interrupted records this call resolved. Zero on a clean history.",
+          "$ref": "#/$defs/decimalInteger"
+        },
+        "records": {
+          "type": "array",
+          "maxItems": 200,
+          "items": {
+            "$ref": "#/$defs/journalRecord"
+          }
+        },
+        "nextCursor": {
+          "$ref": "#/$defs/cursor"
         }
       }
     }

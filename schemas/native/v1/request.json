@@ -53,8 +53,7 @@
           "operation": {
             "enum": [
               "hello",
-              "probe",
-              "journal-reconcile"
+              "probe"
             ]
           }
         },
@@ -169,6 +168,26 @@
         "properties": {
           "arguments": {
             "$ref": "#/$defs/queryIndexArguments"
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "type": "object",
+        "properties": {
+          "operation": {
+            "const": "journal-reconcile"
+          }
+        },
+        "required": [
+          "operation"
+        ]
+      },
+      "then": {
+        "properties": {
+          "arguments": {
+            "$ref": "#/$defs/journalArguments"
           }
         }
       }
@@ -316,6 +335,25 @@
         },
         "includeOwnerTotals": {
           "type": "boolean"
+        }
+      }
+    },
+    "journalArguments": {
+      "description": "Where Disktop keeps its durable action journal. Node owns the location for the same reason it owns the index directory: the XDG rules live in one place.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "journalDirectory"
+      ],
+      "properties": {
+        "journalDirectory": {
+          "$ref": "common.json#/$defs/pathBytes"
+        },
+        "cursor": {
+          "$ref": "common.json#/$defs/cursor"
+        },
+        "limit": {
+          "$ref": "common.json#/$defs/decimalInteger"
         }
       }
     }

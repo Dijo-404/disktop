@@ -354,8 +354,8 @@ impl Walk<'_> {
             };
 
             let shared = self.already_counted(&metadata);
-            let broken = metadata.kind == EntryKind::Symlink
-                && !sys::target_exists(descriptor, &name);
+            let broken =
+                metadata.kind == EntryKind::Symlink && !sys::target_exists(descriptor, &name);
             let parent_id = frame.id;
             let id = self.sink.entry(&EntryRecord {
                 parent: Some(parent_id),
