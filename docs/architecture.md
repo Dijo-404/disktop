@@ -38,7 +38,7 @@ Node may write its own config, snapshots, reports, scan cache metadata, and user
 | --- | --- | --- |
 | Device dashboard | `lsblk -J -b`, `/proc/self/mountinfo`, and `statfs` joined by the Linux inventory adapter, through `InventoryPort` to `application/dashboard.ts`, to the CLI or TUI | Optional cached view. |
 | Tree exploration | `application/scan.ts` through `ScanPort` to the helper's `openat2` walk and SQLite index; `application/explore.ts` through `FileIndexPort` to keyset-paginated `query-index` pages | Current detailed SQLite scan index under `$XDG_CACHE_HOME`, bounded by scan count and byte budget; compact snapshots under `$XDG_DATA_HOME` for growth. |
-| Footprint finding | Providers and Linux package adapters to application footprint service | Findings can be recomputed; selected plan is stored separately. |
+| Footprint finding | Detectors in `src/providers` name paths through `PathProbe`, `ToolPort`, `IndexSearchPort` and `PackageInventoryPort`; `application/footprint.ts` merges them and measures every unmeasured path in one pass through `FootprintPort`, which runs a single helper scan and reads each path's own index row | Findings can be recomputed; selected plan is stored separately. |
 | Cleanup | Provider or explicit path to immutable plan, confirmation, revalidation, helper or fixed-argument manager adapter, journal, verification | Expiring reviewed plan and durable native journal. |
 | Report | Application query to JSON/CSV/HTML renderer | Only an explicitly requested output file. |
 
@@ -52,7 +52,7 @@ Cancellation runs the same way at every layer. The CLI turns Ctrl+C into an `Abo
 - Every filesystem identity, count, byte value, and nanosecond timestamp crossing native IPC or public JSON is a decimal string. Internal arithmetic uses integers without JavaScript number rounding.
 - `Device`, `Partition`, `Filesystem`, and `Mount` are separate concepts. `lsblk` topology, mountinfo, and `statfs` answer different questions.
 - `Entry` distinguishes allocated from apparent bytes and carries device, inode, mount, link count, owner, and timestamps. Hardlinks count once per scan total.
-- `Finding` includes stable provider ID, category, evidence, scope, estimate, confidence, capability, and proposed action IDs.
+- `Finding` includes a stable provider ID and version, category, evidence, scope, a labelled size, confidence, capability, and proposed action IDs. `size.basis` is mandatory and has no value meaning "zero because nobody looked": an unmeasured footprint is `unknown` and carries no number. Two detectors reaching the same directory merge, so an estimate is never doubled.
 - `ActionPlan` is immutable, operation-specific, expiring, and revalidated when applied. `ActionResult` separates selected bytes, moved-to-Trash bytes, and observed capacity change.
 - `Capability` must state whether a feature is available or why it is unavailable. Missing tools and permissions are not represented as zero findings.
 
