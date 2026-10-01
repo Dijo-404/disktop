@@ -2,6 +2,7 @@ import { findingSize, type Finding } from "../../domain/findings.js";
 import type { Warning } from "../../domain/models.js";
 import type { InstalledPackage, ManagerInventory, PackageInventoryPort } from "../../ports/packages.js";
 import type { DiscoveryEnvironment, FindingProvider } from "../../ports/providers.js";
+import { isWithin, pathBytes } from "../../domain/paths.js";
 import { basename, buildFinding, exists, slugForPath } from "../support.js";
 
 const ID = "apps.installed";
@@ -152,6 +153,9 @@ async function appImageFindings(environment: DiscoveryEnvironment): Promise<read
       if (facts === undefined || facts.kind !== "file") {
         continue;
       }
+      // An AppImage under /opt belongs to whoever installed it system-wide.
+      // Only one in this user's own home is theirs to move to the Trash.
+      const mine = facts.ownerId === environment.userId && isWithin(pathBytes(environment.home), pathBytes(entry));
       findings.push(
         buildFinding({
           providerId: ID,
@@ -162,10 +166,13 @@ async function appImageFindings(environment: DiscoveryEnvironment): Promise<read
           evidence: [
             "A self-contained application file with no package manager behind it.",
             "Its settings and data live elsewhere and are not part of this finding.",
+            mine
+              ? "It is yours and sits in your home directory."
+              : "It sits outside your home directory or belongs to another user, so it is reported rather than offered.",
           ],
           paths: [entry],
           size: findingSize(facts.allocatedBytes, "stat", "Blocks on disk from one stat call."),
-          actions: ["trash"],
+          actions: mine ? ["trash"] : [],
           active: true,
         }),
       );

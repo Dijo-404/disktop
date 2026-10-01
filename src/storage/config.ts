@@ -31,6 +31,16 @@ export interface DisktopConfig {
     readonly planExpiryMinutes: number;
     readonly additionalAllowedRoots: readonly string[];
   };
+  readonly providers: {
+    /** Directories holding AppImages, which no package manager knows about. */
+    readonly appImageRoots: readonly string[];
+    /** Directory names that mark regenerable build output. Names, never paths. */
+    readonly artifactDirectories: readonly string[];
+    /** The size above which a log file is worth reporting on its own. */
+    readonly largeLogBytes: number;
+    /** The cap that keeps one noisy detector from flooding the list. */
+    readonly maxFindingsPerProvider: number;
+  };
 }
 
 export const DEFAULT_CONFIG: DisktopConfig = {
@@ -47,9 +57,15 @@ export const DEFAULT_CONFIG: DisktopConfig = {
   find: { staleAfterDays: 183 },
   snapshots: { keepLatest: 20 },
   cleanup: { defaultOperation: "trash", planExpiryMinutes: 60, additionalAllowedRoots: [] },
+  providers: {
+    appImageRoots: [],
+    artifactDirectories: ["node_modules", "target", "__pycache__", ".next", ".nuxt", "build", "dist"],
+    largeLogBytes: 128 * 1024 * 1024,
+    maxFindingsPerProvider: 50,
+  },
 };
 
-const KNOWN_TABLES = new Set(["alerts", "scan", "find", "snapshots", "cleanup"]);
+const KNOWN_TABLES = new Set(["alerts", "scan", "find", "snapshots", "cleanup", "providers"]);
 
 export function parseConfigDocument(source: string): DisktopConfig {
   const document = parseToml(source);
@@ -80,6 +96,30 @@ export function parseConfigDocument(source: string): DisktopConfig {
         "additional_allowed_roots",
         DEFAULT_CONFIG.cleanup.additionalAllowedRoots,
         true,
+      ),
+    },
+    providers: {
+      // Discovery roots, never cleanup roots: what may be acted on is decided
+      // by the finding, so a system directory is a legitimate place to look.
+      appImageRoots: reader.absolutePaths("providers", "app_image_roots", DEFAULT_CONFIG.providers.appImageRoots, false),
+      artifactDirectories: reader.names(
+        "providers",
+        "artifact_directories",
+        DEFAULT_CONFIG.providers.artifactDirectories,
+      ),
+      largeLogBytes: reader.integer(
+        "providers",
+        "large_log_bytes",
+        DEFAULT_CONFIG.providers.largeLogBytes,
+        1024,
+        1024 ** 4,
+      ),
+      maxFindingsPerProvider: reader.integer(
+        "providers",
+        "max_findings_per_provider",
+        DEFAULT_CONFIG.providers.maxFindingsPerProvider,
+        1,
+        1000,
       ),
     },
   };
@@ -156,6 +196,30 @@ class Reader {
       }
     }
     return paths;
+  }
+
+  /**
+   * Plain directory names, never paths.
+   *
+   * A detector matches these against the name of a directory a scan found. A
+   * value with a slash in it would read as a path and invite somebody to point
+   * a detector at `/etc`, so it is refused here rather than handled later.
+   */
+  names(table: string, key: string, fallback: readonly string[]): readonly string[] {
+    const value = this.#take(table, key);
+    if (value === undefined) {
+      return fallback;
+    }
+    if (!Array.isArray(value) || value.some((element) => typeof element !== "string")) {
+      throw invalid(table, key, "expected an array of quoted directory names");
+    }
+    const names = value as readonly string[];
+    for (const name of names) {
+      if (name === "" || name.includes("/") || name === "." || name === "..") {
+        throw invalid(table, key, `'${name}' must be a plain directory name, not a path`);
+      }
+    }
+    return names;
   }
 
   rejectUnread(): void {

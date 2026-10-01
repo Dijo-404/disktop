@@ -4,6 +4,32 @@ All public changes will be recorded here when the first complete Linux release i
 
 ## Unreleased
 
+### Phase 3: findings and application inventory
+
+- `disktop clean` lists what every detector found and changes nothing. `clean plan`
+  and `clean apply` still refuse; no detector can delete.
+- A finding names the bytes it is about, where its number came from, how sure the
+  detector is, and which operations a later phase could offer. `size.basis` is
+  mandatory and there is no basis meaning "zero because nobody looked": an
+  unmeasured footprint is `unknown` and carries no number, in memory and in JSON.
+- Two detectors reaching the same directory merge rather than doubling the
+  estimate, and the dropped finding's id is recorded in the survivor's evidence.
+- Every detector appears in the output with its capability, including the ones
+  that could not look. A denied detector makes the whole result incomplete and the
+  command exits `3`; a missing tool does not, because the feature is absent rather
+  than hidden.
+- No detector traverses a tree, runs a command, or deletes. They name paths; one
+  port measures all of them in a single helper scan, so every byte count in a
+  result shares an accounting mode. Commands go through one allowlist.
+- Detectors for conda, virtualenvs, pyenv, nvm/fnm/Volta/asdf, rustup, project
+  build output, language and AI and IDE caches, browser profiles and their caches,
+  Electron applications, Steam, Wine and Proton, disk images, Timeshift and btrfs
+  and ZFS snapshots, swap, installed packages across seven managers, AppImages,
+  oversized logs, crash dumps, deleted-but-open files, SMART health, WSL, and
+  per-user usage.
+- The helper gained an owner-totals index aggregate, counted over regular files
+  only for the same reason the per-extension totals are.
+
 ### Phase 2: scanner, index, search, and growth history
 
 - The Rust helper walks a tree with `openat2` containment: `RESOLVE_BENEATH`,

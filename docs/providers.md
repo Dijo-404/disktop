@@ -65,6 +65,54 @@ survives once.
 
 The common capability value is `available`, `missing-tool`, `permission-denied`, `unsupported-kernel`, `unsupported-filesystem`, or `unsupported-architecture`, accompanied by an explanation. A provider can also return a complete or incomplete discovery result with inaccessible paths and excluded scopes. Missing Conda, `smartctl`, or Docker is reported as an unavailable relevant feature, not as proof that it uses zero bytes. Some providers are read-only even when their discovery succeeds.
 
+## The detectors this release ships
+
+Every one is registered in `src/providers/index.ts` and nowhere else, so the
+set a release discovers is readable in one place.
+
+| Provider id | What it reads |
+| --- | --- |
+| `dev.conda` | conda and mamba prefixes, their environments, and the package cache. A `conda-meta` directory is the proof; a directory under `envs` without one is somebody's notes. |
+| `dev.python-envs` | Virtual environments in the collection directories and, through a stored scan, inside projects. `pyvenv.cfg` is the proof. |
+| `dev.pyenv` | Interpreters pyenv built, with the one `~/.pyenv/version` names marked in use. |
+| `dev.node-versions` | nvm, fnm, Volta and asdf Node installations, with the default alias marked in use. |
+| `dev.rustup` | Toolchains and the download cache, with the toolchain `settings.toml` names marked in use. |
+| `dev.project-artifacts` | Build output found through the stored scan index. A `target` beside a `Cargo.toml` is likely; one on its own is uncertain. |
+| `cache.language` | npm, Yarn, pnpm, pip, uv, Cargo, Go, Maven, Gradle, Composer and NuGet caches. |
+| `cache.ai` | Hugging Face, Ollama, PyTorch, Keras and Whisper model stores, all marked in use. |
+| `cache.ide` | JetBrains, VS Code, Android SDK and emulator directories. |
+| `cache.browser` | Chromium and Firefox profiles and their caches, kept apart. |
+| `cache.electron` | Chromium caches inside any application's data directory, found by looking rather than by a list of applications. |
+| `storage.steam` | Steam libraries, games sized from their own manifests, and Proton prefixes. |
+| `storage.wine` | Wine, Lutris, Bottles and PlayOnLinux prefixes, proved by `system.reg`. |
+| `storage.virtual-machines` | Disk images, with allocated and apparent bytes reported apart. |
+| `storage.system-snapshots` | Timeshift snapshots, btrfs subvolumes and ZFS snapshots. Read-only. |
+| `storage.swap` | Active swap areas and inactive swap files. Read-only. |
+| `apps.installed` | dpkg, rpm, pacman, snap, Flatpak, global npm and pip, and configured AppImage roots. |
+| `diagnostic.logs` | Oversized files under `/var/log` with their logrotate evidence, and the journal's own footprint. |
+| `diagnostic.crash` | Crash and core dump directories; only a user-owned one is offered. |
+| `diagnostic.open-deleted` | Files deleted while a process still holds them open, which is why `du` and `df` disagree. |
+| `diagnostic.smart` | Each disk's own health report. |
+| `diagnostic.windows-subsystem` | Under WSL, what the default excludes leave out. |
+| `diagnostic.per-user` | Owner totals from the stored scan index. |
+
+### What a detector may not do
+
+No provider traverses a tree, runs a command directly, or deletes anything;
+`npm run lint` refuses all three. A provider names paths and the application
+service measures them through the `FootprintPort`. Commands go through the
+`ToolPort`, whose allowlist in `src/platform/linux/tools.ts` is the whole set
+of programs Disktop can run; a name outside it is refused before anything is
+spawned.
+
+### Incomplete is not empty
+
+A detector that could not look says so. `missing-tool` and the `unsupported-*`
+states leave the run complete, because the feature is genuinely absent on this
+machine. `permission-denied` does not: the data is there and Disktop could not
+read it, so the whole result is incomplete and `disktop clean` exits `3`. A
+detector that throws is reported and skipped rather than ending the run.
+
 ## Provider areas for `1.0.0`
 
 | Area | Planned coverage | Action boundary |

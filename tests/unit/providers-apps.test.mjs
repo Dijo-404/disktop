@@ -148,3 +148,26 @@ test("output a manager prints in an unrecognised format is not counted as zero p
   assert.equal(result.capability.status, "missing-tool");
   assert.deepEqual(result.findings, []);
 });
+
+test("an AppImage outside the home directory is reported but not offered", async () => {
+  const outside = await mkdtemp(join(tmpdir(), "disktop-fixture-"));
+  try {
+    const appImage = join(outside, "Shared.AppImage");
+    await writeFile(appImage, "s".repeat(4096));
+
+    const result = await discover(
+      providerFor({ "dpkg-query": { stdout: DPKG } }),
+      discoveryEnvironment(home, { appImageRoots: [rawPathFromUtf8(outside)] }),
+    );
+
+    const found = result.findings.find((finding) => finding.paths[0]?.display === appImage);
+    assert.ok(found !== undefined, JSON.stringify(result.findings.map((finding) => finding.title)));
+    assert.deepEqual(found.availableActionIds, [], "a shared application is not this user's to remove");
+    assert.ok(
+      found.evidence.some((line) => /outside your home directory/.test(line)),
+      JSON.stringify(found.evidence),
+    );
+  } finally {
+    await restoreAndRemove(outside);
+  }
+});

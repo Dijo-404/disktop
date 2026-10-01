@@ -43,23 +43,6 @@ export interface Services {
   readonly startupWarnings: readonly Warning[];
 }
 
-/** Directory names that mark regenerable build output. */
-const DEFAULT_ARTIFACT_DIRECTORIES: readonly string[] = [
-  "node_modules",
-  "target",
-  "__pycache__",
-  ".next",
-  ".nuxt",
-  "build",
-  "dist",
-];
-
-/** The size above which a log file is worth reporting on its own. */
-const DEFAULT_LARGE_LOG_BYTES = 128n * 1024n * 1024n;
-
-/** The cap that keeps one noisy detector from flooding the list. */
-const DEFAULT_MAX_FINDINGS_PER_PROVIDER = 50;
-
 export interface CompositionOptions {
   readonly environment?: Readonly<Record<string, string | undefined>>;
   readonly homeDirectory?: string;
@@ -120,10 +103,10 @@ export async function createServices(options: CompositionOptions = {}): Promise<
     userId: BigInt(process.getuid?.() ?? 0),
     now: new Date(),
     staleAfterDays: config.find.staleAfterDays,
-    appImageRoots: [],
-    artifactDirectories: DEFAULT_ARTIFACT_DIRECTORIES,
-    largeLogBytes: DEFAULT_LARGE_LOG_BYTES,
-    maxFindingsPerProvider: DEFAULT_MAX_FINDINGS_PER_PROVIDER,
+    appImageRoots: config.providers.appImageRoots.map(rawPathFromUtf8),
+    artifactDirectories: config.providers.artifactDirectories,
+    largeLogBytes: BigInt(config.providers.largeLogBytes),
+    maxFindingsPerProvider: config.providers.maxFindingsPerProvider,
     paths: createPathProbe(),
     tools: tools,
     index: footprints,
