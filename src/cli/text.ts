@@ -214,7 +214,9 @@ export function findingLines(summary: FootprintSummary, units: Units): string[] 
     lines.push(`${total.category}: ${formatBytes(total.bytes, units)} across ${total.findings} findings${unmeasured}`);
   }
   if (!summary.measured) {
-    lines.push("Footprints were not measured, so every size above is unknown.");
+    lines.push(
+      "Directory footprints were not measured. Any size above comes from a package manager or one stat call; everything else is unknown.",
+    );
   }
   return lines;
 }
