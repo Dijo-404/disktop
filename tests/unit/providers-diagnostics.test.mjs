@@ -113,7 +113,7 @@ test("deleted-but-open files are summarised with the process holding them", asyn
     discoveryEnvironment(home, {
       tools: {
         lsof: {
-          stdout: ["p1842", "cjournald", "s1073741824", "L0", "n/var/log/journal/old.journal (deleted)", ""].join("\n"),
+          stdout: ["p1842", "cjournald", "s1073741824", "k0", "n/var/log/journal/old.journal (deleted)", ""].join("\n"),
         },
       },
     }),
@@ -270,4 +270,77 @@ test("smartctl's own JSON is read for a denial, because it writes none to stderr
   const denial = result.warnings.find((warning) => warning.code === "smart-denied");
   assert.ok(denial !== undefined, `a denial is not a missing tool: ${JSON.stringify(result.warnings)}`);
   assert.match(denial.message, /Permission denied/, "the reason smartctl gave is the reason reported");
+});
+
+test("the deleted-but-open detector asks lsof for the link count field", async () => {
+  const asked = [];
+  const environment = discoveryEnvironment(home);
+  environment.tools = {
+    async run(name, args) {
+      asked.push([name, [...args]]);
+      return { capability: { status: "available", explanation: "ran" }, stdout: "", stderr: "", exitCode: 0 };
+    },
+  };
+
+  await discover(createOpenDeletedProvider(), environment);
+
+  const listing = asked.find((call) => call[1].includes("+L1"));
+  assert.ok(listing !== undefined, JSON.stringify(asked));
+  // `k` is the link count; `L` is the process login name.
+  assert.ok(listing[1].includes("-F"), JSON.stringify(listing));
+  const fields = listing[1][listing[1].indexOf("-F") + 1];
+  assert.ok(fields.includes("k"), `${fields} does not request the link count`);
+  assert.ok(!fields.includes("L"), `${fields} requests the login name as if it were the link count`);
+});
+
+test("a deleted file's path and the process holding it cannot command the terminal", async () => {
+  const result = await discover(
+    createOpenDeletedProvider(),
+    discoveryEnvironment(home, {
+      tools: {
+        lsof: {
+          stdout: ["p1", "cevil\u001b[31m", "s100", "k0", "n/home/example/re\u001b[2Jport (deleted)", ""].join("\n"),
+        },
+      },
+    }),
+  );
+
+  for (const finding of result.findings) {
+    assert.ok(!finding.title.includes("\u001b"), JSON.stringify(finding.title));
+    for (const line of finding.evidence) {
+      assert.ok(!line.includes("\u001b"), JSON.stringify(line));
+    }
+    assert.match(finding.id, /^[A-Za-z0-9][A-Za-z0-9._:-]*$/, finding.id);
+  }
+});
+
+test("a drive model from smartctl cannot command the terminal", async () => {
+  const environment = discoveryEnvironment(home);
+  environment.tools = {
+    async run(_name, args) {
+      const stdout = args.includes("--scan")
+        ? JSON.stringify({ devices: [{ name: "/dev/sda" }] })
+        : JSON.stringify({ model_name: "Evil\u001b[31m Drive", smart_status: { passed: true } });
+      return { capability: { status: "available", explanation: "ran" }, stdout, stderr: "", exitCode: 0 };
+    },
+  };
+
+  const result = await discover(createSmartProvider(), environment);
+
+  for (const line of result.findings[0].evidence) {
+    assert.ok(!line.includes("\u001b"), JSON.stringify(line));
+  }
+});
+
+test("a machine with no /var/log at all is absent, not denied", async () => {
+  const result = await discover(
+    createLogProvider({
+      logRoot: rawPathFromUtf8(join(root, "no-such-log-directory")),
+      logrotateDirectory: rawPathFromUtf8(logrotate),
+    }),
+    logEnvironment(),
+  );
+
+  assert.equal(result.capability.status, "missing-tool", "an absent directory is not a refusal");
+  assert.deepEqual(result.findings, []);
 });

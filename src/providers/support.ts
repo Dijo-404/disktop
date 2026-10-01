@@ -6,7 +6,7 @@ import {
   type FindingConfidence,
 } from "../domain/findings.js";
 import type { Capability, RawPath, Warning } from "../domain/models.js";
-import { pathBytes, rawPathFromBytes, rawPathFromUtf8 } from "../domain/paths.js";
+import { pathBytes, rawPathFromBytes, rawPathFromUtf8, sanitizeForDisplay } from "../domain/paths.js";
 import type { DiscoveryEnvironment, PathFacts } from "../ports/providers.js";
 
 const SLASH = 0x2f;
@@ -37,9 +37,37 @@ export function joinPath(base: RawPath, ...segments: readonly string[]): RawPath
   return rawPathFromBytes(new Uint8Array(bytes));
 }
 
+/**
+ * The last segment of a path, safe to print.
+ *
+ * Detectors build titles out of this, and titles are written to a terminal
+ * unescaped. A directory named with an escape sequence would otherwise colour
+ * the output, and one with a newline in it would split a row in two and could
+ * scroll a real finding off the screen. The sanitized form is the only form a
+ * detector ever sees, so no detector can forget.
+ */
 export function basename(path: RawPath): string {
-  const text = path.utf8 ?? path.display;
+  const text = path.display;
   return text.slice(text.lastIndexOf("/") + 1);
+}
+
+/**
+ * Text that came from outside Disktop, made safe to print.
+ *
+ * A package name, a Steam manifest, a ZFS dataset, a drive model: all of them
+ * reach a title, and a title reaches a terminal.
+ */
+export function safeText(value: string, maximumLength = 120): string {
+  return sanitizeForDisplay(new Uint8Array(Buffer.from(value, "utf8"))).slice(0, maximumLength);
+}
+
+/** A slug fragment built from text Disktop did not write. */
+export function safeSlug(value: string, maximumLength = 64): string {
+  const cleaned = value
+    .replace(/[^A-Za-z0-9._-]+/g, "-")
+    .replace(/^-+|-+$/g, "")
+    .slice(0, maximumLength);
+  return cleaned === "" ? "unnamed" : cleaned;
 }
 
 export function parentOf(path: RawPath): RawPath {
@@ -65,15 +93,15 @@ export function slugForPath(path: RawPath): string {
   const readable =
     text === undefined
       ? "path"
-      : text
-          .split("/")
-          .filter((segment) => segment !== "")
-          .slice(-2)
-          .join("-")
-          .replace(/[^A-Za-z0-9._-]+/g, "-")
-          .replace(/^-+|-+$/g, "")
-          .slice(0, 48) || "path";
-  return `${readable}-${hash(pathBytes(path))}`;
+      : safeSlug(
+          text
+            .split("/")
+            .filter((segment) => segment !== "")
+            .slice(-2)
+            .join("-"),
+          48,
+        );
+  return `${readable === "unnamed" ? "path" : readable}-${hash(pathBytes(path))}`;
 }
 
 /** FNV-1a over the path's bytes, printed base-36; short, stable, and total. */

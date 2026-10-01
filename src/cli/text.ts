@@ -210,8 +210,12 @@ export function findingLines(summary: FootprintSummary, units: Units): string[] 
   ];
 
   for (const total of summary.categoryTotals) {
-    const unmeasured = total.unmeasured === 0 ? "" : `, ${total.unmeasured} unmeasured`;
-    lines.push(`${total.category}: ${formatBytes(total.bytes, units)} across ${total.findings} findings${unmeasured}`);
+    const notes = [
+      total.unmeasured === 0 ? undefined : `${total.unmeasured} unmeasured`,
+      total.nested === 0 ? undefined : `${total.nested} inside another, counted once`,
+    ].filter((note) => note !== undefined);
+    const suffix = notes.length === 0 ? "" : `, ${notes.join(", ")}`;
+    lines.push(`${total.category}: ${formatBytes(total.bytes, units)} across ${total.findings} findings${suffix}`);
   }
   if (!summary.measured) {
     lines.push(
@@ -221,9 +225,9 @@ export function findingLines(summary: FootprintSummary, units: Units): string[] 
   return lines;
 }
 
-/** The detectors that could not look, with the reason, on stderr. */
+/** The detectors that did not answer, with the reason, on stderr. */
 export function providerLines(reports: readonly ProviderReport[]): string[] {
   return reports
-    .filter((report) => report.capability.status !== "available")
+    .filter((report) => !report.ran)
     .map((report) => `${report.providerId}: ${report.capability.status}: ${report.capability.explanation}`);
 }

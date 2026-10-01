@@ -189,7 +189,7 @@ test("without measurement an unknown size stays unknown rather than becoming zer
   assert.deepEqual(summary.findings[0].size.basis, "unknown");
   assert.equal(summary.findings[0].size.bytes, undefined);
   assert.deepEqual(summary.categoryTotals, [
-    { category: "language-cache", findings: 1, bytes: 0n, unmeasured: 1 },
+    { category: "language-cache", findings: 1, bytes: 0n, unmeasured: 1, nested: 0 },
   ]);
 });
 
@@ -296,5 +296,72 @@ test("findings from two providers over the same directory are merged once", asyn
   assert.deepEqual(
     summary.findings.map((entry) => entry.id),
     ["cache.ide:code"],
+  );
+});
+
+test("a measurement that found nothing makes the whole result incomplete", async () => {
+  const refusing = {
+    async measure(paths) {
+      return {
+        measurements: paths.map((path) => ({ path, basis: "unknown", explanation: "The helper could not be started." })),
+        warnings: [{ code: "measurement-unavailable", message: "The helper could not be started." }],
+      };
+    },
+  };
+
+  const summary = await run(
+    [provider("cache.language", AVAILABLE, { findings: [finding({})], warnings: [], complete: true })],
+    { measureSizes: true },
+    refusing,
+  );
+
+  assert.equal(summary.measured, false);
+  assert.equal(summary.complete, false, "sizes were asked for and none were established");
+});
+
+test("skipping measurement on purpose leaves the result complete", async () => {
+  const summary = await run(
+    [provider("cache.language", AVAILABLE, { findings: [finding({})], warnings: [], complete: true })],
+    { measureSizes: false },
+  );
+
+  assert.equal(summary.measured, false);
+  assert.equal(summary.complete, true, "nobody asked for sizes, so nothing was missed");
+});
+
+test("a detector that crashed is not reported as one that ran", async () => {
+  const summary = await run([
+    provider("cache.broken", AVAILABLE, () => {
+      throw new Error("the parser gave up");
+    }),
+    provider("cache.language", AVAILABLE, { findings: [finding({})], warnings: [], complete: true }),
+  ]);
+
+  assert.match(summary.capability.explanation, /1 of 2/, summary.capability.explanation);
+});
+
+test("an abort partway through stops the run and says it was cancelled", async () => {
+  const controller = new AbortController();
+  const slow = (id) => ({
+    id,
+    version: 1,
+    categories: ["language-cache"],
+    probe: async () => AVAILABLE,
+    discover: async () => {
+      controller.abort();
+      return { findings: [], warnings: [], complete: true };
+    },
+  });
+
+  // Four run at a time; the ones behind them are never started.
+  const many = ["one", "two", "three", "four", "five", "six", "seven", "eight"].map(slow);
+  const service = createFootprintService(many, environment(), measuring);
+  const summary = await service.discover({ measureSizes: false }, controller.signal);
+
+  assert.equal(summary.complete, false);
+  assert.ok(summary.warnings.some((warning) => warning.code === "cancelled"), JSON.stringify(summary.warnings));
+  assert.ok(
+    summary.providers.length <= 4,
+    `detectors behind the running four should not have been asked: ${summary.providers.length}`,
   );
 });

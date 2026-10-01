@@ -48,7 +48,8 @@
           "explanation": "One cache root exists."
         },
         "findings": 1,
-        "complete": true
+        "complete": true,
+        "ran": true
       }
     ],
     "categoryTotals": []

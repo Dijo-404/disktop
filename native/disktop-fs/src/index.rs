@@ -43,7 +43,40 @@ pub fn index_path(directory: &Path) -> PathBuf {
     directory.join(INDEX_FILE)
 }
 
+/// Bumped whenever the index's shape changes. An index written under a
+/// different version is a cache from another build, and a cache is rebuilt
+/// rather than migrated.
+const SCHEMA_VERSION: i64 = 1;
+
+/// Open the index, discarding one this build cannot read.
+///
+/// The index is a cache: every row in it can be produced again by scanning.
+/// An older build's file would otherwise fail on the first write with a
+/// missing-column error, which reaches the user as an internal error on a
+/// command they ran casually.
 pub fn open(directory: &Path) -> rusqlite::Result<Connection> {
+    let path = index_path(directory);
+    if let Ok(existing) = Connection::open(&path) {
+        let version: i64 = existing
+            .pragma_query_value(None, "user_version", |row| row.get(0))
+            .unwrap_or(0);
+        let populated: i64 = existing
+            .query_row(
+                "SELECT count(*) FROM sqlite_master WHERE type = 'table' AND name = 'entry'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap_or(0);
+        drop(existing);
+        if populated > 0 && version != SCHEMA_VERSION {
+            for suffix in ["", "-wal", "-shm"] {
+                let mut companion = path.clone().into_os_string();
+                companion.push(suffix);
+                let _ = std::fs::remove_file(PathBuf::from(companion));
+            }
+        }
+    }
+
     let connection = Connection::open(index_path(directory))?;
     // auto_vacuum has to be chosen before the first table exists, or pruning a
     // scan would shrink the row count without ever returning the file's pages.
@@ -53,6 +86,7 @@ pub fn open(directory: &Path) -> rusqlite::Result<Connection> {
     connection.pragma_update(None, "cache_size", -PAGE_CACHE_KIB)?;
     connection.pragma_update(None, "foreign_keys", "ON")?;
     connection.execute_batch(SCHEMA)?;
+    connection.pragma_update(None, "user_version", SCHEMA_VERSION)?;
     Ok(connection)
 }
 
@@ -544,5 +578,67 @@ mod tests {
     #[test]
     fn search_text_is_lossy_but_the_name_bytes_are_not_involved() {
         assert_eq!(searchable(&[b'A', 0xff, b'B']), "a\u{fffd}b");
+    }
+}
+
+#[cfg(test)]
+mod schema_tests {
+    use super::*;
+    use crate::testing::Sandbox;
+
+    #[test]
+    fn an_index_from_another_build_is_rebuilt_rather_than_failing() {
+        let sandbox = Sandbox::new("index-version");
+        let directory = sandbox.path();
+        {
+            // A file in the shape an older build left behind: the entry table
+            // exists, the column this build writes does not, and no version is
+            // recorded.
+            let old = Connection::open(index_path(directory)).expect("open");
+            old.execute_batch(
+                "CREATE TABLE entry (id INTEGER PRIMARY KEY, name BLOB NOT NULL);
+                 INSERT INTO entry (name) VALUES (x'6f6c64');",
+            )
+            .expect("write the old shape");
+        }
+
+        let connection = open(directory).expect("the stale index is replaced, not reported");
+
+        let columns: i64 = connection
+            .query_row(
+                "SELECT count(*) FROM pragma_table_info('entry') WHERE name = 'subtree_max_id'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("query the rebuilt schema");
+        assert_eq!(columns, 1, "the rebuilt index has this build's columns");
+
+        let rows: i64 = connection
+            .query_row("SELECT count(*) FROM entry", [], |row| row.get(0))
+            .expect("count");
+        assert_eq!(rows, 0, "a cache is rebuilt, never migrated");
+    }
+
+    #[test]
+    fn an_index_this_build_wrote_is_kept() {
+        let sandbox = Sandbox::new("index-version-kept");
+        let directory = sandbox.path();
+        {
+            let first = open(directory).expect("create");
+            first
+                .execute(
+                    "INSERT INTO scan (id, started_at, finished, complete, accounting, roots)
+                     VALUES ('scan-1', 0, 1, 1, 'allocated', '[]')",
+                    [],
+                )
+                .expect("write a scan");
+        }
+
+        let connection = open(directory).expect("reopen");
+
+        let rows: i64 = connection
+            .query_row("SELECT count(*) FROM scan", [], |row| row.get(0))
+            .expect("count");
+        assert_eq!(rows, 1, "this build's own index is not thrown away");
     }
 }

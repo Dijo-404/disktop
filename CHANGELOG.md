@@ -29,6 +29,12 @@ All public changes will be recorded here when the first complete Linux release i
   per-user usage.
 - The helper gained an owner-totals index aggregate, counted over regular files
   only for the same reason the per-extension totals are.
+- The helper rebuilds an index another build wrote rather than failing on the
+  first write: the index is a cache, and every row in it can be scanned again.
+- Text that came from outside Disktop is sanitized before it reaches a title or
+  a piece of evidence, so a filename cannot colour a terminal or split a row.
+- A category total counts each byte once: a finding sitting inside another one
+  adds nothing and is counted separately as `nested`.
 
 ### Phase 2: scanner, index, search, and growth history
 

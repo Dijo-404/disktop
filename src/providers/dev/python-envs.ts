@@ -72,6 +72,12 @@ export function createPythonEnvsProvider(): FindingProvider {
       const search = await environment.index.directoriesNamed(PROJECT_NAMES, environment.maxFindingsPerProvider);
       if (!search.searched) {
         warnings.push(noStoredScan("virtual environments inside projects"));
+      } else if (search.truncated) {
+        warnings.push({
+          code: "findings-truncated",
+          message:
+            "More project directories matched than this run looked at. Raise providers.max_findings_per_provider to see the rest.",
+        });
       }
       for (const candidate of search.paths) {
         if (seen.has(candidate.bytesBase64) || !(await exists(environment, joinPath(candidate, MARKER)))) {
@@ -81,7 +87,7 @@ export function createPythonEnvsProvider(): FindingProvider {
         findings.push(finding(candidate, "observed"));
       }
 
-      return { findings, warnings, complete: search.searched };
+      return { findings, warnings, complete: search.searched && !search.truncated };
     },
   };
 }

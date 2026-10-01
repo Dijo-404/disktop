@@ -36,7 +36,7 @@ export async function runClean(context: CliContext, options: CleanOptions): Prom
       `'--category' accepts one of ${FINDING_CATEGORIES.join(", ")}.`,
     );
   }
-  if (options.limit !== undefined && !/^[1-9][0-9]{0,3}$/.test(options.limit)) {
+  if (options.limit !== undefined && !isBoundedLimit(options.limit)) {
     return refuse(context, options.asJson, "'--limit' accepts a whole number of findings from 1 to 1000.");
   }
 
@@ -102,6 +102,11 @@ export async function runClean(context: CliContext, options: CleanOptions): Prom
     context.output.stderr(`${line}\n`);
   }
   return exitCode;
+}
+
+/** 1 to 1000, which is what the option's own message promises. */
+function isBoundedLimit(limit: string): boolean {
+  return /^[1-9][0-9]{0,3}$/.test(limit) && Number(limit) <= 1000;
 }
 
 function parseCategories(category: string | undefined): readonly FindingCategory[] | undefined | "invalid" {

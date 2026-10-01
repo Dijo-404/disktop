@@ -179,7 +179,7 @@ test("a search with no stored scan says it did not look, which is not finding no
 
   const search = await footprintOf(scan).directoriesNamed(["node_modules"], 50);
 
-  assert.deepEqual(search, { paths: [], searched: false });
+  assert.deepEqual(search, { paths: [], searched: false, truncated: false });
   assert.equal(scan.recorded.queries.length, 0);
 });
 
@@ -225,4 +225,67 @@ test("a search uses the newest snapshot that covers the home directory", async (
   assert.equal(scan.recorded.queries[0].scanId, "scan-new");
   assert.deepEqual(scan.recorded.queries[0].filter.kinds, ["directory"]);
   assert.equal(scan.recorded.queries[0].filter.nameContains, "node_modules");
+});
+
+test("each searched name gets its own budget, so one common name cannot crowd out the rest", async () => {
+  const home = rawPathFromUtf8("/home/example");
+  const snapshots = {
+    async list() {
+      return [{ id: "s", scanId: "scan-1", scannedAt: "2026-09-30T08:00:00.000Z", scope: { roots: [home], excludes: [], accounting: "allocated", crossFilesystems: false, filesystems: [] } }];
+    },
+  };
+  const asked = [];
+  const scan = scanner({});
+  scan.port.query = async (query) => {
+    asked.push([query.filter.nameContains, query.limit]);
+    const name = query.filter.nameContains;
+    const count = name === "node_modules" ? 200 : 1;
+    return {
+      entries: Array.from({ length: Math.min(count, query.limit) }, (_, index) =>
+        directoryRow(rawPathFromUtf8(`/home/example/p${index}/${name}`), 1024n),
+      ),
+      ...(count > query.limit ? { nextCursor: "more" } : {}),
+    };
+  };
+
+  const search = await createIndexFootprint({
+    scanner: scan.port,
+    index: scan.port,
+    snapshots,
+    home,
+    accounting: "allocated",
+    crossFilesystems: false,
+    excludes: [],
+  }).directoriesNamed(["node_modules", "target", "__pycache__"], 60);
+
+  assert.deepEqual(
+    asked.map((entry) => entry[0]),
+    ["node_modules", "target", "__pycache__"],
+    "every name is asked about, not just the ones the budget reached",
+  );
+  const found = search.paths.map((path) => path.display);
+  assert.ok(found.some((path) => path.endsWith("/target")), JSON.stringify(found.slice(0, 5)));
+  assert.ok(found.some((path) => path.endsWith("/__pycache__")), JSON.stringify(found.slice(0, 5)));
+  assert.equal(search.truncated, true, "more node_modules directories exist than were listed");
+});
+
+test("a path that falls out of the ranked page is named rather than dropped quietly", async () => {
+  // 300 hardlinks to one file all tie with the directory's own total, so the
+  // directory's row can sit beyond the page.
+  const tied = rawPathFromUtf8("/home/example/backups");
+  const scan = scanner({});
+  scan.port.query = async () => ({
+    entries: Array.from({ length: 256 }, (_, index) =>
+      directoryRow(rawPathFromUtf8(`/home/example/backups/link-${index}`), 10_485_760n),
+    ),
+    nextCursor: "more",
+  });
+
+  const reading = await footprintOf(scan).measure([tied], new AbortController().signal);
+
+  assert.equal(reading.measurements[0].basis, "unknown");
+  assert.ok(
+    reading.warnings.some((warning) => warning.code === "measurement-crowded-out"),
+    JSON.stringify(reading.warnings),
+  );
 });

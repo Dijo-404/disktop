@@ -50,6 +50,7 @@ const RAN = {
   capability: { status: "available", explanation: "8 cache roots exist." },
   findings: 1,
   complete: true,
+  ran: true,
 };
 
 const DENIED = {
@@ -58,6 +59,7 @@ const DENIED = {
   capability: { status: "permission-denied", explanation: "lsof could not be run by this user." },
   findings: 0,
   complete: false,
+  ran: false,
 };
 
 function summary(overrides = {}) {
@@ -67,8 +69,8 @@ function summary(overrides = {}) {
     warnings: [],
     complete: true,
     categoryTotals: [
-      { category: "language-cache", findings: 1, bytes: 7_314_112_512n, unmeasured: 0 },
-      { category: "browser-cache", findings: 1, bytes: 0n, unmeasured: 1 },
+      { category: "language-cache", findings: 1, bytes: 7_314_112_512n, unmeasured: 0, nested: 0 },
+      { category: "browser-cache", findings: 1, bytes: 0n, unmeasured: 1, nested: 0 },
     ],
     measured: true,
     capability: { status: "available", explanation: "1 of 2 detectors ran." },
@@ -192,4 +194,17 @@ test("clean plan and clean apply still refuse, because nothing applies anything 
     assert.equal(status, 2);
     assert.equal(JSON.parse(context.captured.stdout).error.code, "not-implemented");
   }
+});
+
+test("--limit refuses a number above the documented maximum", async () => {
+  const context = cleanContext();
+  const status = await runCli(["clean", "--limit", "9999", "--json"], context);
+
+  assert.equal(status, 2);
+  assert.equal(JSON.parse(context.captured.stdout).error.code, "invalid-input");
+});
+
+test("--limit accepts the documented maximum", async () => {
+  const context = cleanContext();
+  assert.equal(await runCli(["clean", "--limit", "1000", "--json"], context), 0);
 });

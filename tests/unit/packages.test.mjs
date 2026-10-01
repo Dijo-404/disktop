@@ -152,3 +152,10 @@ test("a field holding a tab cannot invent a package", () => {
     assert.ok(!entry.name.includes("\t"));
   }
 });
+
+test("a size too large to be a number is absent rather than a thrown parser", () => {
+  const packages = parseFlatpak(`org.example.Huge\t${"9".repeat(320)} GB\tflathub\n`);
+
+  assert.equal(packages.length, 1);
+  assert.equal(packages[0].reportedBytes, undefined);
+});

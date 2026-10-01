@@ -86,13 +86,21 @@ const MANAGERS: readonly ManagerSpec[] = [
  * "zero packages" from a failed command would be reporting an empty machine.
  */
 export function createPackageInventory(tools: ToolPort): PackageInventoryPort {
+  // One reading per process. A detector probes and then discovers, and asking
+  // seven package managers twice doubles the slowest part of `disktop clean`
+  // for an answer that cannot have changed in between.
+  let reading: Promise<readonly ManagerInventory[]> | undefined;
+
   return {
     async list() {
-      const inventories: ManagerInventory[] = [];
-      for (const spec of MANAGERS) {
-        inventories.push(await ask(tools, spec));
-      }
-      return inventories;
+      reading ??= (async () => {
+        const inventories: ManagerInventory[] = [];
+        for (const spec of MANAGERS) {
+          inventories.push(await ask(tools, spec));
+        }
+        return inventories;
+      })();
+      return reading;
     },
   };
 }

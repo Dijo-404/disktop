@@ -1,7 +1,16 @@
 import type { Finding } from "../../domain/findings.js";
 import type { RawPath, Warning } from "../../domain/models.js";
 import type { DiscoveryEnvironment, FindingProvider } from "../../ports/providers.js";
-import { absolutePath, buildFinding, childDirectories, exists, joinPath, slugForPath } from "../support.js";
+import {
+  absolutePath,
+  buildFinding,
+  childDirectories,
+  exists,
+  joinPath,
+  safeSlug,
+  safeText,
+  slugForPath,
+} from "../support.js";
 
 const ID = "storage.system-snapshots";
 const VERSION = 1;
@@ -68,7 +77,7 @@ export function createSystemSnapshotsProvider(options: SystemSnapshotOptions = {
       findings.push(...(await btrfsFindings(environment, warnings)));
       findings.push(...(await zfsFindings(environment, warnings)));
 
-      return { findings, warnings, complete: warnings.length === 0 };
+      return { findings, warnings, complete: true };
     },
   };
 }
@@ -79,15 +88,21 @@ async function btrfsFindings(
 ): Promise<readonly Finding[]> {
   const outcome = await environment.tools.run("btrfs", ["subvolume", "list", "/"]);
   if (outcome.capability.status !== "available") {
-    // Being denied means there may be subvolumes nobody could read, which makes
-    // the answer short. A machine with no btrfs at all is simply a machine with
-    // no btrfs, and saying so every run would make every run incomplete.
-    if (outcome.capability.status === "permission-denied") {
-      warnings.push({
-        code: "subvolumes-unavailable",
-        message: `btrfs subvolumes were not read: ${outcome.capability.explanation}`,
-      });
+    if (outcome.capability.status === "missing-tool") {
+      // No btrfs-progs: this machine has no btrfs, which is a fact about the
+      // machine rather than something Disktop failed to read.
+      return [];
     }
+    // `btrfs subvolume list /` prints the same "Operation not permitted" when
+    // the root is not btrfs and when an unprivileged user asks about one that
+    // is. The two cannot be told apart from here, so the reading is reported
+    // as unavailable without claiming which it was, and without making every
+    // run on every non-btrfs machine incomplete.
+    warnings.push({
+      code: "subvolumes-unavailable",
+      message:
+        "btrfs subvolumes were not read: either this filesystem is not btrfs, or listing its subvolumes needs privilege.",
+    });
     return [];
   }
 
@@ -103,10 +118,10 @@ async function btrfsFindings(
         providerId: ID,
         providerVersion: VERSION,
         category: "system-snapshot",
-        slug: `btrfs-${id}`,
-        title: `btrfs subvolume ${path}`,
+        slug: `btrfs-${safeSlug(id, 32)}`,
+        title: `btrfs subvolume ${safeText(path)}`,
         evidence: [
-          `btrfs subvolume list reported it as subvolume ${id}.`,
+          `btrfs subvolume list reported it as subvolume ${safeText(id, 32)}.`,
           "Subvolumes share extents, so a subvolume's size is not space that deleting it would free.",
         ],
         confidence: "uncertain",
@@ -135,8 +150,8 @@ async function zfsFindings(environment: DiscoveryEnvironment, warnings: Warning[
         providerId: ID,
         providerVersion: VERSION,
         category: "system-snapshot",
-        slug: `zfs-${name.replace(/[^A-Za-z0-9._-]+/g, "-")}`,
-        title: `ZFS snapshot ${name}`,
+        slug: `zfs-${safeSlug(name, 64)}`,
+        title: `ZFS snapshot ${safeText(name)}`,
         evidence: [
           `zfs list reports ${used} bytes as used by this snapshot alone.`,
           "That figure counts only blocks no other snapshot references; destroying several at once can free more.",

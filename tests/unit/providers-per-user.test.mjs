@@ -102,3 +102,40 @@ test("per-user usage offers no action at all", async () => {
     assert.equal(finding.category, "per-user-usage");
   }
 });
+
+test("a user name from /etc/passwd cannot command the terminal", async () => {
+  const hostile = join(root, "passwd-hostile");
+  await writeFile(hostile, "ev\u001b[31mil:x:1000:1000::/home/evil:/bin/sh\n");
+
+  const result = await discover(
+    createPerUserProvider({ passwdFile: rawPathFromUtf8(hostile) }),
+    discoveryEnvironment(root, { index: index({ owners: OWNERS, searched: true, complete: true }) }),
+  );
+
+  for (const finding of result.findings) {
+    assert.ok(!finding.title.includes("\u001b"), JSON.stringify(finding.title));
+    for (const line of finding.evidence) {
+      assert.ok(!line.includes("\u001b"), JSON.stringify(line));
+    }
+  }
+});
+
+test("more owners than the index returns is said out loud, not silently cut", async () => {
+  const many = Array.from({ length: 64 }, (_, i) => ({
+    ownerId: BigInt(1000 + i),
+    entries: 10n,
+    allocatedBytes: 1024n,
+    apparentBytes: 1024n,
+  }));
+
+  const result = await discover(
+    providerFor(),
+    discoveryEnvironment(root, { index: index({ owners: many, searched: true, complete: true, truncated: true }) }),
+  );
+
+  assert.ok(
+    result.warnings.some((warning) => warning.code === "owners-truncated"),
+    JSON.stringify(result.warnings),
+  );
+  assert.equal(result.complete, false);
+});

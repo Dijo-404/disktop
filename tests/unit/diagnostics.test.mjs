@@ -5,21 +5,21 @@ import {
   parseOpenDeleted,
   parseSmartHealth,
   parseSmartScan,
-} from "../../dist/platform/linux/diagnostics/parsers.js";
+} from "../../dist/providers/diagnostics/parsing.js";
 
 const LSOF = [
   "p1842",
   "cjournald",
   "s1073741824",
-  "L0",
+  "k0",
   "n/var/log/journal/old.journal (deleted)",
   "s512",
-  "L0",
+  "k0",
   "n/tmp/scratch file with spaces (deleted)",
   "p9001",
   "cfirefox",
   "s8388608",
-  "L0",
+  "k0",
   "n/home/example/.cache/mozilla/entry",
   "",
 ].join("\n");
@@ -57,7 +57,7 @@ test("lsof's field format keeps a path that contains spaces", () => {
 });
 
 test("a file that still has a link is not reported as deleted-but-open", () => {
-  const files = parseOpenDeleted(["p7", "cbash", "s100", "L2", "n/home/example/notes.txt", ""].join("\n"));
+  const files = parseOpenDeleted(["p7", "cbash", "s100", "k2", "n/home/example/notes.txt", ""].join("\n"));
 
   assert.deepEqual(files, []);
 });
@@ -118,16 +118,16 @@ test("memfds and shared memory are not counted as deleted files on a disk", () =
       "p700",
       "cniri",
       "s29360128",
-      "L0",
+      "k0",
       "n/memfd:awww-ipc (deleted)",
       "s4096",
-      "L0",
+      "k0",
       "n/dev/shm/wayland.1 (deleted)",
       "s1024",
-      "L0",
+      "k0",
       "n/[aio] (deleted)",
       "s2048",
-      "L0",
+      "k0",
       "n/home/example/real.db (deleted)",
       "",
     ].join("\n"),
@@ -138,4 +138,58 @@ test("memfds and shared memory are not counted as deleted files on a disk", () =
     ["/home/example/real.db"],
     "those bytes were never on a disk, so restarting the process returns none of them",
   );
+});
+
+test("the link count comes from lsof's k field, so the first file of a process survives", () => {
+  // Captured from `lsof +L1 -F pcnsk`. `L` is the process login name, not the
+  // link count; keying on it discards the first file of every process.
+  const files = parseOpenDeleted(
+    [
+      "p2334",
+      "cdbus-broker-lau",
+      "s2097152",
+      "k0",
+      "n/home/example/first.db (deleted)",
+      "s3776",
+      "k0",
+      "n/home/example/second.db (deleted)",
+      "p2417",
+      "cniri",
+      "s35572",
+      "k0",
+      "n/home/example/third.db (deleted)",
+      "",
+    ].join("\n"),
+  );
+
+  assert.deepEqual(
+    files.map((file) => file.path),
+    ["/home/example/first.db", "/home/example/second.db", "/home/example/third.db"],
+  );
+  assert.deepEqual(
+    files.map((file) => file.command),
+    ["dbus-broker-lau", "dbus-broker-lau", "niri"],
+  );
+  assert.equal(files[0].bytes, 2_097_152n);
+});
+
+test("a login name in lsof's L field never passes for a link count", () => {
+  // lsof prints L<login> once per process. Treating it as the link count makes
+  // the first file of every process look like it still has links.
+  const files = parseOpenDeleted(
+    ["p700", "cbash", "Ldj", "s100", "k0", "n/home/example/gone.db (deleted)", ""].join("\n"),
+  );
+
+  assert.deepEqual(
+    files.map((file) => file.path),
+    ["/home/example/gone.db"],
+  );
+});
+
+test("a file that still has links is skipped, by its k field", () => {
+  const files = parseOpenDeleted(
+    ["p700", "cbash", "Ldj", "s100", "k2", "n/home/example/linked.txt", ""].join("\n"),
+  );
+
+  assert.deepEqual(files, [], "two links means the file is not unlinked");
 });

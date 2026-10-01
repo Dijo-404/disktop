@@ -171,3 +171,37 @@ test("an AppImage outside the home directory is reported but not offered", async
     await restoreAndRemove(outside);
   }
 });
+
+test("a package name cannot colour the terminal or break its finding id", async () => {
+  const hostile = ["ok\t100\tinstall ok installed", "bad\u001b[31m\t200\tinstall ok installed", ""].join("\n");
+  const result = await discover(providerFor({ "dpkg-query": { stdout: hostile } }), discoveryEnvironment(home));
+
+  for (const finding of result.findings) {
+    assert.ok(!finding.title.includes("\u001b"), JSON.stringify(finding.title));
+    assert.match(finding.id, /^[A-Za-z0-9][A-Za-z0-9._:-]*$/, finding.id);
+    assert.ok(finding.id.length <= 256);
+  }
+});
+
+test("each package manager is asked once per run, not once per probe and once per discovery", async () => {
+  const calls = [];
+  const tools = {
+    async run(name, args) {
+      calls.push(name);
+      return {
+        capability: { status: "available", explanation: "ran" },
+        stdout: name === "dpkg-query" ? DPKG : "",
+        stderr: "",
+        exitCode: 0,
+      };
+    },
+  };
+  const provider = createInstalledAppsProvider(createPackageInventory(tools));
+  const environment = discoveryEnvironment(home);
+
+  await provider.probe(environment);
+  await provider.discover(environment, new AbortController().signal);
+
+  const dpkg = calls.filter((name) => name === "dpkg-query").length;
+  assert.equal(dpkg, 1, `dpkg-query ran ${dpkg} times for one clean`);
+});

@@ -2,7 +2,7 @@ import { findingSize, type Finding } from "../../domain/findings.js";
 import type { RawPath, Warning } from "../../domain/models.js";
 import type { DiscoveryEnvironment, FindingProvider } from "../../ports/providers.js";
 import { absolutePath, basename, buildFinding, exists, slugForPath } from "../support.js";
-import { parseJournalUsage } from "../../platform/linux/diagnostics/parsers.js";
+import { parseJournalUsage } from "./parsing.js";
 
 const ID = "diagnostic.logs";
 const VERSION = 1;
@@ -36,9 +36,12 @@ export function createLogProvider(options: LogOptions = {}): FindingProvider {
     categories: ["log"],
 
     async probe(environment) {
+      // An absent /var/log is a machine without one, which a container often
+      // is. A directory that exists and cannot be listed is a refusal, and
+      // that is what `discover` reports.
       return (await exists(environment, logRoot))
-        ? { status: "available", explanation: `${logRoot.display} is readable.` }
-        : { status: "permission-denied", explanation: `${logRoot.display} could not be read.` };
+        ? { status: "available", explanation: `${logRoot.display} exists.` }
+        : { status: "missing-tool", explanation: `${logRoot.display} does not exist on this machine.` };
     },
 
     async discover(environment) {

@@ -1,8 +1,8 @@
 import { findingSize, type Finding } from "../../domain/findings.js";
 import type { Warning } from "../../domain/models.js";
 import type { FindingProvider } from "../../ports/providers.js";
-import { absolutePath, buildFinding } from "../support.js";
-import { parseOpenDeleted } from "../../platform/linux/diagnostics/parsers.js";
+import { absolutePath, buildFinding, safeSlug, safeText } from "../support.js";
+import { parseOpenDeleted } from "./parsing.js";
 
 const ID = "diagnostic.open-deleted";
 const VERSION = 1;
@@ -37,7 +37,7 @@ export function createOpenDeletedProvider(): FindingProvider {
     },
 
     async discover(environment) {
-      const outcome = await environment.tools.run("lsof", ["+L1", "-F", "pcnsL"]);
+      const outcome = await environment.tools.run("lsof", ["+L1", "-F", "pcnsk"]);
       if (outcome.capability.status === "permission-denied") {
         return {
           findings: [],
@@ -68,7 +68,7 @@ export function createOpenDeletedProvider(): FindingProvider {
           title: `${files.length} files are deleted but still open`,
           evidence: [
             "The kernel keeps a deleted file's blocks until the last process holding it open closes it, which is why du and df disagree.",
-            `Held by: ${processSummary(files)}.`,
+            `Held by: ${safeText(processSummary(files))}.`,
             unmeasured === 0
               ? "Every one of them reported a size."
               : `${unmeasured} of them reported no size, so they add nothing to the total.`,
@@ -91,10 +91,10 @@ export function createOpenDeletedProvider(): FindingProvider {
             providerId: ID,
             providerVersion: VERSION,
             category: "diagnostic",
-            slug: `pid-${file.processId}-${file.path.replace(/[^A-Za-z0-9._-]+/g, "-").slice(-48) || "file"}`,
-            title: `${file.command} is holding a deleted ${file.path}`,
+            slug: `pid-${safeSlug(file.processId, 16)}-${safeSlug(file.path.slice(-48), 48)}`,
+            title: `${safeText(file.command, 48)} is holding a deleted ${safeText(file.path)}`,
             evidence: [
-              `Process ${file.processId} (${file.command}) still has this deleted file open.`,
+              `Process ${safeText(file.processId, 16)} (${safeText(file.command, 48)}) still has this deleted file open.`,
               "Its space returns when that process closes the file or restarts.",
             ],
             ...(path === undefined ? {} : { paths: [path] }),
