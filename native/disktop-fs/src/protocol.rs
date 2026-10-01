@@ -10,6 +10,8 @@
 //! requests can never interleave halfway through a line, and each request's
 //! event IDs are monotonic from 1.
 
+use crate::actions::{self, TrashRequest};
+use crate::guard::Fingerprint;
 use crate::index::{IndexLimits, IndexWriter};
 use crate::journal::{self, Journal};
 use crate::query::{self, EntryFilter, Order, QueryRequest, Sort};
@@ -30,18 +32,18 @@ use std::thread::JoinHandle;
 
 const PROTOCOL_VERSION: u16 = 1;
 const MAX_REQUEST_BYTES: usize = 1024 * 1024;
-const SUPPORTED_OPERATIONS: [&str; 6] = [
+const SUPPORTED_OPERATIONS: [&str; 7] = [
     "hello",
     "probe",
     "cancel",
     "scan",
     "query-index",
+    "trash",
     "journal-reconcile",
 ];
-const PLANNED_OPERATIONS: [&str; 12] = [
+const PLANNED_OPERATIONS: [&str; 11] = [
     "hash-candidates",
     "inspect",
-    "trash",
     "restore",
     "erase",
     "copy-move",
@@ -66,6 +68,35 @@ struct Request {
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct CancelArguments {
     cancel_request_id: String,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct FingerprintArguments {
+    device: String,
+    inode: String,
+    mount_id: String,
+    kind: String,
+    apparent_bytes: String,
+    modified_nanoseconds: String,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct TargetArguments {
+    path: String,
+    expected: FingerprintArguments,
+    #[serde(default)]
+    reviewed_bytes: Option<String>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct TrashArguments {
+    plan_id: String,
+    journal_directory: String,
+    home_trash_directory: String,
+    targets: Vec<TargetArguments>,
 }
 
 #[derive(Deserialize)]
@@ -333,6 +364,7 @@ fn handle_request(server: &Arc<Server>, line: &[u8]) {
     }
 
     match request.operation.as_str() {
+        "trash" => trash(server, responder, request.arguments),
         "journal-reconcile" => journal_reconcile(&responder, request.arguments),
         "hello" | "probe" if request.arguments.is_empty() => {
             responder.emit("complete", json!({ "result": hello_result() }));
@@ -762,6 +794,166 @@ fn query_index(responder: &Responder, arguments: Map<String, Value>) {
     }
 
     responder.emit("complete", json!({ "result": Value::Object(result) }));
+}
+
+/// Move every reviewed target to Trash.
+///
+/// It runs on its own thread for the same reason a scan does: a person who
+/// changes their mind halfway through a long list has to be able to say so,
+/// and `cancel` can only be read while this is still going.
+fn trash(server: &Arc<Server>, responder: Responder, arguments: Map<String, Value>) {
+    let arguments: TrashArguments = match decode(arguments) {
+        Ok(arguments) => arguments,
+        Err(message) => return fail(&responder, "invalid-arguments", &message),
+    };
+    let request = match trash_request(&arguments) {
+        Ok(request) => request,
+        Err(message) => return fail(&responder, "invalid-arguments", &message),
+    };
+
+    if let Err(error) = crate::sys::openat2_available() {
+        return fail(
+            &responder,
+            "unsupported-kernel",
+            &format!(
+                "Changing a file needs openat2 containment, which this kernel refused: {error}. \
+                 There is no unsafe fallback."
+            ),
+        );
+    }
+
+    let cancelled = Arc::new(AtomicBool::new(false));
+    registry(server).insert(responder.request_id.clone(), Arc::clone(&cancelled));
+    responder.emit(
+        "accepted",
+        json!({ "accepted": { "operation": "trash", "cancellable": true } }),
+    );
+
+    let owned = Arc::clone(server);
+    let worker = std::thread::spawn(move || {
+        let request_id = responder.request_id.clone();
+        // A panicking worker still has to settle its request: a client waits
+        // for a terminal event and has no timeout.
+        let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            run_mutation(&responder, &request, &cancelled);
+        }));
+        if outcome.is_err() {
+            fail(
+                &responder,
+                "internal-error",
+                "The action failed unexpectedly and was abandoned. The journal holds what it \
+                 recorded before that point.",
+            );
+        }
+        registry(&owned).remove(&request_id);
+    });
+    server.workers.lock().expect("workers").push(worker);
+}
+
+fn run_mutation(responder: &Responder, request: &TrashRequest, cancelled: &AtomicBool) {
+    let mut report = |item: actions::ItemReport| {
+        let mut body = Map::new();
+        body.insert("path".to_owned(), crate::base64::encode(&item.path).into());
+        body.insert("outcome".to_owned(), item_outcome(item.outcome).into());
+        if let Some(reason) = item.reason {
+            body.insert("reason".to_owned(), reason.into());
+        }
+        if let Some(message) = &item.message {
+            body.insert("message".to_owned(), message.clone().into());
+        }
+        if item.bytes > 0 {
+            body.insert("bytesMoved".to_owned(), item.bytes.to_string().into());
+        }
+        responder.emit("item-result", json!({ "itemResult": Value::Object(body) }));
+    };
+
+    match actions::run_trash(request, &mut report, cancelled) {
+        Ok(summary) => responder.emit("complete", json!({ "result": action_result(&summary) })),
+        Err(refusal) => fail(responder, refusal.code, &refusal.message),
+    }
+}
+
+/// The journal's own vocabulary has an `uncertain` and an `in-progress` that no
+/// item event ever carries: an event is emitted once the item has settled.
+fn item_outcome(outcome: crate::journal::Outcome) -> &'static str {
+    match outcome {
+        crate::journal::Outcome::Completed => "completed",
+        crate::journal::Outcome::Skipped => "skipped",
+        _ => "failed",
+    }
+}
+
+fn action_result(summary: &actions::ActionSummary) -> Value {
+    let mut result = Map::new();
+    result.insert("journalId".to_owned(), summary.journal_id.clone().into());
+    result.insert("state".to_owned(), summary.state.as_str().into());
+    result.insert("completed".to_owned(), summary.completed.to_string().into());
+    result.insert("skipped".to_owned(), summary.skipped.to_string().into());
+    result.insert("failed".to_owned(), summary.failed.to_string().into());
+    result.insert(
+        "selectedBytes".to_owned(),
+        summary.selected_bytes.to_string().into(),
+    );
+    result.insert(
+        "bytesMovedToTrash".to_owned(),
+        summary.bytes_moved_to_trash.to_string().into(),
+    );
+    if let Some(before) = summary.free_bytes_before {
+        result.insert("freeBytesBefore".to_owned(), before.to_string().into());
+    }
+    if let Some(after) = summary.free_bytes_after {
+        result.insert("freeBytesAfter".to_owned(), after.to_string().into());
+    }
+    result.insert("undoAvailable".to_owned(), summary.undo_available.into());
+    Value::Object(result)
+}
+
+fn trash_request(arguments: &TrashArguments) -> Result<TrashRequest, String> {
+    if arguments.targets.is_empty() {
+        return Err("A mutation needs at least one target".to_owned());
+    }
+    let journal_directory = PathBuf::from(OsStr::from_bytes(&decode_path(
+        &arguments.journal_directory,
+    )?));
+    let home_trash_directory = decode_path(&arguments.home_trash_directory)?;
+    if home_trash_directory.first() != Some(&b'/') {
+        return Err("homeTrashDirectory must be an absolute path".to_owned());
+    }
+
+    let mut targets = Vec::with_capacity(arguments.targets.len());
+    for target in &arguments.targets {
+        targets.push(actions::Target {
+            path: decode_path(&target.path)?,
+            expected: fingerprint(&target.expected)?,
+            reviewed_bytes: optional_u64(target.reviewed_bytes.as_deref(), "reviewedBytes")?
+                .unwrap_or(0),
+        });
+    }
+    Ok(TrashRequest {
+        plan_id: arguments.plan_id.clone(),
+        journal_directory,
+        home_trash_directory,
+        targets,
+    })
+}
+
+fn fingerprint(arguments: &FingerprintArguments) -> Result<Fingerprint, String> {
+    let number = |value: &str, field: &str| {
+        parse_u64(Some(value)).ok_or_else(|| format!("{field} must be a decimal integer"))
+    };
+    Ok(Fingerprint {
+        device: number(&arguments.device, "device")?,
+        inode: number(&arguments.inode, "inode")?,
+        mount_id: number(&arguments.mount_id, "mountId")?,
+        kind: match arguments.kind.as_str() {
+            "file" => EntryKind::File,
+            "directory" => EntryKind::Directory,
+            "symlink" => EntryKind::Symlink,
+            other => return Err(format!("A reviewed target cannot be of kind '{other}'")),
+        },
+        apparent_bytes: number(&arguments.apparent_bytes, "apparentBytes")?,
+        modified_nanoseconds: number(&arguments.modified_nanoseconds, "modifiedNanoseconds")?,
+    })
 }
 
 /// Resolve every record an interrupted run left behind, then answer with a
@@ -1225,6 +1417,7 @@ mod tests {
                 "cancel",
                 "scan",
                 "query-index",
+                "trash",
                 "journal-reconcile"
             ])
         );
@@ -1249,10 +1442,10 @@ mod tests {
     #[test]
     fn mutating_operation_is_explicitly_unsupported() {
         let output = responses(
-            "{\"protocolVersion\":1,\"requestId\":\"trash-1\",\"operation\":\"trash\",\"arguments\":{}}\n",
+            "{\"protocolVersion\":1,\"requestId\":\"erase-1\",\"operation\":\"erase\",\"arguments\":{}}\n",
         );
         assert_eq!(output[0]["event"], "error");
-        assert_eq!(output[0]["requestId"], "trash-1");
+        assert_eq!(output[0]["requestId"], "erase-1");
         assert_eq!(output[0]["error"]["code"], "unsupported-operation");
     }
 
@@ -1494,6 +1687,241 @@ mod tests {
             crate::base64::encode(index.as_os_str().as_bytes()),
         ));
         assert_eq!(page[0]["event"], "complete");
+    }
+
+    // --- Trash -------------------------------------------------------------
+
+    /// The fingerprint a reviewed plan would have recorded for a live path.
+    fn fingerprint(path: &[u8]) -> String {
+        let parent = crate::guard::resolve_parent(path).expect("the path resolves");
+        let live = crate::sys::metadata_at(parent.descriptor(), &parent.name).expect("it is there");
+        format!(
+            "{{\"device\":\"{}\",\"inode\":\"{}\",\"mountId\":\"{}\",\"kind\":\"{}\",\
+              \"apparentBytes\":\"{}\",\"modifiedNanoseconds\":\"{}\"}}",
+            live.device,
+            live.inode,
+            live.mount_id,
+            live.kind.as_str(),
+            live.apparent_bytes,
+            live.modified_nanoseconds,
+        )
+    }
+
+    fn target(path: &[u8], reviewed_bytes: u64) -> String {
+        format!(
+            "{{\"path\":\"{}\",\"expected\":{},\"reviewedBytes\":\"{reviewed_bytes}\"}}",
+            crate::base64::encode(path),
+            fingerprint(path),
+        )
+    }
+
+    /// A `trash` request whose targets are already fingerprinted.
+    fn trash_request(id: &str, sandbox: &Sandbox, targets: &[String]) -> String {
+        let mut trash = sandbox.bytes();
+        trash.extend_from_slice(b"/trash-home");
+        let mut state = sandbox.bytes();
+        state.extend_from_slice(b"/state");
+        format!(
+            "{{\"protocolVersion\":1,\"requestId\":\"{id}\",\"operation\":\"trash\",\
+               \"arguments\":{{\"planId\":\"plan-0123456789abcd\",\
+               \"journalDirectory\":\"{}\",\"homeTrashDirectory\":\"{}\",\
+               \"targets\":[{}]}}}}\n",
+            crate::base64::encode(&state),
+            crate::base64::encode(&trash),
+            targets.join(","),
+        )
+    }
+
+    fn run_trash(id: &str, sandbox: &Sandbox, targets: &[String]) -> Vec<Value> {
+        let request = trash_request(id, sandbox, targets);
+        session(&[request], |events| terminal(events, id))
+    }
+
+    fn completion<'a>(events: &'a [Value], id: &str) -> &'a Value {
+        events
+            .iter()
+            .find(|event| event["requestId"] == id && event["event"] == "complete")
+            .unwrap_or_else(|| panic!("no completion for {id}: {events:?}"))
+    }
+
+    fn item_results<'a>(events: &'a [Value], id: &str) -> Vec<&'a Value> {
+        events
+            .iter()
+            .filter(|event| event["requestId"] == id && event["event"] == "item-result")
+            .collect()
+    }
+
+    #[test]
+    fn a_reviewed_file_and_directory_move_into_trash_with_their_metadata() {
+        let sandbox = Sandbox::new("trash-move");
+        sandbox.directory(b"work");
+        sandbox.file(b"work/keep.log", 2048);
+        sandbox.directory(b"work/cache");
+        sandbox.file(b"work/cache/blob", 1024);
+
+        let mut file = sandbox.bytes();
+        file.extend_from_slice(b"/work/keep.log");
+        let mut directory = sandbox.bytes();
+        directory.extend_from_slice(b"/work/cache");
+
+        let events = run_trash(
+            "trash-1",
+            &sandbox,
+            &[target(&file, 2048), target(&directory, 5120)],
+        );
+        let result = &completion(&events, "trash-1")["result"];
+
+        assert!(!sandbox.path().join("work/keep.log").exists());
+        assert!(!sandbox.path().join("work/cache").exists());
+        assert!(sandbox.path().join("trash-home/files/keep.log").exists());
+        assert!(sandbox.path().join("trash-home/files/cache/blob").exists());
+
+        let info =
+            std::fs::read_to_string(sandbox.path().join("trash-home/info/keep.log.trashinfo"))
+                .expect("the metadata was written");
+        assert!(info.starts_with("[Trash Info]\n"), "{info}");
+        assert!(
+            info.contains(&format!("Path={}", crate::actions::percent_encode(&file))),
+            "{info}"
+        );
+        assert!(info.contains("DeletionDate="), "{info}");
+
+        assert_eq!(result["completed"], "2");
+        assert_eq!(result["skipped"], "0");
+        assert_eq!(result["failed"], "0");
+        assert_eq!(result["state"], "complete");
+        assert_eq!(result["undoAvailable"], true);
+        assert_eq!(result["selectedBytes"], "7168");
+        assert_eq!(result["bytesMovedToTrash"], "7168");
+        assert_eq!(item_results(&events, "trash-1").len(), 2);
+    }
+
+    #[test]
+    fn moving_to_trash_reports_what_it_moved_apart_from_what_the_filesystem_shows() {
+        let sandbox = Sandbox::new("trash-space");
+        sandbox.directory(b"work");
+        sandbox.file(b"work/big.bin", 256 * 1024);
+
+        let mut file = sandbox.bytes();
+        file.extend_from_slice(b"/work/big.bin");
+        let events = run_trash("trash-2", &sandbox, &[target(&file, 262_144)]);
+        let result = &completion(&events, "trash-2")["result"];
+
+        assert_eq!(result["bytesMovedToTrash"], "262144");
+        let before: u64 = result["freeBytesBefore"].as_str().unwrap().parse().unwrap();
+        let after: u64 = result["freeBytesAfter"].as_str().unwrap().parse().unwrap();
+        // Same filesystem, so the rename gave nothing back. The two numbers are
+        // reported separately precisely so this is visible rather than implied.
+        assert!(
+            after.abs_diff(before) < 262_144,
+            "a Trash move on one filesystem frees nothing: {before} -> {after}"
+        );
+    }
+
+    #[test]
+    fn a_second_file_of_the_same_name_lands_beside_the_first() {
+        let sandbox = Sandbox::new("trash-collision");
+        sandbox.directory(b"one");
+        sandbox.directory(b"two");
+        sandbox.file(b"one/notes.txt", 16);
+        sandbox.file(b"two/notes.txt", 32);
+
+        let mut first = sandbox.bytes();
+        first.extend_from_slice(b"/one/notes.txt");
+        run_trash("trash-3", &sandbox, &[target(&first, 16)]);
+
+        let mut second = sandbox.bytes();
+        second.extend_from_slice(b"/two/notes.txt");
+        let events = run_trash("trash-4", &sandbox, &[target(&second, 32)]);
+        assert_eq!(completion(&events, "trash-4")["result"]["completed"], "1");
+
+        let files = sandbox.path().join("trash-home/files");
+        let names: Vec<String> = std::fs::read_dir(&files)
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(names.len(), 2, "both files are in Trash: {names:?}");
+        assert_eq!(
+            std::fs::metadata(files.join("notes.txt")).unwrap().len(),
+            16,
+            "the first file was not overwritten"
+        );
+    }
+
+    #[test]
+    fn a_target_that_changed_since_review_is_skipped_rather_than_trashed() {
+        let sandbox = Sandbox::new("trash-changed");
+        sandbox.directory(b"work");
+        let path = sandbox.file(b"work/data.bin", 512);
+
+        let mut file = sandbox.bytes();
+        file.extend_from_slice(b"/work/data.bin");
+        let reviewed = target(&file, 512);
+
+        std::fs::write(&path, vec![b'y'; 4096]).unwrap();
+
+        let events = run_trash("trash-5", &sandbox, &[reviewed]);
+        let result = &completion(&events, "trash-5")["result"];
+        assert_eq!(result["skipped"], "1");
+        assert_eq!(result["completed"], "0");
+        assert_eq!(result["state"], "partial");
+        assert!(path.exists(), "a changed target is left alone");
+
+        let item = item_results(&events, "trash-5")[0];
+        assert_eq!(item["itemResult"]["outcome"], "skipped");
+        assert_eq!(item["itemResult"]["reason"], "changed-target");
+    }
+
+    #[test]
+    fn a_protected_root_is_refused_whatever_the_plan_says() {
+        let sandbox = Sandbox::new("trash-protected");
+        let fake = format!(
+            "{{\"path\":\"{}\",\"expected\":{{\"device\":\"1\",\"inode\":\"2\",\"mountId\":\"3\",\
+               \"kind\":\"file\",\"apparentBytes\":\"4\",\"modifiedNanoseconds\":\"5\"}}}}",
+            crate::base64::encode(b"/etc/passwd"),
+        );
+        let events = run_trash("trash-6", &sandbox, &[fake]);
+        let result = &completion(&events, "trash-6")["result"];
+        assert_eq!(result["failed"], "1");
+        assert_eq!(result["completed"], "0");
+        assert!(std::path::Path::new("/etc/passwd").exists());
+
+        let item = item_results(&events, "trash-6")[0];
+        assert_eq!(item["itemResult"]["reason"], "protected-path");
+    }
+
+    #[test]
+    fn every_trashed_item_leaves_a_journal_record_behind() {
+        let sandbox = Sandbox::new("trash-journal");
+        sandbox.directory(b"work");
+        sandbox.file(b"work/one.bin", 64);
+        let mut file = sandbox.bytes();
+        file.extend_from_slice(b"/work/one.bin");
+
+        let events = run_trash("trash-7", &sandbox, &[target(&file, 64)]);
+        let journal_id = completion(&events, "trash-7")["result"]["journalId"]
+            .as_str()
+            .expect("a completed action names its journal record")
+            .to_owned();
+
+        let mut state = sandbox.bytes();
+        state.extend_from_slice(b"/state");
+        let page = responses(&format!(
+            "{{\"protocolVersion\":1,\"requestId\":\"journal-9\",\
+               \"operation\":\"journal-reconcile\",\
+               \"arguments\":{{\"journalDirectory\":\"{}\"}}}}\n",
+            crate::base64::encode(&state),
+        ));
+        let records = page[0]["result"]["records"].as_array().unwrap();
+        let record = records
+            .iter()
+            .find(|record| record["id"] == journal_id.as_str())
+            .expect("the action is in the journal");
+        assert_eq!(record["operation"], "trash");
+        assert_eq!(record["state"], "complete");
+        assert_eq!(record["items"].as_array().unwrap().len(), 1);
+        assert_eq!(record["items"][0]["outcome"], "completed");
+        assert!(record["items"][0]["destination"].is_string());
     }
 
     /// Feeds `serve` one queued chunk at a time and reports end-of-stream only

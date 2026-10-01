@@ -15,11 +15,6 @@
 //! number in this protocol. The helper has no calendar and Node already
 //! formats timestamps for the public JSON.
 
-// The journal's writers arrive with the mutation operations in the next
-// commit; until then the binary only reads this file, which the dead-code lint
-// sees as unused. This attribute goes away with the first writer.
-#![allow(dead_code)]
-
 use rusqlite::{Connection, OptionalExtension, params};
 use std::path::{Path, PathBuf};
 
@@ -331,6 +326,9 @@ impl Journal {
         Ok(unresolved.len() as u64)
     }
 
+    /// One record by ID. `restore` reads it to find where a trashed file went;
+    /// until that operation exists, only the tests here call it.
+    #[allow(dead_code)]
     pub fn get(&self, id: &str) -> rusqlite::Result<Option<ActionRecord>> {
         let record = self
             .connection

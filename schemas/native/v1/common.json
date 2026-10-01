@@ -87,6 +87,10 @@
         },
         "expected": {
           "$ref": "#/$defs/entryFingerprint"
+        },
+        "reviewedBytes": {
+          "description": "What the reviewed plan measured for this entry. The helper renames a subtree in one syscall rather than re-measuring it, so it reports this number back partitioned by what actually happened; it is the plan's figure, not a fresh reading.",
+          "$ref": "#/$defs/decimalInteger"
         }
       }
     },
@@ -96,11 +100,16 @@
       "additionalProperties": false,
       "required": [
         "planId",
+        "journalDirectory",
         "targets"
       ],
       "properties": {
         "planId": {
           "$ref": "#/$defs/planId"
+        },
+        "journalDirectory": {
+          "description": "Where Disktop keeps its durable action journal. Node owns the location for the same reason it owns the index directory: the XDG rules live in one place.",
+          "$ref": "#/$defs/pathBytes"
         },
         "targets": {
           "type": "array",
@@ -742,6 +751,83 @@
           "$ref": "#/$defs/cursor"
         }
       }
+    },
+    "actionResult": {
+      "description": "What one reviewed action did. Selected bytes, bytes moved to Trash, and the two free-space readings are separate values on purpose: a Trash move on one filesystem is a large number of bytes moved and no space reclaimed, and other processes change free space at the same time, so neither number may be presented as the other.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "journalId",
+        "state",
+        "completed",
+        "skipped",
+        "failed",
+        "selectedBytes",
+        "bytesMovedToTrash",
+        "undoAvailable"
+      ],
+      "properties": {
+        "journalId": {
+          "description": "The durable record this action wrote. A result without one is a protocol violation.",
+          "$ref": "#/$defs/planId"
+        },
+        "state": {
+          "$ref": "#/$defs/actionState"
+        },
+        "completed": {
+          "$ref": "#/$defs/decimalInteger"
+        },
+        "skipped": {
+          "$ref": "#/$defs/decimalInteger"
+        },
+        "failed": {
+          "$ref": "#/$defs/decimalInteger"
+        },
+        "selectedBytes": {
+          "description": "What the plan reviewed, over every target it named, whatever became of them.",
+          "$ref": "#/$defs/decimalInteger"
+        },
+        "bytesMovedToTrash": {
+          "description": "The reviewed size of the items that actually moved. Usually not space anybody got back until Trash is emptied.",
+          "$ref": "#/$defs/decimalInteger"
+        },
+        "freeBytesBefore": {
+          "description": "Space available on the filesystem holding the first target, read before the first item.",
+          "$ref": "#/$defs/decimalInteger"
+        },
+        "freeBytesAfter": {
+          "$ref": "#/$defs/decimalInteger"
+        },
+        "undoAvailable": {
+          "type": "boolean"
+        }
+      },
+      "allOf": [
+        {
+          "if": {
+            "type": "object",
+            "properties": {
+              "state": {
+                "const": "complete"
+              }
+            },
+            "required": [
+              "state"
+            ]
+          },
+          "then": {
+            "description": "A complete action skipped nothing and failed nothing; anything else is partial.",
+            "properties": {
+              "skipped": {
+                "const": "0"
+              },
+              "failed": {
+                "const": "0"
+              }
+            }
+          }
+        }
+      ]
     }
   }
 }
