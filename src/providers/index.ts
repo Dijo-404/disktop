@@ -7,7 +7,13 @@ import {
   createPythonEnvsProvider,
   createRustupProvider,
 } from "./dev/index.js";
-import { createAiCacheProvider, createIdeCacheProvider, createLanguageCacheProvider } from "./caches/index.js";
+import {
+  createAiCacheProvider,
+  createBrowserCacheProvider,
+  createElectronCacheProvider,
+  createIdeCacheProvider,
+  createLanguageCacheProvider,
+} from "./caches/index.js";
 
 /**
  * Every detector Disktop ships, in one list.
@@ -27,5 +33,7 @@ export function createBuiltInProviders(): readonly FindingProvider[] {
     createLanguageCacheProvider(),
     createAiCacheProvider(),
     createIdeCacheProvider(),
+    createBrowserCacheProvider(),
+    createElectronCacheProvider(),
   ];
 }

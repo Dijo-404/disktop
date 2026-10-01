@@ -305,8 +305,9 @@ export async function createCacheFixture() {
 
   const firefoxProfile = join(home, ".mozilla", "firefox", "abc123.default-release");
   await sizedFile(join(firefoxProfile, "places.sqlite"), 2048);
-  const firefoxCache = join(home, ".cache", "mozilla", "firefox", "abc123.default-release", "cache2");
-  await sizedFile(join(firefoxCache, "entries"), 4096);
+  const firefoxCache = join(home, ".cache", "mozilla", "firefox", "abc123.default-release");
+  await sizedFile(join(firefoxCache, "cache2", "entries"), 4096);
+  await sizedFile(join(firefoxCache, "startupCache", "scriptCache.bin"), 1024);
 
   const slack = join(home, ".config", "Slack");
   await sizedFile(join(slack, "Cache", "data_0"), 4096);
