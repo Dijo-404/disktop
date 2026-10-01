@@ -1,5 +1,8 @@
+mod actions;
 mod base64;
+mod guard;
 mod index;
+mod journal;
 mod protocol;
 mod query;
 mod sys;

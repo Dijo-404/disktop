@@ -10,7 +10,7 @@ The user journey is: open a fast dashboard → identify a full filesystem → in
 
 ### Current implementation boundary
 
-The development package remains private at `0.0.0`. **Phases 0, 1, 2, and 3 are complete**; Phase 4 is the next gate.
+The development package remains private at `0.0.0`. **Phases 0, 1, 2, 3, and 4 are complete**; Phase 5 is the next gate.
 
 Phase 0 delivered the contracts, not features: normative JSON Schemas for CLI output (`schemas/cli/v1/`) and the helper protocol (`schemas/native/v1/`) with valid and invalid examples under contract test; byte-exact path handling and the protected-path refusal policy in `src/domain`; XDG locations, configuration defaults, and a strict TOML subset reader in `src/storage`; the source dependency rule enforced by `eslint.config.mjs` and proven by `tests/unit/dependency-rules.test.mjs`; the filesystem fixture generator in `tests/fixtures/generate.mjs`; the fixed kernel and architecture minimums in `docs/support-matrix.md`; the action threat model in `docs/threat-model.md`; and ADRs 0001 to 0005.
 
@@ -18,7 +18,27 @@ Phase 1 delivered the first vertical slice: the command surface is defined once 
 
 Phase 2 delivered the scanner, the index, search, and growth history. The Rust helper walks a tree with `openat2` containment, never following a symlink and refusing a nested or bind mount unless the scan asked to cross filesystems; it counts bytes once per `(device, inode)` and reports a second hardlink's bytes separately; it aggregates each directory on the way back up, so directories rank by subtree size without a second pass; and it writes a bounded SQLite index of byte-exact names keyed by parent ID, which `query-index` returns as keyset-paginated, filtered, sorted pages. A scan runs on its own thread and emits `accepted`, `progress`, and one `complete`; `cancel` stops it at a directory boundary and it still writes its totals. `src/application/scan.ts`, `explore.ts`, and `snapshots.ts` carry that through `ScanPort`, `FileIndexPort`, and `SnapshotStore`; `src/storage/snapshots.ts` keeps versioned compact snapshots with atomic writes and retention by count and bytes; and `disktop scan`, `disktop explore`, and `disktop snapshots list|diff` are implemented. The measured memory and latency figures replaced the targets in [adr/0002](docs/adr/0002-native-helper-and-index.md).
 
-The helper still refuses every operation that would change a user file, so no cleanup, journal, provider, or export feature exists. `find`, `clean`, `history`, `undo`, `report`, `timer`, and `completion` are declared in the parser and refuse with `not-implemented`. Explore, Clean, Dev, Apps, and History appear as TUI tabs and say they have nothing to show yet; the Phase 2 work is reachable from the CLI, and wiring it into those tabs is Phase 7.
+Phase 4 delivered the reviewed action pipeline. A plan is built in
+`src/domain/actions.ts`, classified against the protected-path policy, fingerprinted
+live, measured through the scan index, and stored with an expiry under
+`$XDG_STATE_HOME`; `src/application/apply-action.ts` is the only place a plan becomes
+an action. The Rust helper gained `trash`, `erase`, `empty-trash`, `restore`, and
+`journal-reconcile`: it resolves a target's parent one segment at a time from `/` with
+`openat2` and no symlink resolution, re-applies the protected-path policy from its own
+side, compares the live entry against the reviewed fingerprint, writes each item's
+intent before the syscall and its outcome after, and holds the only durable journal.
+Trash follows the freedesktop specification, reserving its `.trashinfo` with an
+exclusive create and renaming with `RENAME_NOREPLACE`. `disktop clean plan`,
+`clean apply`, `history`, `undo`, and `find empty|broken` are implemented, and the
+index now records each directory's direct child count and whether each symlink
+resolves, so those two searches are a filter rather than a second walk.
+
+`report`, `timer`, `completion`, and `find duplicates|stale` are declared in the
+parser and refuse with `not-implemented`; the helper still refuses `copy-move`,
+`compress`, `dedup-hardlink`, `hash-candidates`, `inspect`, and every manager
+operation. Explore, Clean, Dev, Apps, and History appear as TUI tabs and say they have
+nothing to show yet; the work so far is reachable from the CLI, and wiring it into
+those tabs is Phase 7.
 
 ## Supported environment and packaging
 
@@ -326,7 +346,7 @@ Each phase ends with a testable gate. No phase publishes to npm.
 | 1. Vertical slice and inventory **(complete)** | Implement CLI bootstrap, Linux device/mount/capacity inventory, a minimal 80×24 dashboard, Node/Rust process lifecycle, progress/cancel plumbing, and low-space/inode warnings. | Device/partition/mount counts are correct on fixture and real layouts; TUI restores terminal; `disktop --json` works without TTY. |
 | 2. Scanner, index, search, history **(complete)** | Build fd-relative walk, allocated/apparent/hardlink accounting, bounded SQLite index, query filters, file-type totals, cached scan view, snapshot comparison and pruning. | Million-entry memory gate, `du -x` comparison where semantics match, invalid-byte names, bind mounts, inaccessible dirs, cancel/restart, and snapshot compatibility tests pass. |
 | 3. Findings and application inventory **(complete)** | Implement every dev, language, AI, browser, Electron, game, VM, package, and per-user detector plus SMART, open-deleted, snapshot, log, crash, swap, and WSL diagnostics. | Each provider passes fixtures; optional tools and permissions show capability states; no duplicate findings or unlabelled size estimates. |
-| 4. Safe action engine | Implement immutable plans, native journal, Trash, undo, permanent erase, empty folders, broken symlinks, user caches/temp cleanup, Trash emptying, action history, interruption and restart recovery. | All mutations pass sandbox, symlink/bind-mount, collision, protected-root, invalid-byte, crash, and undo tests. Moved-to-Trash and observed free-space values are distinct. |
+| 4. Safe action engine **(complete)** | Implement immutable plans, native journal, Trash, undo, permanent erase, empty folders, broken symlinks, user caches/temp cleanup, Trash emptying, action history, interruption and restart recovery. | All mutations pass sandbox, symlink/bind-mount, collision, protected-root, invalid-byte, crash, and undo tests. Moved-to-Trash and observed free-space values are distinct. |
 | 5. Advanced analysis and actions | Implement staged duplicate hashes, stale evidence, keep rules, hardlink replacement, cross-disk move, compression, custom rules, and action verification. | Final byte compare, metadata compatibility, copy/hash/fsync, partial-failure recovery, rule limits, and explicit irreversible-action tests pass. |
 | 6. Managed Linux cleanup and alerts | Implement apt/dnf/pacman, journald, Snap, Flatpak, Docker/Podman including volumes, old kernels, `/var/crash`/core policy, system tmpfiles, scoped privilege requests, per-user breakdown, `notify-send` and systemd timer. | Distro-specific adapter tests and host/VM checks pass; every manager action has bounded scope, live preflight, apply, verify, permission, and unsupported cases, with preview where the manager supports it. Timer install/uninstall changes only user units and never cleans automatically. |
 | 7. Complete surfaces | Finish all TUI views, themes, vim/mouse/help, search, config, JSON/CSV/HTML exports, all CLI commands, completions, readable help, README, demo GIF, and no-telemetry statement. | A user can complete every core journey at 80×24; all commands work with no TTY and valid stdout; exports survive malicious filenames. |

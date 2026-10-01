@@ -29,6 +29,9 @@ export function createPathProbe(): PathProbe {
           allocatedBytes: allocatedBytesFromBlocks(reading.blocks),
           ownerId: reading.uid,
           modifiedNanoseconds: reading.mtimeNs,
+          device: reading.dev,
+          inode: reading.ino,
+          mountId: reading.dev.toString(10),
         } satisfies PathFacts;
       } catch {
         return undefined;

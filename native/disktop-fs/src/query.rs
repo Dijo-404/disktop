@@ -103,6 +103,11 @@ pub struct EntryFilter {
     pub modified_before_nanoseconds: Option<u64>,
     pub owner_id: Option<u64>,
     pub kinds: Option<Vec<EntryKind>>,
+    /// At most this many direct children. A row with no count is left out:
+    /// a directory nobody could open is not an empty one.
+    pub max_child_entries: Option<u64>,
+    /// Only symlinks whose target resolves, or only the ones that do not.
+    pub broken: Option<bool>,
 }
 
 pub struct QueryRequest {
@@ -130,6 +135,10 @@ pub struct IndexRow {
     pub owner_id: i64,
     pub modified_nanoseconds: i64,
     pub shared: bool,
+    /// Direct children, for a directory the walk entered. `None` everywhere
+    /// else, including a directory it could not open.
+    pub child_entries: Option<i64>,
+    pub broken: bool,
     search_name: String,
 }
 
@@ -177,7 +186,8 @@ pub fn query(connection: &Connection, request: &QueryRequest) -> rusqlite::Resul
     arguments.push(Value::Integer(i64::from(limit) + 1));
     let sql = format!(
         "SELECT id, parent_id, name, search_name, kind, device, inode, mount_id, link_count,
-                apparent_bytes, allocated_bytes, owner_id, modified_ns, shared
+                apparent_bytes, allocated_bytes, owner_id, modified_ns, shared, child_entries,
+                broken
          FROM entry WHERE {} ORDER BY {} {}, id {} LIMIT ?",
         clauses.join(" AND "),
         request.sort.column(),
@@ -200,6 +210,7 @@ pub fn query(connection: &Connection, request: &QueryRequest) -> rusqlite::Resul
         let name: Vec<u8> = row.get(2)?;
         let path = resolver.path(parent_id, &name)?;
         let shared: i64 = row.get(13)?;
+        let broken: i64 = row.get(15)?;
         entries.push(IndexRow {
             id: row.get(0)?,
             parent_id,
@@ -215,6 +226,8 @@ pub fn query(connection: &Connection, request: &QueryRequest) -> rusqlite::Resul
             owner_id: row.get(11)?,
             modified_nanoseconds: row.get(12)?,
             shared: shared != 0,
+            child_entries: row.get(14)?,
+            broken: broken != 0,
         });
     }
 
@@ -269,6 +282,10 @@ fn owner_totals(
         modified_before_nanoseconds: request.filter.modified_before_nanoseconds,
         owner_id: request.filter.owner_id,
         kinds: None,
+        // Both totals cover regular files, which never carry a child count and
+        // are never broken links, so narrowing by either would empty them.
+        max_child_entries: None,
+        broken: None,
     };
     push_filters(&filter, &mut clauses, &mut arguments);
     arguments.push(Value::Integer(i64::from(MAX_OWNER_TOTALS)));
@@ -317,6 +334,10 @@ fn type_totals(
         modified_before_nanoseconds: request.filter.modified_before_nanoseconds,
         owner_id: request.filter.owner_id,
         kinds: None,
+        // Both totals cover regular files, which never carry a child count and
+        // are never broken links, so narrowing by either would empty them.
+        max_child_entries: None,
+        broken: None,
     };
     filter.kinds = None;
     push_filters(&filter, &mut clauses, &mut arguments);
@@ -378,6 +399,14 @@ fn push_filters(filter: &EntryFilter, clauses: &mut Vec<String>, arguments: &mut
     if let Some(owner) = filter.owner_id {
         clauses.push("owner_id = ?".to_owned());
         arguments.push(Value::Integer(clamp(owner)));
+    }
+    if let Some(maximum) = filter.max_child_entries {
+        clauses.push("(child_entries IS NOT NULL AND child_entries <= ?)".to_owned());
+        arguments.push(Value::Integer(clamp(maximum)));
+    }
+    if let Some(broken) = filter.broken {
+        clauses.push("broken = ?".to_owned());
+        arguments.push(Value::Integer(i64::from(broken)));
     }
     if let Some(kinds) = &filter.kinds {
         let placeholders = vec!["?"; kinds.len()].join(", ");
@@ -620,6 +649,30 @@ mod tests {
             decode_cursor(&encode_cursor("4096", 12)).unwrap(),
             ("4096".to_owned(), 12)
         );
+    }
+    #[test]
+    fn an_empty_directory_and_a_dangling_link_are_recognisable_in_the_index() {
+        let sandbox = Sandbox::new("query-empty-broken");
+        sandbox.directory(b"empty");
+        sandbox.directory(b"full");
+        sandbox.file(b"full/a", 16);
+        sandbox.symlink(b"nowhere", b"dangling");
+        sandbox.symlink(b"full/a", b"live");
+
+        let (connection, scan_id) = scanned(&sandbox, "empty-broken");
+        let page = query(&connection, &request(&scan_id)).unwrap();
+        let row = |name: &str| {
+            page.entries
+                .iter()
+                .find(|entry| entry.path.ends_with(name.as_bytes()))
+                .unwrap_or_else(|| panic!("{name} is missing from the index"))
+        };
+
+        assert_eq!(row("/empty").child_entries, Some(0));
+        assert_eq!(row("/full").child_entries, Some(1));
+        assert_eq!(row("/full/a").child_entries, None);
+        assert!(row("/dangling").broken, "a link to nothing reads as broken");
+        assert!(!row("/live").broken, "a link to a real file is not broken");
     }
 }
 

@@ -1,0 +1,317 @@
+import assert from "node:assert/strict";
+import { test } from "node:test";
+import { runCli } from "../../dist/cli/run.js";
+import { compileBundle } from "../support/schemas.mjs";
+import { fakeContext, rawPath } from "../support/cli-context.mjs";
+
+const validators = compileBundle("schemas/cli/v1");
+
+function envelopeOf(context, schema) {
+  const envelope = JSON.parse(context.captured.stdout);
+  const validate = validators.get(schema);
+  assert.ok(validate, `${schema} has no schema`);
+  assert.ok(validate(envelope), `${schema}: ${JSON.stringify(validate.errors)}`);
+  return envelope;
+}
+
+const PLAN = {
+  id: "plan-20260929T081504117Z-0a1b2c3d",
+  operation: "trash",
+  createdAt: "2026-09-29T08:15:04.117Z",
+  expiresAt: "2026-09-29T09:15:04.117Z",
+  providerId: "cache.language",
+  findingId: "cache.language:cargo-registry",
+  scopeSummary: "1 directory, starting at /home/example/.cargo/registry",
+  reversibility: "undo-from-trash",
+  permission: "user",
+  exactItemCount: 1n,
+  selectedBytes: 7_314_112_512n,
+  entries: [
+    {
+      path: rawPath("/home/example/.cargo/registry"),
+      expected: {
+        device: 2049n,
+        inode: 1_442_113n,
+        mountId: "29",
+        kind: "directory",
+        apparentBytes: 4096n,
+        modifiedNanoseconds: 1_759_190_400_123_456_789n,
+      },
+      reviewedBytes: 7_314_112_512n,
+    },
+  ],
+  regenerationCost: "Re-downloaded on the next build that needs a crate.",
+  warnings: ["Downloaded crate sources and their index."],
+};
+
+const RESULT = {
+  planId: PLAN.id,
+  completed: 1n,
+  skipped: 0n,
+  failed: 0n,
+  selectedBytes: 7_314_112_512n,
+  bytesMovedToTrash: 7_314_112_512n,
+  freeBytesBefore: 450_000_000_000n,
+  freeBytesAfter: 450_000_000_000n,
+  state: "complete",
+  journalId: "act-1759305679004-9f2c1ab07d4e5610",
+  undoAvailable: true,
+};
+
+const RECORD = {
+  id: RESULT.journalId,
+  planId: PLAN.id,
+  operation: "trash",
+  startedAt: "2026-09-29T08:15:04.117Z",
+  finishedAt: "2026-09-29T08:15:04.331Z",
+  state: "complete",
+  completed: 1n,
+  skipped: 0n,
+  failed: 0n,
+  selectedBytes: 7_314_112_512n,
+  bytesMovedToTrash: 7_314_112_512n,
+  freeBytesBefore: 450_000_000_000n,
+  freeBytesAfter: 450_000_000_000n,
+  items: [
+    {
+      path: rawPath("/home/example/.cargo/registry"),
+      destination: rawPath("/home/example/.local/share/Trash/files/registry"),
+      outcome: "completed",
+      bytes: 7_314_112_512n,
+    },
+  ],
+};
+
+function actionContext(overrides = {}) {
+  const recorded = {};
+  const context = fakeContext();
+  context.actions = {
+    async plan(request) {
+      recorded.plan = request;
+      return overrides.planOutcome ?? { kind: "planned", plan: PLAN };
+    },
+    async apply(request) {
+      recorded.apply = request;
+      return (
+        overrides.applyOutcome ?? {
+          kind: "applied",
+          plan: PLAN,
+          result: RESULT,
+          observedFreeSpaceChange: 0n,
+          notes: ["A Trash move on the same filesystem usually frees nothing until Trash is emptied."],
+        }
+      );
+    },
+    async history() {
+      return overrides.history ?? { records: [RECORD], reconciled: 0n };
+    },
+    async restore(journalId) {
+      recorded.restore = journalId;
+      return (
+        overrides.undoOutcome ?? {
+          kind: "restored",
+          record: RECORD,
+          result: { ...RESULT, journalId: "act-restore", undoAvailable: false, bytesMovedToTrash: 0n },
+        }
+      );
+    },
+    async find(request) {
+      recorded.find = request;
+      return (
+        overrides.findOutcome ?? {
+          kind: "found",
+          entries: [
+            {
+              id: "41",
+              path: rawPath("/home/example/projects/empty"),
+              kind: "directory",
+              device: 2049n,
+              inode: 77n,
+              mountId: "29",
+              linkCount: 2n,
+              apparentBytes: 4096n,
+              allocatedBytes: 4096n,
+              ownerId: 1000n,
+              modifiedNanoseconds: 1n,
+              shared: false,
+              childEntries: 0n,
+            },
+          ],
+        }
+      );
+    },
+  };
+  context.recordedActions = recorded;
+  return context;
+}
+
+test("planning a finding writes a plan envelope a script can read", async () => {
+  const context = actionContext();
+  const status = await runCli(
+    ["clean", "plan", "cache.language:cargo-registry", "--operation", "trash", "--json"],
+    context,
+  );
+  const envelope = envelopeOf(context, "plan");
+
+  assert.equal(status, 0);
+  assert.equal(envelope.command, "clean plan");
+  assert.equal(envelope.data.plan.id, PLAN.id);
+  assert.equal(envelope.data.plan.operation, "trash");
+  assert.equal(envelope.data.plan.reversibility, "undo-from-trash");
+  assert.equal(envelope.data.plan.selectedBytes, "7314112512");
+  assert.equal(envelope.data.plan.entries[0].reviewedBytes, "7314112512");
+  assert.deepEqual(context.recordedActions.plan, {
+    operation: "trash",
+    findingId: "cache.language:cargo-registry",
+  });
+});
+
+test("planning a protected path exits 2 and says which rule refused it", async () => {
+  const context = actionContext({
+    planOutcome: {
+      kind: "refused",
+      failure: { code: "protected-path", message: "/etc/passwd cannot be cleaned up." },
+    },
+  });
+  const status = await runCli(["clean", "plan", "--path", "/etc/passwd", "--json"], context);
+  const envelope = envelopeOf(context, "plan");
+
+  assert.equal(status, 2);
+  assert.equal(envelope.status, "error");
+  assert.equal(envelope.error.code, "protected-path");
+});
+
+test("planning needs something to plan", async () => {
+  const context = actionContext();
+  const status = await runCli(["clean", "plan", "--json"], context);
+  assert.equal(status, 2);
+  assert.equal(envelopeOf(context, "plan").error.code, "invalid-input");
+});
+
+test("a missing --yes is forwarded as a missing confirmation, and the refusal is what the user sees", async () => {
+  const context = actionContext({
+    applyOutcome: {
+      kind: "refused",
+      failure: { code: "invalid-input", message: "Applying that plan needs --yes." },
+    },
+  });
+  const status = await runCli(["clean", "apply", PLAN.id, "--json"], context);
+
+  // The handler judges nothing. One place decides whether a plan may run, and
+  // it is the same place whether the request came from the CLI or the TUI.
+  assert.equal(context.recordedActions.apply.confirmed, false);
+  assert.equal(status, 2);
+  assert.equal(envelopeOf(context, "apply").error.code, "invalid-input");
+});
+
+test("applying a confirmed plan reports the three numbers separately", async () => {
+  const context = actionContext();
+  const status = await runCli(["clean", "apply", PLAN.id, "--yes", "--json"], context);
+  const envelope = envelopeOf(context, "apply");
+
+  assert.equal(status, 0);
+  assert.equal(envelope.command, "clean apply");
+  assert.equal(envelope.data.result.selectedBytes, "7314112512");
+  assert.equal(envelope.data.result.bytesMovedToTrash, "7314112512");
+  assert.equal(envelope.data.result.observedFreeSpaceChange, "0");
+  assert.equal(envelope.data.result.journalId, RESULT.journalId);
+  assert.deepEqual(context.recordedActions.apply, {
+    planId: PLAN.id,
+    confirmed: true,
+    acknowledgePermanent: false,
+  });
+});
+
+test("a partial apply exits 3 and says what it could not do", async () => {
+  const context = actionContext({
+    applyOutcome: {
+      kind: "applied",
+      plan: PLAN,
+      result: { ...RESULT, completed: 0n, skipped: 1n, state: "partial", bytesMovedToTrash: 0n },
+      observedFreeSpaceChange: 0n,
+      notes: [],
+    },
+  });
+  const status = await runCli(["clean", "apply", PLAN.id, "--yes", "--json"], context);
+  const envelope = envelopeOf(context, "apply");
+
+  assert.equal(status, 3);
+  assert.equal(envelope.status, "incomplete");
+  assert.ok(envelope.warnings.length >= 1);
+});
+
+test("--permanent reaches the service, which is the only thing allowed to judge it", async () => {
+  const context = actionContext({
+    applyOutcome: {
+      kind: "refused",
+      failure: { code: "invalid-plan", message: "That plan moves its targets to Trash." },
+    },
+  });
+  const status = await runCli(["clean", "apply", PLAN.id, "--yes", "--permanent", "--json"], context);
+
+  assert.equal(status, 2);
+  assert.equal(context.recordedActions.apply.acknowledgePermanent, true);
+  assert.equal(envelopeOf(context, "apply").error.code, "invalid-plan");
+});
+
+test("history lists what was done, with every number as a decimal string", async () => {
+  const context = actionContext();
+  const status = await runCli(["history", "--json"], context);
+  const envelope = envelopeOf(context, "history");
+
+  assert.equal(status, 0);
+  assert.equal(envelope.command, "history");
+  assert.equal(envelope.data.records.length, 1);
+  assert.equal(envelope.data.records[0].bytesMovedToTrash, "7314112512");
+  assert.equal(envelope.data.records[0].items[0].outcome, "completed");
+  assert.equal(envelope.data.reconciled, "0");
+});
+
+test("undo without --yes refuses, and with it reports what came back", async () => {
+  const refused = actionContext();
+  assert.equal(await runCli(["undo", RESULT.journalId, "--json"], refused), 2);
+  assert.equal(refused.recordedActions.restore, undefined);
+
+  const context = actionContext();
+  const status = await runCli(["undo", RESULT.journalId, "--yes", "--json"], context);
+  const envelope = envelopeOf(context, "undo");
+
+  assert.equal(status, 0);
+  assert.equal(envelope.data.result.completed, "1");
+  assert.equal(context.recordedActions.restore, RESULT.journalId);
+});
+
+test("find empty answers from the stored scan and validates against its schema", async () => {
+  const context = actionContext();
+  const status = await runCli(["find", "empty", "--json"], context);
+  const envelope = envelopeOf(context, "find");
+
+  assert.equal(status, 0);
+  assert.equal(envelope.command, "find");
+  assert.equal(envelope.data.kind, "empty");
+  assert.equal(envelope.data.entries.length, 1);
+  assert.equal(envelope.data.entries[0].childEntries, "0");
+  assert.equal(context.recordedActions.find.kind, "empty");
+});
+
+test("find duplicates is declared and refuses, because Phase 5 owns it", async () => {
+  const context = actionContext({
+    findOutcome: {
+      kind: "refused",
+      failure: { code: "not-implemented", message: "'disktop find duplicates' is not implemented yet." },
+    },
+  });
+  const status = await runCli(["find", "duplicates", "--json"], context);
+
+  assert.equal(status, 2);
+  assert.equal(envelopeOf(context, "find").error.code, "not-implemented");
+});
+
+test("find refuses a kind that is not one of the four", async () => {
+  const context = actionContext();
+  const status = await runCli(["find", "enormous", "--json"], context);
+
+  assert.equal(status, 2);
+  assert.equal(envelopeOf(context, "find").error.code, "invalid-input");
+  assert.equal(context.recordedActions.find, undefined);
+});

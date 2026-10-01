@@ -61,6 +61,8 @@ pub struct EntryRecord<'a> {
     pub name: &'a [u8],
     pub metadata: &'a Metadata,
     pub shared: bool,
+    /// True only for a symlink whose target does not resolve to anything.
+    pub broken: bool,
 }
 
 /// Totals a directory's whole subtree contributed, written when the walk
@@ -70,6 +72,11 @@ pub struct DirectoryTotals {
     pub entries: u64,
     pub allocated_bytes: u64,
     pub apparent_bytes: u64,
+    /// Names `readdir` returned directly inside this directory, excluding `.`
+    /// and `..` and counting the excluded and unreadable ones too. A directory
+    /// the walk never entered has no count at all rather than a zero, because
+    /// "nobody looked" and "nothing is there" are not the same answer.
+    pub child_entries: u64,
 }
 
 pub trait ScanSink {
@@ -270,6 +277,7 @@ impl Walk<'_> {
             name: path,
             metadata: &metadata,
             shared: false,
+            broken: false,
         })?;
         self.account(&metadata, false);
 
@@ -290,6 +298,7 @@ impl Walk<'_> {
                 entries: 1,
                 allocated_bytes: metadata.allocated_bytes,
                 apparent_bytes: metadata.apparent_bytes,
+                child_entries: 0,
             },
         }];
         self.descend(&mut stack)
@@ -319,6 +328,8 @@ impl Walk<'_> {
                 }
             };
 
+            frame.totals.child_entries += 1;
+
             let path = join(&frame.path, &name);
             if self.excluded(&path) {
                 self.totals.excluded_mounts.push(path);
@@ -343,12 +354,15 @@ impl Walk<'_> {
             };
 
             let shared = self.already_counted(&metadata);
+            let broken =
+                metadata.kind == EntryKind::Symlink && !sys::target_exists(descriptor, &name);
             let parent_id = frame.id;
             let id = self.sink.entry(&EntryRecord {
                 parent: Some(parent_id),
                 name: &name,
                 metadata: &metadata,
                 shared,
+                broken,
             })?;
             self.account(&metadata, shared);
             self.report(&path);
@@ -425,6 +439,7 @@ impl Walk<'_> {
                     entries: 1,
                     allocated_bytes: metadata.allocated_bytes,
                     apparent_bytes: metadata.apparent_bytes,
+                    child_entries: 0,
                 },
             }),
             Err(error) => {

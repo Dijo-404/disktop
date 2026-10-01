@@ -3,6 +3,8 @@
   "requestId": "trash-03",
   "operation": "trash",
   "arguments": {
+    "journalDirectory": "L2hvbWUvZXhhbXBsZS8ubG9jYWwvc3RhdGUvZGlza3RvcA==",
+    "homeTrashDirectory": "L2hvbWUvZXhhbXBsZS8ubG9jYWwvc2hhcmUvVHJhc2g=",
     "targets": [
       {
         "path": "L2hvbWUvZXhhbXBsZS8uY2FjaGUvcGlw",

@@ -46,7 +46,7 @@ pub fn index_path(directory: &Path) -> PathBuf {
 /// Bumped whenever the index's shape changes. An index written under a
 /// different version is a cache from another build, and a cache is rebuilt
 /// rather than migrated.
-const SCHEMA_VERSION: i64 = 1;
+const SCHEMA_VERSION: i64 = 2;
 
 /// Open the index, discarding one this build cannot read.
 ///
@@ -124,6 +124,8 @@ CREATE TABLE IF NOT EXISTS entry (
   owner_id INTEGER NOT NULL,
   modified_ns INTEGER NOT NULL,
   shared INTEGER NOT NULL,
+  broken INTEGER NOT NULL DEFAULT 0,
+  child_entries INTEGER,
   subtree_entries INTEGER NOT NULL DEFAULT 1,
   subtree_max_id INTEGER NOT NULL DEFAULT 0
 );
@@ -231,8 +233,9 @@ impl IndexWriter {
         self.connection.execute(
             "INSERT INTO entry (
                 scan_id, parent_id, name, search_name, extension, kind, device, inode, mount_id,
-                link_count, apparent_bytes, allocated_bytes, owner_id, modified_ns, shared
-             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)",
+                link_count, apparent_bytes, allocated_bytes, owner_id, modified_ns, shared,
+                broken
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16)",
             params![
                 self.scan_id,
                 record.parent,
@@ -249,6 +252,7 @@ impl IndexWriter {
                 i64::from(metadata.owner_id),
                 clamp(metadata.modified_nanoseconds),
                 i64::from(record.shared),
+                i64::from(record.broken),
             ],
         )?;
         let id = self.connection.last_insert_rowid();
@@ -287,13 +291,14 @@ impl ScanSink for IndexWriter {
         self.connection
             .execute(
                 "UPDATE entry SET allocated_bytes = ?2, apparent_bytes = ?3, subtree_entries = ?4,
-                        subtree_max_id = max(?1, last_insert_rowid())
+                        child_entries = ?5, subtree_max_id = max(?1, last_insert_rowid())
                  WHERE id = ?1",
                 params![
                     id,
                     clamp(totals.allocated_bytes),
                     clamp(totals.apparent_bytes),
                     clamp(totals.entries),
+                    clamp(totals.child_entries),
                 ],
             )
             .map(|_| ())
