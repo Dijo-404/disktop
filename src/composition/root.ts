@@ -10,6 +10,7 @@ import { createLinuxInventory } from "../platform/linux/inventory/index.js";
 import { createIndexFootprint } from "../platform/linux/footprint.js";
 import { createPathProbe } from "../platform/linux/probe.js";
 import { createToolPort } from "../platform/linux/tools.js";
+import { createPackageInventory } from "../platform/linux/packages/index.js";
 import { createBuiltInProviders } from "../providers/index.js";
 import { createNativeScanner } from "../platform/linux/scan/index.js";
 import { NativeHelperClient } from "../native/client.js";
@@ -112,6 +113,7 @@ export async function createServices(options: CompositionOptions = {}): Promise<
     crossFilesystems: config.scan.crossFilesystems,
     excludes,
   });
+  const tools = createToolPort();
   const discovery = {
     home,
     variables: environment,
@@ -123,7 +125,7 @@ export async function createServices(options: CompositionOptions = {}): Promise<
     largeLogBytes: DEFAULT_LARGE_LOG_BYTES,
     maxFindingsPerProvider: DEFAULT_MAX_FINDINGS_PER_PROVIDER,
     paths: createPathProbe(),
-    tools: createToolPort(),
+    tools: tools,
     index: footprints,
   };
 
@@ -136,7 +138,7 @@ export async function createServices(options: CompositionOptions = {}): Promise<
     }),
     explore: createExploreService(scanner),
     snapshots,
-    footprint: createFootprintService(createBuiltInProviders(), discovery, footprints),
+    footprint: createFootprintService(createBuiltInProviders({ packages: createPackageInventory(tools) }), discovery, footprints),
     scanDefaults: {
       accounting: config.scan.accounting,
       crossFilesystems: config.scan.crossFilesystems,
