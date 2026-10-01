@@ -99,6 +99,7 @@ function service(overrides = {}) {
         home: HOME,
         allowedRoots: [HOME],
         excludedRoots: [rawPathFromUtf8("/home/example/.local/state/disktop")],
+        trashDirectory: rawPathFromUtf8("/home/example/.local/share/Trash"),
         expiryMinutes: 60,
       },
       now: () => NOW,
@@ -242,4 +243,42 @@ test("a directory nothing could measure falls back to its own stat and says so",
     outcome.plan.warnings.some((warning) => /could not be measured/i.test(warning)),
     `warnings were ${JSON.stringify(outcome.plan.warnings)}`,
   );
+});
+
+test("emptying Trash is planned against the Trash itself, and is irreversible", async () => {
+  const { service: planner, saved } = service();
+  const outcome = await planner.plan({ operation: "empty-trash" }, SIGNAL);
+
+  assert.equal(outcome.kind, "planned");
+  assert.equal(outcome.plan.operation, "empty-trash");
+  assert.equal(outcome.plan.reversibility, "irreversible");
+  assert.equal(
+    outcome.plan.entries[0].path.display,
+    "/home/example/.local/share/Trash",
+    "with no path it means this user's own Trash",
+  );
+  assert.ok(outcome.plan.warnings.some((warning) => /cannot be undone/i.test(warning)));
+  assert.equal(saved.length, 1);
+});
+
+test("emptying anything that is not a Trash directory is refused", async () => {
+  const { service: planner, saved } = service();
+  const outcome = await planner.plan(
+    { operation: "empty-trash", path: rawPathFromUtf8("/home/example/documents") },
+    SIGNAL,
+  );
+
+  assert.equal(outcome.kind, "refused");
+  assert.equal(outcome.failure.code, "protected-path");
+  assert.deepEqual(saved, []);
+});
+
+test("a file whose timestamp predates the epoch is planned, not crashed on", async () => {
+  // Restored archives and some network filesystems produce these. The helper
+  // clamps them; Node has to agree, or the command dies on an exception.
+  const { service: planner } = service({ facts: facts({ modifiedNanoseconds: -86_400_000_000_000n }) });
+  const outcome = await planner.plan({ operation: "trash", findingId: "cache.language:pip" }, SIGNAL);
+
+  assert.equal(outcome.kind, "planned");
+  assert.equal(outcome.plan.entries[0].expected.modifiedNanoseconds, 0n);
 });

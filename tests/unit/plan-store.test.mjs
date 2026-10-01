@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtemp, readdir, rm, stat, writeFile } from "node:fs/promises";
+import { mkdtemp, readdir, readFile, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { after, test } from "node:test";
@@ -129,4 +129,35 @@ test("pruning removes the plans that have expired and keeps the ones that have n
   assert.equal(await store.prune(new Date("2026-10-01T09:30:00.000Z")), 1);
   assert.equal(await store.get(stale.id), undefined);
   assert.notEqual(await store.get(current.id), undefined);
+});
+
+test("a stored plan's reversibility is re-derived, never believed", async () => {
+  const root = await sandbox();
+  const store = createPlanStore(root);
+  const saved = plan({ operation: "permanent" });
+  await store.save(saved);
+
+  // A plan file claiming a permanent removal can be undone. Nothing but the
+  // operation decides that, so the claim is ignored rather than acted on.
+  const file = join(root, "plans", `${saved.id}.json`);
+  const document = JSON.parse(await readFile(file, "utf8"));
+  document.reversibility = "undo-from-trash";
+  await writeFile(file, JSON.stringify(document));
+
+  const loaded = await store.get(saved.id);
+  assert.equal(loaded.reversibility, "irreversible");
+});
+
+test("a stored plan naming an operation this build does not know is skipped", async () => {
+  const root = await sandbox();
+  const store = createPlanStore(root);
+  const saved = plan();
+  await store.save(saved);
+
+  const file = join(root, "plans", `${saved.id}.json`);
+  const document = JSON.parse(await readFile(file, "utf8"));
+  document.operation = "obliterate";
+  await writeFile(file, JSON.stringify(document));
+
+  assert.equal(await store.get(saved.id), undefined);
 });

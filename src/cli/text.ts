@@ -240,10 +240,17 @@ export function providerLines(reports: readonly ProviderReport[]): string[] {
  * Scope, totals, reversibility, and every warning come before the command that
  * would carry it out, because somebody skimming this has to be able to stop.
  */
+function operationVerb(operation: ActionPlan["operation"]): string {
+  if (operation === "trash") {
+    return "Move to Trash";
+  }
+  return operation === "empty-trash" ? "Empty Trash" : "Remove permanently";
+}
+
 export function planLines(plan: ActionPlan, units: Units): string[] {
   const lines = [
     `Plan ${plan.id}`,
-    `  ${plan.operation === "trash" ? "Move to Trash" : "Remove permanently"}: ${plan.scopeSummary}`,
+    `  ${operationVerb(plan.operation)}: ${plan.scopeSummary}`,
     `  Selected: ${formatBytes(plan.selectedBytes, units)}${
       plan.exactItemCount === undefined ? "" : ` across ${plan.exactItemCount} reviewed item(s)`
     }`,

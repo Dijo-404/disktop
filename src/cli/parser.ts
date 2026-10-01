@@ -135,7 +135,7 @@ export const COMMANDS: readonly CommandSpec[] = [
         summary: "The operation the plan fixes",
         kind: "value",
         placeholder: "OPERATION",
-        choices: ["trash", "permanent", "move", "compress", "hardlink"],
+        choices: ["trash", "permanent", "empty-trash", "move", "compress", "hardlink"],
       },
     ],
     implemented: true,

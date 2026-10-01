@@ -40,6 +40,17 @@ All public changes will be recorded here when the first complete Linux release i
 - Data that is in use offers no generic action, and a finding that names no path
   offers nothing generic. Both rules live in one place rather than in each
   detector's memory.
+- `clean plan --operation empty-trash` empties Trash. It needs no subject, can
+  name only this user's own Trash, and is irreversible, so applying it needs
+  `--permanent`.
+- An undo compares what is in Trash against the device and inode recorded when
+  the move happened. A name is free again as soon as somebody takes the original
+  out by hand, and an undo that trusted the name alone would move a stranger's
+  file to a path it never came from.
+- An item whose outcome could not be written to the journal is reported
+  `uncertain` rather than completed. A stored plan's reversibility is re-derived
+  from its operation rather than believed, and a plan naming an operation this
+  build does not know is skipped.
 
 ### Phase 3: findings and application inventory
 

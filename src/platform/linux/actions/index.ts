@@ -71,13 +71,22 @@ export function createNativeActions(options: NativeActionOptions): ActionPort & 
       const operation = helperOperation(plan);
       const result = await run(
         operation,
-        {
-          planId: plan.id,
-          journalDirectory,
-          // Only a Trash move needs somewhere to put things.
-          ...(operation === "trash" ? { homeTrashDirectory } : {}),
-          targets: (plan.entries ?? []).map(encodeTarget),
-        },
+        operation === "empty-trash"
+          ? {
+              planId: plan.id,
+              journalDirectory,
+              // The helper recognises this user's own Trash from this rather
+              // than taking Node's word for which directories it may empty.
+              homeTrashDirectory,
+              trashDirectories: (plan.entries ?? []).map((entry) => entry.path.bytesBase64),
+            }
+          : {
+              planId: plan.id,
+              journalDirectory,
+              // Only a Trash move needs somewhere to put things.
+              ...(operation === "trash" ? { homeTrashDirectory } : {}),
+              targets: (plan.entries ?? []).map(encodeTarget),
+            },
         signal,
       );
       return { ...result, planId: plan.id };
@@ -137,6 +146,8 @@ function helperOperation(plan: ActionPlan): string {
       return "trash";
     case "permanent":
       return "erase";
+    case "empty-trash":
+      return "empty-trash";
     default:
       throw new CapabilityUnavailable({
         status: "unsupported-kernel",

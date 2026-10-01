@@ -310,6 +310,7 @@
       "required": [
         "planId",
         "journalDirectory",
+        "homeTrashDirectory",
         "trashDirectories"
       ],
       "properties": {
@@ -317,6 +318,10 @@
           "$ref": "common.json#/$defs/planId"
         },
         "journalDirectory": {
+          "$ref": "common.json#/$defs/pathBytes"
+        },
+        "homeTrashDirectory": {
+          "description": "`$XDG_DATA_HOME/Trash`, so the helper can recognise this user's own Trash without taking Node's word for which directories it may empty.",
           "$ref": "common.json#/$defs/pathBytes"
         },
         "trashDirectories": {
@@ -327,7 +332,7 @@
           }
         }
       },
-      "description": "Emptying Trash. Each named directory must hold a `files` and an `info` directory before anything in it is touched, so a plan naming the wrong directory cannot erase somebody's documents on the strength of being listed as Trash."
+      "description": "Emptying Trash. Each named directory must be the home Trash or one of the two per-mount locations the freedesktop specification defines, and must hold a `files` and an `info` directory. Shape alone is not enough: `files` beside `info` is a layout ordinary data uses, and a plan that named the wrong directory would empty it."
     },
     "queryIndexArguments": {
       "description": "One page of an existing scan index. The helper never returns the whole tree.",

@@ -23,6 +23,9 @@ pub const JOURNAL_FILE: &str = "journal-v1.sqlite";
 /// The most records one page may return, whatever the request asks for.
 pub const MAX_LIMIT: u32 = 200;
 
+/// How long a write waits for another Disktop to finish with the journal.
+const BUSY_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum State {
     InProgress,
@@ -94,12 +97,23 @@ pub struct Counts {
     pub trashed_bytes: u64,
 }
 
+/// What one moved object was, so an undo can tell it from whatever has since
+/// taken its name.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct Identity {
+    pub device: u64,
+    pub inode: u64,
+}
+
 pub struct ItemRecord {
     pub position: u64,
     pub path: Vec<u8>,
     /// Where the item was moved, for an operation that moves rather than
     /// removes. This is what an undo reads to find the file again.
     pub destination: Option<Vec<u8>>,
+    /// What was moved there. A destination alone is a name, and a name can be
+    /// taken by something else once the original leaves Trash.
+    pub identity: Option<Identity>,
     pub outcome: Outcome,
     pub reason: Option<String>,
     pub bytes: u64,
@@ -147,11 +161,21 @@ impl Journal {
         if let Err(error) = std::fs::create_dir_all(directory) {
             return Err(rusqlite::Error::ToSqlConversionFailure(Box::new(error)));
         }
-        let connection = Connection::open(journal_path(directory))?;
+        make_private(directory, 0o700);
+        let path = journal_path(directory);
+        let connection = Connection::open(&path)?;
         connection.pragma_update(None, "journal_mode", "WAL")?;
         connection.pragma_update(None, "synchronous", "FULL")?;
         connection.pragma_update(None, "foreign_keys", "ON")?;
+        // Two Disktops can reach this file at once: a `history` reading
+        // reconciles, which writes, and an apply writes every item. Without a
+        // timeout the second one fails immediately with SQLITE_BUSY, and a
+        // journal write that fails is an item whose outcome nobody recorded.
+        connection.busy_timeout(BUSY_TIMEOUT)?;
         connection.execute_batch(SCHEMA)?;
+        // The journal names every path Disktop has acted on, so it is private
+        // to the user who owns it whichever process created it first.
+        make_private(&path, 0o600);
         Ok(Journal { connection })
     }
 
@@ -193,6 +217,34 @@ impl Journal {
                  (action_id, position, path, destination, outcome, bytes)
              VALUES (?1, ?2, ?3, ?4, 'in-progress', 0)",
             params![action_id, clamp(position), path, destination],
+        )?;
+        Ok(())
+    }
+
+    /// Record that one item really moved, with what moved and where.
+    ///
+    /// A destination on its own is a name, and a name is free again as soon as
+    /// the file leaves Trash. An undo that trusted the name alone would take
+    /// whatever is sitting there now.
+    pub fn record_moved(
+        &self,
+        action_id: &str,
+        position: u64,
+        bytes: u64,
+        identity: Option<&Identity>,
+    ) -> rusqlite::Result<()> {
+        self.connection.execute(
+            "UPDATE action_item
+                SET outcome = 'completed', reason = NULL, bytes = ?3,
+                    moved_device = ?4, moved_inode = ?5
+              WHERE action_id = ?1 AND position = ?2",
+            params![
+                action_id,
+                clamp(position),
+                clamp(bytes),
+                identity.map(|identity| clamp(identity.device)),
+                identity.map(|identity| clamp(identity.inode)),
+            ],
         )?;
         Ok(())
     }
@@ -308,11 +360,16 @@ impl Journal {
                         selected_bytes = (
                             SELECT coalesce(sum(bytes), 0) FROM action_item WHERE action_id = ?1
                         ),
-                        trashed_bytes = (
+                        -- Only an operation that puts things into Trash has
+                        -- bytes in it. A restore's items carry a destination
+                        -- too, and counting those would have an undo report
+                        -- that it filled Trash up.
+                        trashed_bytes = CASE
+                          WHEN operation = 'trash' THEN (
                             SELECT coalesce(sum(bytes), 0) FROM action_item
                              WHERE action_id = ?1 AND outcome = 'completed'
                                AND destination IS NOT NULL
-                        )
+                          ) ELSE 0 END
                   WHERE id = ?1",
                 params![
                     id,
@@ -383,16 +440,22 @@ impl Journal {
 
     fn items(&self, action_id: &str) -> rusqlite::Result<Vec<ItemRecord>> {
         let mut statement = self.connection.prepare(
-            "SELECT position, path, destination, outcome, reason, bytes
+            "SELECT position, path, destination, outcome, reason, bytes, moved_device, moved_inode
                FROM action_item WHERE action_id = ?1 ORDER BY position",
         )?;
         statement
             .query_map(params![action_id], |row| {
                 let outcome: String = row.get(3)?;
+                let device: Option<i64> = row.get(6)?;
+                let inode: Option<i64> = row.get(7)?;
                 Ok(ItemRecord {
                     position: unclamp(row.get(0)?),
                     path: row.get(1)?,
                     destination: row.get(2)?,
+                    identity: device.zip(inode).map(|(device, inode)| Identity {
+                        device: unclamp(device),
+                        inode: unclamp(inode),
+                    }),
                     outcome: Outcome::parse(&outcome),
                     reason: row.get(4)?,
                     bytes: unclamp(row.get(5)?),
@@ -454,6 +517,8 @@ CREATE TABLE IF NOT EXISTS action_item (
   outcome TEXT NOT NULL,
   reason TEXT,
   bytes INTEGER NOT NULL DEFAULT 0,
+  moved_device INTEGER,
+  moved_inode INTEGER,
   PRIMARY KEY (action_id, position)
 );
 
@@ -498,6 +563,13 @@ fn clamp(value: u64) -> i64 {
 
 fn unclamp(value: i64) -> u64 {
     value.max(0) as u64
+}
+
+/// Narrow a path Disktop just created to this user. A failure is left alone:
+/// the file may already exist with a mode somebody chose deliberately.
+fn make_private(path: &Path, mode: u32) {
+    use std::os::unix::fs::PermissionsExt;
+    let _ = std::fs::set_permissions(path, std::fs::Permissions::from_mode(mode));
 }
 
 /// Hex, so the cursor survives the contract's restricted alphabet, and opaque,
@@ -631,6 +703,80 @@ mod tests {
         assert_eq!(
             record.items[0].destination.as_deref(),
             Some(b"/trash/one".as_slice())
+        );
+    }
+
+    #[test]
+    fn an_item_restored_out_of_trash_is_not_counted_as_bytes_moved_into_it() {
+        let sandbox = Sandbox::new("journal-restore-bytes");
+        let id = {
+            let journal = Journal::open(sandbox.path()).unwrap();
+            let id = journal.begin("plan-0123456789ab", "restore", None).unwrap();
+            journal
+                .record_intent(&id, 0, b"/home/example/one", Some(b"/trash/files/one"))
+                .unwrap();
+            journal
+                .record_outcome(&id, 0, Outcome::Completed, None, 512, None)
+                .unwrap();
+            id
+        };
+
+        let journal = Journal::open(sandbox.path()).unwrap();
+        journal.reconcile().unwrap();
+        let record = journal.get(&id).unwrap().unwrap();
+        assert_eq!(
+            record.trashed_bytes, 0,
+            "an undo moved bytes out of Trash, not into it"
+        );
+        assert_eq!(record.selected_bytes, 512);
+    }
+
+    #[test]
+    fn a_trashed_item_records_the_identity_an_undo_has_to_find_again() {
+        let sandbox = Sandbox::new("journal-identity");
+        let journal = Journal::open(sandbox.path()).unwrap();
+        let id = journal.begin("plan-0123456789ab", "trash", None).unwrap();
+        journal
+            .record_intent(&id, 0, b"/home/example/one", Some(b"/trash/files/one"))
+            .unwrap();
+        journal
+            .record_moved(
+                &id,
+                0,
+                4096,
+                Some(&Identity {
+                    device: 66306,
+                    inode: 12345,
+                }),
+            )
+            .unwrap();
+
+        let record = journal.get(&id).unwrap().unwrap();
+        let identity = record.items[0]
+            .identity
+            .expect("a completed move records what it moved");
+        assert_eq!(identity.device, 66306);
+        assert_eq!(identity.inode, 12345);
+    }
+
+    #[test]
+    fn the_journal_directory_and_its_file_are_private_to_this_user() {
+        use std::os::unix::fs::PermissionsExt;
+        let sandbox = Sandbox::new("journal-private");
+        let directory = sandbox.path().join("state");
+        let journal = Journal::open(&directory).unwrap();
+        let id = journal.begin("plan-0123456789ab", "trash", None).unwrap();
+        journal
+            .finish(&id, State::Complete, &Counts::default(), None)
+            .unwrap();
+
+        let mode =
+            |path: &std::path::Path| std::fs::metadata(path).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode(&directory), 0o700, "the state directory is private");
+        assert_eq!(
+            mode(&journal_path(&directory)),
+            0o600,
+            "the journal names every path Disktop acted on",
         );
     }
 

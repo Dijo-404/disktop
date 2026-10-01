@@ -16,7 +16,7 @@
 //! presenting either as the other would be a lie about reclaimed space.
 
 use crate::guard::{self, Fingerprint, Guard, GuardContext};
-use crate::journal::{Counts, Journal, Outcome, State};
+use crate::journal::{Counts, Identity, Journal, Outcome, State};
 use crate::sys::{self, EntryKind};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -50,6 +50,9 @@ pub struct EraseRequest {
 pub struct EmptyTrashRequest {
     pub plan_id: String,
     pub journal_directory: PathBuf,
+    /// `$XDG_DATA_HOME/Trash`, so the helper can recognise it without asking
+    /// Node which directories it is allowed to empty.
+    pub home_trash_directory: Vec<u8>,
     pub trash_directories: Vec<Vec<u8>>,
 }
 
@@ -339,14 +342,24 @@ fn trash_one(
         &reserved.name,
     );
 
+    if moved.is_ok() {
+        // What moved, not only where it went. A destination is a name, and a
+        // name is free again as soon as the file leaves Trash.
+        return settle_move(
+            journal,
+            journal_id,
+            position,
+            target,
+            target.reviewed_bytes,
+            Some(Identity {
+                device: live.device,
+                inode: live.inode,
+            }),
+        );
+    }
+
     let report = match moved {
-        Ok(()) => ItemReport {
-            path: target.path.clone(),
-            outcome: Outcome::Completed,
-            reason: None,
-            message: None,
-            bytes: target.reviewed_bytes,
-        },
+        Ok(()) => unreachable!("the success path returned above"),
         Err(error) => {
             reserved.discard(&destination);
             let (code, message) = match error.raw_os_error() {
@@ -379,15 +392,7 @@ fn trash_one(
         }
     };
 
-    let _ = journal.record_outcome(
-        journal_id,
-        position,
-        report.outcome,
-        report.message.as_deref(),
-        report.bytes,
-        None,
-    );
-    report
+    settle(journal, journal_id, position, target, report)
 }
 
 /// Remove one reviewed target for good.
@@ -460,15 +465,7 @@ fn erase_one(
         }
     };
 
-    let _ = journal.record_outcome(
-        journal_id,
-        position,
-        report.outcome,
-        report.message.as_deref(),
-        report.bytes,
-        None,
-    );
-    report
+    settle(journal, journal_id, position, target, report)
 }
 
 /// Put back every item a Trash move moved, where its original path is free.
@@ -536,9 +533,9 @@ pub fn run_restore(
             reviewed_bytes: item.bytes,
         })
         .collect();
-    let destinations: Vec<Vec<u8>> = restorable
+    let destinations: Vec<(Vec<u8>, Option<Identity>)> = restorable
         .iter()
-        .map(|item| item.destination.clone().unwrap_or_default())
+        .map(|item| (item.destination.clone().unwrap_or_default(), item.identity))
         .collect();
 
     run_action(
@@ -549,11 +546,13 @@ pub fn run_restore(
         report,
         cancelled,
         |guard, journal, journal_id, position, target| {
-            let from = destinations
+            let (from, identity) = destinations
                 .get(position as usize)
                 .cloned()
                 .unwrap_or_default();
-            restore_one(guard, journal, journal_id, position, target, &from)
+            restore_one(
+                guard, journal, journal_id, position, target, &from, identity,
+            )
         },
     )
 }
@@ -566,6 +565,7 @@ fn restore_one(
     position: u64,
     target: &Target,
     from: &[u8],
+    identity: Option<Identity>,
 ) -> ItemReport {
     let refuse = |code: &'static str, message: String, outcome: Outcome| ItemReport {
         path: target.path.clone(),
@@ -592,11 +592,56 @@ fn restore_one(
             );
         }
     };
-    if sys::metadata_at(source.descriptor(), &source.name).is_err() {
+    // What is in Trash has to be what this action put there. The name is free
+    // again the moment somebody takes the original out by hand, and an undo
+    // that trusted the name alone would move a stranger's file to a path it
+    // never came from.
+    let Ok(held) = sys::metadata_at(source.descriptor(), &source.name) else {
         return refuse(
             "changed-target",
             "Trash no longer holds this item, so there is nothing to put back.".to_owned(),
             Outcome::Skipped,
+        );
+    };
+    match identity {
+        Some(recorded) if recorded.device == held.device && recorded.inode == held.inode => {}
+        Some(_) => {
+            return refuse(
+                "changed-target",
+                "Something else is under that name in Trash now, so it was left alone.".to_owned(),
+                Outcome::Skipped,
+            );
+        }
+        None => {
+            return refuse(
+                "changed-target",
+                "This action predates Disktop recording what it moved, so what is in Trash \
+                 cannot be identified and was left alone."
+                    .to_owned(),
+                Outcome::Skipped,
+            );
+        }
+    }
+
+    // The same parent-safety rule a trash or an erase is held to: a directory
+    // any user can write to is one where the final name can be swapped.
+    let parent_metadata = match sys::metadata_of(source.descriptor()) {
+        Ok(metadata) => metadata,
+        Err(error) => {
+            return refuse(
+                "permission-denied",
+                format!("Trash could not be read: {error}"),
+                Outcome::Failed,
+            );
+        }
+    };
+    if parent_metadata.writable_by_anyone_without_sticky {
+        return refuse(
+            "unsafe-parent",
+            "The Trash holding this item can be written by any user and is not sticky, so it \
+             was left alone."
+                .to_owned(),
+            Outcome::Failed,
         );
     }
     let destination = match guard::resolve_parent(&target.path) {
@@ -675,15 +720,7 @@ fn restore_one(
         }
     };
 
-    let _ = journal.record_outcome(
-        journal_id,
-        position,
-        report.outcome,
-        report.message.as_deref(),
-        report.bytes,
-        None,
-    );
-    report
+    settle(journal, journal_id, position, target, report)
 }
 
 /// Drop the `.trashinfo` beside a file that has left Trash. A leftover one
@@ -728,6 +765,7 @@ pub fn run_empty_trash(
         })
         .collect();
 
+    let home_trash = request.home_trash_directory.clone();
     run_action(
         Operation::EmptyTrash,
         &request.plan_id,
@@ -735,8 +773,39 @@ pub fn run_empty_trash(
         &targets,
         report,
         cancelled,
-        empty_one,
+        |guard, journal, journal_id, position, target| {
+            empty_one(guard, &home_trash, journal, journal_id, position, target)
+        },
     )
+}
+
+/// Whether a path is a Trash directory this user's Trash could be.
+///
+/// Shape alone is not enough: `files` and `info` side by side is a layout
+/// plenty of ordinary data uses, and a plan that named the wrong directory
+/// would empty it. A Trash is either the home Trash Node resolved from the XDG
+/// rules, or one of the two per-mount locations the freedesktop specification
+/// defines, at the top of a mount.
+fn is_trash_location(guard: &Guard, home_trash: &[u8], path: &[u8]) -> bool {
+    if path == home_trash {
+        return true;
+    }
+    let Some(top) = guard.mount_point_for(path) else {
+        return false;
+    };
+    let uid = uid_text();
+    let mut below = top.clone();
+    if below.last() != Some(&b'/') {
+        below.push(b'/');
+    }
+
+    let mut owned = below.clone();
+    owned.extend_from_slice(format!(".Trash-{uid}").as_bytes());
+    let mut shared = below;
+    shared.extend_from_slice(b".Trash/");
+    shared.extend_from_slice(uid.as_bytes());
+
+    path == owned.as_slice() || path == shared.as_slice()
 }
 
 /// A Trash directory has no reviewed fingerprint: it is named by its role, not
@@ -752,6 +821,7 @@ const UNCHECKED: Fingerprint = Fingerprint {
 
 fn empty_one(
     guard: &Guard,
+    home_trash: &[u8],
     journal: &Journal,
     journal_id: &str,
     position: u64,
@@ -767,6 +837,14 @@ fn empty_one(
 
     if let Err(refusal) = guard.classify(&target.path) {
         return refuse(refusal.code, refusal.message);
+    }
+    if !is_trash_location(guard, home_trash, &target.path) {
+        return refuse(
+            "protected-path",
+            "That is not one of this user's Trash directories. Only the home Trash and a \
+             mount's own '.Trash/<uid>' or '.Trash-<uid>' can be emptied."
+                .to_owned(),
+        );
     }
     let parent = match guard::resolve_parent(&target.path) {
         Ok(parent) => parent,
@@ -833,15 +911,7 @@ fn empty_one(
         }
     };
 
-    let _ = journal.record_outcome(
-        journal_id,
-        position,
-        report.outcome,
-        report.message.as_deref(),
-        0,
-        None,
-    );
-    report
+    settle(journal, journal_id, position, target, report)
 }
 
 /// Remove everything inside a directory, leaving the directory itself.
@@ -921,6 +991,66 @@ fn describe_removal(error: &std::io::Error) -> (&'static str, String) {
             format!("The target changed while it was being removed: {error}"),
         ),
         _ => ("internal-error", format!("The removal failed: {error}")),
+    }
+}
+
+/// Write one item's outcome and hand back the report the caller will emit.
+///
+/// A journal write that fails is not a detail. The record is the authority an
+/// undo and a restart read, so an item whose outcome nobody could record is
+/// reported `uncertain` rather than completed: something may have happened to
+/// it and Disktop cannot prove what.
+fn settle(
+    journal: &Journal,
+    journal_id: &str,
+    position: u64,
+    target: &Target,
+    report: ItemReport,
+) -> ItemReport {
+    match journal.record_outcome(
+        journal_id,
+        position,
+        report.outcome,
+        report.message.as_deref(),
+        report.bytes,
+        None,
+    ) {
+        Ok(()) => report,
+        Err(error) => unrecorded(target, &error.to_string()),
+    }
+}
+
+/// The same, for an item that really moved and whose identity has to be kept.
+fn settle_move(
+    journal: &Journal,
+    journal_id: &str,
+    position: u64,
+    target: &Target,
+    bytes: u64,
+    identity: Option<Identity>,
+) -> ItemReport {
+    match journal.record_moved(journal_id, position, bytes, identity.as_ref()) {
+        Ok(()) => ItemReport {
+            path: target.path.clone(),
+            outcome: Outcome::Completed,
+            reason: None,
+            message: None,
+            bytes,
+        },
+        Err(error) => unrecorded(target, &error.to_string()),
+    }
+}
+
+fn unrecorded(target: &Target, error: &str) -> ItemReport {
+    ItemReport {
+        path: target.path.clone(),
+        outcome: Outcome::Uncertain,
+        reason: Some("journal-write-failed"),
+        message: Some(format!(
+            "This item's outcome could not be recorded, so Disktop cannot say what happened to \
+             it: {error}"
+        )),
+        bytes: 0,
     }
 }
 
