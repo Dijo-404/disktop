@@ -1,7 +1,7 @@
 import { findingSize, type Finding } from "../../domain/findings.js";
 import type { RawPath, Warning } from "../../domain/models.js";
 import type { DiscoveryEnvironment, FindingProvider } from "../../ports/providers.js";
-import { absolutePath, buildFinding } from "../support.js";
+import { absolutePath, buildFinding, safeText } from "../support.js";
 
 const ID = "diagnostic.per-user";
 const VERSION = 1;
@@ -57,6 +57,12 @@ export function createPerUserProvider(options: PerUserOptions = {}): FindingProv
 
       const names = await userNames(environment, passwdFile);
       const warnings: Warning[] = [];
+      if (reading.truncated) {
+        warnings.push({
+          code: "owners-truncated",
+          message: `More users own files in this scan than the index reports; the ${reading.owners.length} largest are listed.`,
+        });
+      }
       if (names.size === 0) {
         warnings.push({
           code: "passwd-unreadable",
@@ -116,7 +122,7 @@ async function userNames(
     if (name === undefined || name === "" || id === undefined || !/^[0-9]+$/.test(id)) {
       continue;
     }
-    names.set(BigInt(id), name);
+    names.set(BigInt(id), safeText(name, 64));
   }
   return names;
 }

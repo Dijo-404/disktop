@@ -1,13 +1,13 @@
 import { findingSize, type Finding } from "../../domain/findings.js";
 import type { Warning } from "../../domain/models.js";
 import type { FindingProvider } from "../../ports/providers.js";
-import { buildFinding } from "../support.js";
+import { buildFinding, safeSlug, safeText } from "../support.js";
 import {
   parseSmartHealth,
   parseSmartMessages,
   parseSmartScan,
   type SmartHealth,
-} from "../../platform/linux/diagnostics/parsers.js";
+} from "./parsing.js";
 
 const ID = "diagnostic.smart";
 const VERSION = 1;
@@ -83,7 +83,7 @@ function healthFinding(name: string, health: SmartHealth): Finding {
       : `smartctl reports overall health ${health.passed ? "PASSED" : "FAILED"}.`,
   ];
   if (health.model !== undefined) {
-    evidence.push(`Model: ${health.model}.`);
+    evidence.push(`Model: ${safeText(health.model, 64)}.`);
   }
   if (health.reallocatedSectors !== undefined) {
     evidence.push(
@@ -103,11 +103,11 @@ function healthFinding(name: string, health: SmartHealth): Finding {
     providerId: ID,
     providerVersion: VERSION,
     category: "diagnostic",
-    slug: `device-${name.replace(/[^A-Za-z0-9._-]+/g, "-").replace(/^-+/, "")}`,
+    slug: `device-${safeSlug(name, 48)}`,
     title:
       health.passed === false
-        ? `${name} reports FAILED: back it up before freeing space on it`
-        : `${name} reports ${health.passed === true ? "PASSED" : "no health status"}`,
+        ? `${safeText(name, 48)} reports FAILED: back it up before freeing space on it`
+        : `${safeText(name, 48)} reports ${health.passed === true ? "PASSED" : "no health status"}`,
     evidence,
     size: findingSize(undefined, "unknown", "A health reading occupies no space."),
     confidence: "observed",

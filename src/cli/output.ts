@@ -249,6 +249,7 @@ export function encodeProviderReport(report: ProviderReport): Record<string, unk
     capability: encodeCapability(report.capability),
     findings: report.findings,
     complete: report.complete,
+    ran: report.ran,
   };
 }
 
@@ -258,5 +259,6 @@ export function encodeCategoryTotal(total: CategoryTotal): Record<string, unknow
     findings: total.findings,
     bytes: decimalBytes(total.bytes),
     unmeasured: total.unmeasured,
+    nested: total.nested,
   };
 }

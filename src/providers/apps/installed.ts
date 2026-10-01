@@ -3,7 +3,7 @@ import type { Warning } from "../../domain/models.js";
 import type { InstalledPackage, ManagerInventory, PackageInventoryPort } from "../../ports/packages.js";
 import type { DiscoveryEnvironment, FindingProvider } from "../../ports/providers.js";
 import { isWithin, pathBytes } from "../../domain/paths.js";
-import { basename, buildFinding, exists, slugForPath } from "../support.js";
+import { basename, buildFinding, exists, safeSlug, safeText, slugForPath } from "../support.js";
 
 const ID = "apps.installed";
 const VERSION = 1;
@@ -111,8 +111,8 @@ function packageFinding(inventory: ManagerInventory, entry: InstalledPackage): F
     providerId: ID,
     providerVersion: VERSION,
     category: "installed-app",
-    slug: `${inventory.manager}-${entry.name.replace(/[^A-Za-z0-9._-]+/g, "-")}`,
-    title: `${entry.name}${entry.version === undefined ? "" : ` ${entry.version}`} (${inventory.manager})`,
+    slug: `${inventory.manager}-${safeSlug(entry.name, 64)}`,
+    title: `${safeText(entry.name, 64)}${entry.version === undefined ? "" : ` ${safeText(entry.version, 32)}`} (${inventory.manager})`,
     evidence: [
       `One of the largest packages ${inventory.manager} reports.`,
       inventory.sizeMeaning,

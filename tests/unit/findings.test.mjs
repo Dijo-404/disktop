@@ -128,7 +128,51 @@ test("category totals add only what was measured and count what was not", () => 
   ]);
 
   assert.deepEqual(totals, [
-    { category: "language-cache", findings: 2, bytes: 1000n, unmeasured: 1 },
-    { category: "game-data", findings: 1, bytes: 50n, unmeasured: 0 },
+    { category: "language-cache", findings: 2, bytes: 1000n, unmeasured: 1, nested: 0 },
+    { category: "game-data", findings: 1, bytes: 50n, unmeasured: 0, nested: 0 },
+  ]);
+});
+
+test("a subtree reported beside its parent is not added to the parent's category total", () => {
+  // One provider may describe a tree and its parts: the browser detector
+  // reports a profile and the caches inside it. Adding both into a total tells
+  // the reader the category holds more bytes than the filesystem does.
+  const profile = finding({
+    id: "cache.browser:profile",
+    providerId: "cache.browser",
+    category: "browser-cache",
+    paths: [rawPathFromUtf8("/home/person/.config/google-chrome/Default")],
+    size: findingSize(51_793_920n, "measured-allocated", "Measured."),
+  });
+  const inside = finding({
+    id: "cache.browser:service-worker",
+    providerId: "cache.browser",
+    category: "browser-cache",
+    paths: [rawPathFromUtf8("/home/person/.config/google-chrome/Default/Service Worker")],
+    size: findingSize(35_192_832n, "measured-allocated", "Measured."),
+  });
+
+  const totals = categoryTotals([profile, inside]);
+
+  assert.deepEqual(totals, [
+    { category: "browser-cache", findings: 2, bytes: 51_793_920n, unmeasured: 0, nested: 1 },
+  ]);
+});
+
+test("two findings over unrelated paths both count", () => {
+  const first = finding({ id: "a:1", paths: [rawPathFromUtf8("/home/person/.npm")], size: findingSize(10n, "stat", "One stat call.") });
+  const second = finding({ id: "a:2", paths: [rawPathFromUtf8("/home/person/.cargo")], size: findingSize(20n, "stat", "One stat call.") });
+
+  assert.deepEqual(categoryTotals([first, second]), [
+    { category: "language-cache", findings: 2, bytes: 30n, unmeasured: 0, nested: 0 },
+  ]);
+});
+
+test("a finding with no path is never treated as nested", () => {
+  const broad = finding({ id: "a:1", paths: [rawPathFromUtf8("/")], size: findingSize(10n, "stat", "One stat call.") });
+  const scoped = finding({ id: "a:2", paths: [], size: findingSize(20n, "manager-reported", "Flatpak's number.") });
+
+  assert.deepEqual(categoryTotals([broad, scoped]), [
+    { category: "language-cache", findings: 2, bytes: 30n, unmeasured: 0, nested: 0 },
   ]);
 });

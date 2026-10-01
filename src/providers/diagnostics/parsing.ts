@@ -44,10 +44,14 @@ export interface OpenDeletedFile {
 }
 
 /**
- * `lsof +L1 -F pcnsL`: one field per line, keyed by its first character.
+ * `lsof +L1 -F pcnsk`: one field per line, keyed by its first character.
  *
  * The field format is used rather than the table, because a path containing a
  * space breaks a column split and a path is exactly what this reports.
+ *
+ * `k` is the link count. `L` is the process login name, which lsof prints once
+ * per process; keying on it would make the first file of every process look as
+ * though it still had links.
  */
 export function parseOpenDeleted(text: string): readonly OpenDeletedFile[] {
   const files: OpenDeletedFile[] = [];
@@ -72,7 +76,7 @@ export function parseOpenDeleted(text: string): readonly OpenDeletedFile[] {
       size = /^[0-9]+$/.test(value) ? BigInt(value) : undefined;
       continue;
     }
-    if (kind === "L") {
+    if (kind === "k") {
       links = value;
       continue;
     }

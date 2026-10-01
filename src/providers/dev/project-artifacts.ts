@@ -62,6 +62,19 @@ export function createProjectArtifactsProvider(): FindingProvider {
       for (const path of search.paths) {
         findings.push(await artifactFinding(environment, path));
       }
+      if (search.truncated) {
+        return {
+          findings,
+          warnings: [
+            {
+              code: "findings-truncated",
+              message:
+                "More build directories matched than this run lists. Raise providers.max_findings_per_provider to see the rest.",
+            },
+          ],
+          complete: false,
+        };
+      }
       return { findings, warnings: [], complete: true };
     },
   };

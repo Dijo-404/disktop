@@ -1,7 +1,7 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://github.com/Dijo-404/disktop/schemas/cli/v1/clean.json",
-  "title": "disktop clean --dry-run --json",
+  "title": "disktop clean --json",
   "description": "Everything the providers found, with nothing applied. `providers` lists every detector that ran, including the ones that could not look, so a short finding list is never mistaken for an empty disk.",
   "type": "object",
   "allOf": [

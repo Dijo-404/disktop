@@ -57,6 +57,8 @@ export interface IndexSearch {
   readonly paths: readonly RawPath[];
   /** False when no stored scan covers the root, which is not the same as finding nothing. */
   readonly searched: boolean;
+  /** True when more matched than the budget allowed, so the caller can say so. */
+  readonly truncated: boolean;
 }
 
 /** One owner's share of a stored scan, with how complete that scan was. */
@@ -69,6 +71,8 @@ export interface OwnerUsage {
 
 export interface OwnerUsageReading {
   readonly owners: readonly OwnerUsage[];
+  /** True when more owners exist than the index returned. */
+  readonly truncated: boolean;
   /** False when no stored scan covers the root, which is not "nobody owns anything". */
   readonly searched: boolean;
   /** False when the scan these totals come from did not reach everything. */

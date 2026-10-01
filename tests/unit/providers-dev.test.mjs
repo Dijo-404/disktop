@@ -9,7 +9,24 @@ import {
   createRustupProvider,
 } from "../../dist/providers/dev/index.js";
 import { createDeveloperFixture } from "../fixtures/generate.mjs";
+import { createPathProbe } from "../../dist/platform/linux/probe.js";
+import { rawPathFromUtf8 } from "../../dist/domain/paths.js";
 import { byId, discover, discoveryEnvironment, displays, storedScan } from "../support/discovery.mjs";
+
+/** The real probe, with one file's contents replaced or removed. */
+function aliasReader(path, contents) {
+  const real = createPathProbe();
+  return {
+    facts: (candidate) => real.facts(candidate),
+    list: (candidate) => real.list(candidate),
+    async readText(candidate, maxBytes) {
+      if (candidate.display === path) {
+        return contents;
+      }
+      return real.readText(candidate, maxBytes);
+    },
+  };
+}
 
 let fixture;
 
@@ -105,8 +122,14 @@ test("node versions come from nvm and fnm, and the default alias is in use", asy
   for (const version of [...fixture.paths.nvmVersions, fixture.paths.fnmVersion]) {
     assert.ok(paths.includes(version), `${version} missing from ${JSON.stringify(paths)}`);
   }
-  const active = result.findings.filter((finding) => finding.active).map((finding) => finding.paths[0].display);
-  assert.deepEqual(active, [fixture.paths.nvmVersions[1]]);
+  // nvm names its default, so the other nvm version is known to be idle.
+  const idle = result.findings.filter((finding) => !finding.active).map((finding) => finding.paths[0].display);
+  assert.deepEqual(idle, [fixture.paths.nvmVersions[0]]);
+
+  // fnm records no default here, so its version is not called idle.
+  const fnm = result.findings.find((finding) => finding.paths[0].display === fixture.paths.fnmVersion);
+  assert.equal(fnm.active, true);
+  assert.deepEqual(fnm.availableActionIds, []);
 });
 
 test("rustup marks its default toolchain and reports the download cache", async () => {
@@ -180,4 +203,56 @@ test("every developer finding has a stable id that survives a second run", async
   for (const finding of first.findings) {
     assert.match(finding.id, /^[A-Za-z0-9][A-Za-z0-9._:-]*$/, `${finding.id} is not a valid identifier`);
   }
+});
+
+test("a truncated index search is reported rather than silently listing fewer", async () => {
+  const crowded = {
+    async directoriesNamed() {
+      return { paths: [rawPathFromUtf8(`${fixture.home}/projects/api/node_modules`)], searched: true, truncated: true };
+    },
+  };
+
+  const result = await discover(createProjectArtifactsProvider(), environmentFor({ index: crowded }));
+
+  assert.equal(result.complete, false);
+  assert.ok(
+    result.warnings.some((warning) => warning.code === "findings-truncated"),
+    JSON.stringify(result.warnings),
+  );
+});
+
+test("nvm's default alias is resolved, and an absent one is not read as 'not default'", async () => {
+  // nvm writes `lts/iron` or `20` into alias/default, never `v24.8.0`.
+  const aliased = await discover(
+    createNodeVersionsProvider(),
+    environmentFor({ paths: aliasReader(`${fixture.home}/.nvm/alias/default`, "lts/iron\n") }),
+  );
+  // `lts/iron` resolves to nothing here, so no nvm version is called idle.
+  const idleUnderAlias = aliased.findings.filter((finding) => finding.title.includes("nvm") && !finding.active);
+  assert.deepEqual(idleUnderAlias, [], JSON.stringify(idleUnderAlias.map((finding) => finding.title)));
+
+  const noAlias = await discover(
+    createNodeVersionsProvider(),
+    environmentFor({ paths: aliasReader(`${fixture.home}/.nvm/alias/default`, undefined) }),
+  );
+  for (const finding of noAlias.findings.filter((candidate) => candidate.title.includes("nvm"))) {
+    assert.equal(finding.active, true, `${finding.title} was called inactive with no evidence`);
+    assert.deepEqual(finding.availableActionIds, [], `${finding.title} was offered for removal`);
+    assert.ok(
+      finding.evidence.some((line) => /could not be established|no default/i.test(line)),
+      JSON.stringify(finding.evidence),
+    );
+  }
+});
+
+test("a version named by a bare number in the alias file is still recognised", async () => {
+  const result = await discover(
+    createNodeVersionsProvider(),
+    environmentFor({ paths: aliasReader(`${fixture.home}/.nvm/alias/default`, "24\n") }),
+  );
+
+  const idleNvm = result.findings
+    .filter((finding) => finding.title.includes("nvm") && !finding.active)
+    .map((finding) => finding.paths[0].display);
+  assert.deepEqual(idleNvm, [fixture.paths.nvmVersions[0]], "`24` names v24.8.0, so only v22.9.0 is idle");
 });

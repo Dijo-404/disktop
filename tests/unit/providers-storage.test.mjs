@@ -7,6 +7,8 @@ import {
   createVirtualMachineProvider,
   createWineProvider,
 } from "../../dist/providers/storage/index.js";
+import { rm, writeFile } from "node:fs/promises";
+import { join } from "node:path";
 import { rawPathFromUtf8 } from "../../dist/domain/paths.js";
 import { createStorageFixture } from "../fixtures/generate.mjs";
 import { discover, discoveryEnvironment, displays } from "../support/discovery.mjs";
@@ -139,24 +141,43 @@ test("a machine with no btrfs is absent, not incomplete", async () => {
   assert.equal(result.complete, true);
 });
 
-test("a btrfs that refuses to answer makes the result incomplete and says so", async () => {
+test("btrfs refusing an ioctl on a filesystem that is not btrfs does not make every run incomplete", async () => {
+  // `btrfs subvolume list /` prints exactly this on a non-btrfs root, and the
+  // process adapter reads "not permitted" out of stderr as a denial. Treating
+  // it as one made every machine with btrfs-progs installed exit 3 forever.
   const result = await discover(
     createSystemSnapshotsProvider({ timeshiftRoots: [] }),
     environmentFor({
       tools: {
         btrfs: {
           capability: { status: "permission-denied", explanation: "/usr/bin/btrfs could not be run by this user." },
+          stderr: "ERROR: can't perform the search: Operation not permitted\n",
           exitCode: 1,
         },
       },
     }),
   );
 
+  assert.equal(result.complete, true, "Disktop cannot tell this apart from a non-btrfs root");
   assert.ok(
     result.warnings.some((warning) => warning.code === "subvolumes-unavailable"),
-    JSON.stringify(result.warnings),
+    "it still says it could not read them",
   );
-  assert.equal(result.complete, false);
+  const warning = result.warnings.find((candidate) => candidate.code === "subvolumes-unavailable");
+  assert.ok(
+    /not btrfs|needs privilege/i.test(warning.message),
+    `the message must not assert a denial it cannot prove: ${warning.message}`,
+  );
+});
+
+test("a btrfs that is not installed is absent, with nothing said about it", async () => {
+  const result = await discover(
+    createSystemSnapshotsProvider({ timeshiftRoots: [] }),
+    environmentFor(),
+  );
+
+  assert.deepEqual(result.warnings, [], "a machine with no btrfs-progs has no btrfs to report on");
+  assert.equal(result.complete, true);
 });
 
 test("btrfs subvolumes are read when the tool answers", async () => {
@@ -176,4 +197,63 @@ test("btrfs subvolumes are read when the tool answers", async () => {
   for (const finding of result.findings) {
     assert.deepEqual(finding.availableActionIds, [], `${finding.id} offered an action`);
   }
+});
+
+test("a Steam manifest cannot colour the terminal or break its own finding id", async () => {
+  const hostile = join(fixture.paths.steamApps, "appmanifest_4242.acf");
+  await writeFile(
+    hostile,
+    '"AppState"\n{\n\t"appid"\t\t"4242"\n\t"name"\t\t"Game\u001b[31mRED"\n\t"installdir"\t\t"My Game"\n\t"SizeOnDisk"\t\t"1024"\n}\n',
+  );
+  try {
+    const result = await discover(createSteamProvider(), environmentFor());
+
+    const game = result.findings.find((finding) => finding.id.includes("4242"));
+    assert.ok(game !== undefined, JSON.stringify(result.findings.map((finding) => finding.id)));
+    assert.ok(!game.title.includes("\u001b"), JSON.stringify(game.title));
+
+    const prefix = result.findings.find((finding) => finding.title.includes("Proton"));
+    for (const finding of result.findings) {
+      assert.match(finding.id, /^[A-Za-z0-9][A-Za-z0-9._:-]*$/, finding.id);
+      assert.ok(finding.id.length <= 256, finding.id);
+    }
+    void prefix;
+  } finally {
+    await rm(hostile);
+  }
+});
+
+test("a Steam install directory that tries to climb out of the library is refused", async () => {
+  const escaping = join(fixture.paths.steamApps, "appmanifest_4243.acf");
+  await writeFile(
+    escaping,
+    '"AppState"\n{\n\t"appid"\t\t"4243"\n\t"name"\t\t"Escaping"\n\t"installdir"\t\t"../../../../etc"\n\t"SizeOnDisk"\t\t"1024"\n}\n',
+  );
+  try {
+    const result = await discover(createSteamProvider(), environmentFor());
+
+    assert.ok(
+      !displays(result.findings).some((path) => path.includes("..")),
+      JSON.stringify(displays(result.findings)),
+    );
+    assert.ok(
+      result.warnings.some((warning) => warning.code === "unreadable-manifest"),
+      JSON.stringify(result.warnings),
+    );
+  } finally {
+    await rm(escaping);
+  }
+});
+
+test("a ZFS dataset with a very long name still produces a schema-valid id", async () => {
+  const result = await discover(
+    createSystemSnapshotsProvider({ timeshiftRoots: [] }),
+    environmentFor({
+      tools: { zfs: { stdout: `tank/${"d".repeat(300)}@snap\t4096\n` } },
+    }),
+  );
+
+  assert.equal(result.findings.length, 1);
+  assert.ok(result.findings[0].id.length <= 256, `${result.findings[0].id.length} characters`);
+  assert.match(result.findings[0].id, /^[A-Za-z0-9][A-Za-z0-9._:-]*$/);
 });

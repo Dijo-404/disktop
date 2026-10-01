@@ -741,7 +741,7 @@
       }
     },
     "providerReport": {
-      "description": "One provider's outcome. A provider that could not look is listed with its reason, never omitted, so an absent detector is never read as an empty disk.",
+      "description": "One detector's outcome. A detector that could not look is listed with its reason, never omitted, so an absent detector is never read as an empty disk. `ran` is false when it never answered: it was absent, it was denied, or it threw.",
       "type": "object",
       "additionalProperties": false,
       "required": [
@@ -749,7 +749,8 @@
         "version",
         "capability",
         "findings",
-        "complete"
+        "complete",
+        "ran"
       ],
       "properties": {
         "providerId": {
@@ -768,18 +769,22 @@
         },
         "complete": {
           "type": "boolean"
+        },
+        "ran": {
+          "type": "boolean"
         }
       }
     },
     "categoryTotal": {
-      "description": "Bytes per category over measured findings only. `unmeasured` is how many findings in the category contributed nothing because nothing measured them.",
+      "description": "Bytes per category over measured findings that are not inside another finding. `unmeasured` is how many contributed nothing because nothing measured them; `nested` is how many sit inside another finding, so their bytes are already counted in it.",
       "type": "object",
       "additionalProperties": false,
       "required": [
         "category",
         "findings",
         "bytes",
-        "unmeasured"
+        "unmeasured",
+        "nested"
       ],
       "properties": {
         "category": {
@@ -793,6 +798,10 @@
           "$ref": "#/$defs/decimalInteger"
         },
         "unmeasured": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "nested": {
           "type": "integer",
           "minimum": 0
         }

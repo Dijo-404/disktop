@@ -72,18 +72,25 @@ The parser in `src/cli/parser.ts` will define commands and options once, and dri
 nothing: `clean plan` and `clean apply` still refuse with `not-implemented`,
 and no detector can delete.
 
-Three rules shape the output. Every detector appears in `providers` with its
-capability, including the ones that could not look, so a short list is never
-read as a clean machine. A detector that is `permission-denied` makes the
-whole result incomplete — the data is there and Disktop could not read it — and
-the command exits `3`; a `missing-tool` detector does not, because the feature
-is genuinely absent. And every size carries a `basis`: a footprint nothing
-measured is `unknown` and carries no number, never zero.
+Four rules shape the output. Every detector appears in `providers` with its
+capability, including the ones that could not look; `ran` is false when it
+never answered, whether it was absent, denied, or it threw. A detector that is
+`permission-denied` makes the whole result incomplete — the data is there and
+Disktop could not read it — and the command exits `3`; a `missing-tool`
+detector does not, because the feature is genuinely absent. Every size carries
+a `basis`: a footprint nothing measured is `unknown` and carries no number,
+never zero. And a `categoryTotal` counts each byte once: `nested` is how many
+findings in that category sit inside another one, so a browser profile and the
+cache directories inside it do not add up to more than the filesystem holds.
 
 Sizes are measured in one pass after discovery, by the same scan index `scan`
 and `explore` read, so every number in one result shares an accounting mode.
-`--no-sizes` skips that pass, which is much faster and leaves every size
-unknown.
+Asking for sizes and getting none is an incomplete result, not a complete one.
+`--no-sizes` skips the pass on purpose, which is much faster, leaves directory
+footprints unknown, and stays complete.
+
+Ctrl+C stops discovery at the next detector boundary. `clean` prints no
+progress while it runs; that is Phase 7's work.
 
 ## Reviewed actions
 

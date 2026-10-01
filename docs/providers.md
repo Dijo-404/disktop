@@ -111,7 +111,31 @@ A detector that could not look says so. `missing-tool` and the `unsupported-*`
 states leave the run complete, because the feature is genuinely absent on this
 machine. `permission-denied` does not: the data is there and Disktop could not
 read it, so the whole result is incomplete and `disktop clean` exits `3`. A
-detector that throws is reported and skipped rather than ending the run.
+detector that throws is reported and skipped rather than ending the run, and
+its report carries `ran: false` so it is never mistaken for one that looked
+and found nothing.
+
+Two tools cannot be read this cleanly and say so instead of guessing.
+`btrfs subvolume list /` prints the same "Operation not permitted" on a
+filesystem that is not btrfs and on one that needs privilege, so the warning
+names both possibilities and the run stays complete. `smartctl` exits non-zero
+with an empty stderr and puts the reason inside its JSON, so the denial is
+read from the document.
+
+### Nothing a detector did not establish
+
+A detector never asserts what it could not check. nvm writes `lts/iron` into
+its alias file, so when the alias cannot be resolved every version is reported
+as possibly in use rather than as idle — calling them all idle would offer
+somebody's only Node runtime for removal. A disk image cannot be proved idle
+without privilege, so every image is `active`. A `target` directory with no
+`Cargo.toml` beside it is `uncertain`.
+
+Text that came from outside Disktop — a filename, a package name, a Steam
+manifest, a drive model, a line of `/etc/passwd` — is sanitized before it
+reaches a title or a piece of evidence. A title is written to a terminal
+unescaped, and a directory named with an escape sequence would otherwise
+colour the output or split a row in two.
 
 ## Provider areas for `1.0.0`
 

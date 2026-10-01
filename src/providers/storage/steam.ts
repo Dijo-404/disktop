@@ -1,5 +1,6 @@
 import { findingSize, type Finding } from "../../domain/findings.js";
 import type { RawPath, Warning } from "../../domain/models.js";
+import { isAbsoluteNormalized, pathBytes } from "../../domain/paths.js";
 import type { DiscoveryEnvironment, FindingProvider } from "../../ports/providers.js";
 import {
   absolutePath,
@@ -9,6 +10,8 @@ import {
   exists,
   existingPaths,
   joinPath,
+  safeSlug,
+  safeText,
   underHome,
 } from "../support.js";
 
@@ -96,9 +99,9 @@ function gameFinding(path: RawPath, manifest: Manifest): Finding {
     providerVersion: VERSION,
     category: "game-data",
     slug: `app-${manifest.appId}`,
-    title: `Steam game ${manifest.name}`,
+    title: `Steam game ${safeText(manifest.name)}`,
     evidence: [
-      `appmanifest_${manifest.appId}.acf names ${manifest.installDirectory} as its install directory.`,
+      `appmanifest_${manifest.appId}.acf names ${safeText(manifest.installDirectory)} as its install directory.`,
       "Reinstalling means downloading the whole game again; saved games usually live elsewhere.",
     ],
     paths: [path],
@@ -120,7 +123,7 @@ function prefixFinding(path: RawPath): Finding {
     providerId: ID,
     providerVersion: VERSION,
     category: "game-data",
-    slug: `compatdata-${basename(path)}`,
+    slug: `compatdata-${safeSlug(basename(path), 48)}`,
     title: `Proton prefix for app ${basename(path)}`,
     evidence: [
       "A Windows environment Proton built for one game, with whatever that game wrote into it.",
@@ -154,6 +157,12 @@ function parseManifest(text: string | undefined): Manifest | undefined {
   if (appId === undefined || name === undefined || installDirectory === undefined || !/^[0-9]+$/.test(appId)) {
     return undefined;
   }
+  // An install directory is one name inside the library. A manifest is a file
+  // anyone with write access to the library can edit, and a value carrying a
+  // separator or a `..` would send the measuring scan somewhere else entirely.
+  if (installDirectory === "" || /[/\\]/.test(installDirectory) || installDirectory === "." || installDirectory === "..") {
+    return undefined;
+  }
   const size = fields.get("sizeondisk");
   return {
     appId,
@@ -182,7 +191,8 @@ async function libraryRoots(environment: DiscoveryEnvironment): Promise<readonly
     }
     for (const match of text.matchAll(/"path"\s*"([^"\n]+)"/g)) {
       const declared = absolutePath((match[1] as string).replace(/\\\\/g, "/"));
-      if (declared === undefined) {
+      // A declared library path is text from the same editable file.
+      if (declared === undefined || !isAbsoluteNormalized(pathBytes(declared))) {
         continue;
       }
       const steamapps = joinPath(declared, "steamapps");

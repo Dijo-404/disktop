@@ -125,3 +125,15 @@ test("a destructive call cannot be reached through a computed or destructured na
     "Rust helper",
   );
 });
+
+test("providers cannot reach a Linux adapter, only a port", async () => {
+  await assertRefused(
+    "src/providers/diagnostics/smart.ts",
+    'import { parseSmartScan } from "../../platform/linux/diagnostics/parsers.js";\nexport const x = parseSmartScan;\n',
+    "provider",
+  );
+  await assertAccepted(
+    "src/providers/diagnostics/smart.ts",
+    'import type { ToolPort } from "../../ports/providers.js";\nexport type X = ToolPort;\n',
+  );
+});

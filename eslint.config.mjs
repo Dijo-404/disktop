@@ -149,8 +149,8 @@ export default tseslint.config(
     ],
     [
       {
-        group: ["**/native/**", "**/platform/linux/managers/**"],
-        message: "A provider proposes a plan; the reviewed action pipeline carries it out.",
+        group: ["**/native/**", "**/platform/**"],
+        message: "A provider receives what it needs through a port; it never reaches an adapter or the helper.",
       },
     ],
   ),

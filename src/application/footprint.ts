@@ -23,6 +23,8 @@ export interface ProviderReport {
   readonly capability: Capability;
   readonly findings: number;
   readonly complete: boolean;
+  /** False when the detector never answered: it was absent, denied, or it threw. */
+  readonly ran: boolean;
 }
 
 export interface FootprintSummary {
@@ -80,8 +82,14 @@ export function createFootprintService(
       const found: Finding[] = [];
       let complete = true;
 
-      const outcomes = await mapWithLimit(selected, CONCURRENCY, (provider) => ask(provider, environment, signal));
+      const outcomes = await mapWithLimit(selected, CONCURRENCY, signal, (provider) =>
+        ask(provider, environment, signal),
+      );
       for (const outcome of outcomes) {
+        if (outcome === undefined) {
+          // Cancelled before this detector was asked.
+          continue;
+        }
         reports.push(outcome.report);
         warnings.push(...outcome.warnings);
         found.push(...outcome.findings);
@@ -96,14 +104,16 @@ export function createFootprintService(
       const merged = deduplicateFindings(found);
       const measurement = request.measureSizes
         ? await measure(merged.kept, footprints, signal)
-        : { findings: merged.kept, warnings: [], measured: false };
+        : { findings: merged.kept, warnings: [], measured: true };
 
       return summarize({
         findings: measurement.findings,
         reports,
         warnings: [...warnings, ...measurement.warnings],
-        complete,
-        measured: measurement.measured,
+        // Sizes that were asked for and could not be established are a short
+        // answer, not a complete one. Sizes nobody asked for are neither.
+        complete: complete && measurement.measured,
+        measured: request.measureSizes && measurement.measured,
         selected,
       });
     },
@@ -129,7 +139,7 @@ async function ask(
     // read, and that makes the whole answer short.
     const hidden = capability.status === "permission-denied";
     return {
-      report: { providerId: provider.id, version: provider.version, capability, findings: 0, complete: !hidden },
+      report: { providerId: provider.id, version: provider.version, capability, findings: 0, complete: !hidden, ran: false },
       findings: [],
       warnings: hidden
         ? [{ code: "provider-denied", message: `${provider.id} was denied: ${capability.explanation}` }]
@@ -148,6 +158,7 @@ async function ask(
         capability,
         findings: bounded.length,
         complete: result.complete && !truncated,
+        ran: true,
       },
       findings: bounded,
       warnings: truncated
@@ -175,9 +186,10 @@ function failed(
     report: {
       providerId: provider.id,
       version: provider.version,
-      capability: { status: "available", explanation: `${provider.id} ${what}.` },
+      capability: { status: "available", explanation: `${provider.id} ${what} and reported nothing.` },
       findings: 0,
       complete: false,
+      ran: false,
     },
     findings: [],
     warnings: [{ code: "provider-failed", message: `${provider.id} ${what}: ${detail}` }],
@@ -246,7 +258,7 @@ function summarize(input: {
   selected: readonly FindingProvider[];
 }): FootprintSummary {
   const ordered = orderFindings(input.findings);
-  const ran = input.reports.filter((report) => report.capability.status === "available").length;
+  const ran = input.reports.filter((report) => report.ran).length;
   return {
     findings: ordered,
     providers: input.reports,
@@ -268,16 +280,24 @@ function matchesRequest(provider: FindingProvider, categories: readonly FindingC
   return provider.categories.some((category) => categories.includes(category));
 }
 
-/** Run at most `limit` at a time, keeping the results in the input's order. */
+/**
+ * Run at most `limit` at a time, keeping the results in the input's order.
+ *
+ * A cancelled run stops asking. Ctrl+C during discovery would otherwise wait
+ * for every remaining detector to finish spawning its commands, which on a
+ * machine with a package manager and a disk full of caches is a long time to
+ * ignore somebody who asked for it to stop.
+ */
 async function mapWithLimit<Input, Output>(
   inputs: readonly Input[],
   limit: number,
+  signal: AbortSignal,
   work: (input: Input) => Promise<Output>,
-): Promise<readonly Output[]> {
-  const results: Output[] = new Array(inputs.length);
+): Promise<readonly (Output | undefined)[]> {
+  const results: (Output | undefined)[] = new Array(inputs.length);
   let next = 0;
   const workers = Array.from({ length: Math.min(limit, inputs.length) }, async () => {
-    for (let index = next; index < inputs.length; index = next) {
+    for (let index = next; index < inputs.length && !signal.aborted; index = next) {
       next += 1;
       results[index] = await work(inputs[index] as Input);
     }

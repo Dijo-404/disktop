@@ -101,6 +101,8 @@ export interface CategoryTotal {
   readonly bytes: Bytes;
   /** How many of those findings contributed nothing, because nothing measured them. */
   readonly unmeasured: number;
+  /** How many sit inside another finding, so their bytes are already counted. */
+  readonly nested: number;
 }
 
 export interface DroppedFinding {
@@ -208,20 +210,42 @@ export function orderFindings(findings: readonly Finding[]): readonly Finding[] 
 /**
  * Bytes per category, in the order the categories first appear.
  *
- * An unmeasured finding adds nothing and is counted separately, so a total can
- * never be read as covering findings whose size nobody established.
+ * Two things never reach a total. An unmeasured finding adds nothing and is
+ * counted separately, so a total cannot be read as covering findings whose
+ * size nobody established. And a finding that sits inside another finding adds
+ * nothing either: one provider may describe a tree and its parts — the browser
+ * detector reports a profile and the caches inside it — and adding both would
+ * say the category holds more bytes than the filesystem does.
  */
 export function categoryTotals(findings: readonly Finding[]): readonly CategoryTotal[] {
-  const totals = new Map<FindingCategory, { findings: number; bytes: Bytes; unmeasured: number }>();
+  const totals = new Map<FindingCategory, { findings: number; bytes: Bytes; unmeasured: number; nested: number }>();
   for (const entry of findings) {
-    const current = totals.get(entry.category) ?? { findings: 0, bytes: 0n, unmeasured: 0 };
+    const current = totals.get(entry.category) ?? { findings: 0, bytes: 0n, unmeasured: 0, nested: 0 };
+    const nested = isInsideAnother(entry, findings);
     totals.set(entry.category, {
       findings: current.findings + 1,
-      bytes: current.bytes + (entry.size.bytes ?? 0n),
+      bytes: current.bytes + (nested ? 0n : entry.size.bytes ?? 0n),
       unmeasured: current.unmeasured + (entry.size.bytes === undefined ? 1 : 0),
+      nested: current.nested + (nested ? 1 : 0),
     });
   }
   return [...totals].map(([category, total]) => ({ category, ...total }));
+}
+
+/** Whether every path of a finding lies under some other finding's path. */
+function isInsideAnother(entry: Finding, findings: readonly Finding[]): boolean {
+  if (entry.paths.length === 0) {
+    return false;
+  }
+  return entry.paths.every((path) =>
+    findings.some(
+      (other) =>
+        other.id !== entry.id &&
+        other.paths.some(
+          (owned) => owned.bytesBase64 !== path.bytesBase64 && isWithin(pathBytes(owned), pathBytes(path)),
+        ),
+    ),
+  );
 }
 
 /** A finding covers another when it is from a different provider and holds every path. */
