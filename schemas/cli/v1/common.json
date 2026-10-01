@@ -814,6 +814,350 @@
           "minimum": 0
         }
       }
+    },
+    "entryFingerprint": {
+      "description": "What the plan observed about one entry. The helper refuses an item whose live identity differs, which is how a plan reviewed against one inode cannot be applied to another.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "device",
+        "inode",
+        "mountId",
+        "kind",
+        "apparentBytes",
+        "modifiedNanoseconds"
+      ],
+      "properties": {
+        "device": {
+          "$ref": "#/$defs/decimalInteger"
+        },
+        "inode": {
+          "$ref": "#/$defs/decimalInteger"
+        },
+        "mountId": {
+          "$ref": "#/$defs/decimalInteger"
+        },
+        "kind": {
+          "type": "string",
+          "enum": [
+            "file",
+            "directory",
+            "symlink"
+          ]
+        },
+        "apparentBytes": {
+          "$ref": "#/$defs/decimalInteger"
+        },
+        "modifiedNanoseconds": {
+          "$ref": "#/$defs/decimalInteger"
+        }
+      }
+    },
+    "plannedEntry": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "path",
+        "expected",
+        "reviewedBytes"
+      ],
+      "properties": {
+        "path": {
+          "$ref": "#/$defs/rawPath"
+        },
+        "expected": {
+          "$ref": "#/$defs/entryFingerprint"
+        },
+        "reviewedBytes": {
+          "description": "Blocks this entry occupied when the plan was made. The result reports this number back, partitioned by what became of the entry.",
+          "$ref": "#/$defs/decimalInteger"
+        }
+      }
+    },
+    "actionPlan": {
+      "description": "A reviewed, expiring, immutable action. The operation is fixed here and cannot change at apply time: `--permanent` acknowledges a plan that is already irreversible and never turns a Trash plan into one.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "operation",
+        "createdAt",
+        "expiresAt",
+        "providerId",
+        "scopeSummary",
+        "reversibility",
+        "permission",
+        "selectedBytes",
+        "warnings"
+      ],
+      "properties": {
+        "id": {
+          "$ref": "#/$defs/identifier"
+        },
+        "operation": {
+          "$ref": "#/$defs/actionOperation"
+        },
+        "createdAt": {
+          "$ref": "#/$defs/timestamp"
+        },
+        "expiresAt": {
+          "description": "After this the plan describes a filesystem that may have moved on, and applying it is refused rather than retried against whatever is there now.",
+          "$ref": "#/$defs/timestamp"
+        },
+        "providerId": {
+          "$ref": "#/$defs/identifier"
+        },
+        "findingId": {
+          "$ref": "#/$defs/identifier"
+        },
+        "scopeSummary": {
+          "type": "string",
+          "minLength": 1
+        },
+        "reversibility": {
+          "type": "string",
+          "enum": [
+            "undo-from-trash",
+            "irreversible"
+          ]
+        },
+        "permission": {
+          "type": "string",
+          "enum": [
+            "user",
+            "manager-privilege"
+          ]
+        },
+        "exactItemCount": {
+          "description": "Absent for a manager plan, which cannot promise a count before it runs.",
+          "$ref": "#/$defs/decimalInteger"
+        },
+        "selectedBytes": {
+          "$ref": "#/$defs/decimalInteger"
+        },
+        "entries": {
+          "type": "array",
+          "maxItems": 100000,
+          "items": {
+            "$ref": "#/$defs/plannedEntry"
+          }
+        },
+        "managerScope": {
+          "type": "string",
+          "maxLength": 512
+        },
+        "regenerationCost": {
+          "type": "string"
+        },
+        "warnings": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        }
+      },
+      "allOf": [
+        {
+          "if": {
+            "type": "object",
+            "properties": {
+              "reversibility": {
+                "const": "irreversible"
+              }
+            },
+            "required": [
+              "reversibility"
+            ]
+          },
+          "then": {
+            "description": "An irreversible plan always carries at least the warning that says so.",
+            "properties": {
+              "warnings": {
+                "type": "array",
+                "minItems": 1
+              }
+            }
+          }
+        }
+      ]
+    },
+    "actionItemOutcome": {
+      "type": "string",
+      "enum": [
+        "in-progress",
+        "completed",
+        "skipped",
+        "failed",
+        "uncertain"
+      ]
+    },
+    "actionState": {
+      "description": "`uncertain` is what an interrupted action reads as once reconciliation could not tell whether its last item happened. It is never promoted to `complete`.",
+      "type": "string",
+      "enum": [
+        "in-progress",
+        "complete",
+        "partial",
+        "uncertain"
+      ]
+    },
+    "actionResult": {
+      "description": "What one action did. Selected bytes, bytes moved to Trash, and the observed free-space change are three separate numbers: a Trash move on one filesystem is a large number of bytes moved and no space reclaimed, and other processes change free space at the same time.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "planId",
+        "journalId",
+        "state",
+        "completed",
+        "skipped",
+        "failed",
+        "selectedBytes",
+        "bytesMovedToTrash",
+        "undoAvailable"
+      ],
+      "properties": {
+        "planId": {
+          "$ref": "#/$defs/identifier"
+        },
+        "journalId": {
+          "description": "The durable record behind this result. A result without one is a protocol violation.",
+          "$ref": "#/$defs/identifier"
+        },
+        "state": {
+          "$ref": "#/$defs/actionState"
+        },
+        "completed": {
+          "$ref": "#/$defs/decimalInteger"
+        },
+        "skipped": {
+          "$ref": "#/$defs/decimalInteger"
+        },
+        "failed": {
+          "$ref": "#/$defs/decimalInteger"
+        },
+        "selectedBytes": {
+          "$ref": "#/$defs/decimalInteger"
+        },
+        "bytesMovedToTrash": {
+          "$ref": "#/$defs/decimalInteger"
+        },
+        "freeBytesBefore": {
+          "$ref": "#/$defs/decimalInteger"
+        },
+        "freeBytesAfter": {
+          "$ref": "#/$defs/decimalInteger"
+        },
+        "observedFreeSpaceChange": {
+          "description": "Free space after minus free space before. Absent when either reading failed: nothing changed and nobody could tell are different answers.",
+          "$ref": "#/$defs/signedDecimalInteger"
+        },
+        "undoAvailable": {
+          "type": "boolean"
+        },
+        "notes": {
+          "description": "What the numbers above do and do not mean on this filesystem.",
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        }
+      }
+    },
+    "journalItem": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "path",
+        "outcome",
+        "bytes"
+      ],
+      "properties": {
+        "path": {
+          "$ref": "#/$defs/rawPath"
+        },
+        "destination": {
+          "description": "Where a move put it. This is what an undo reads to find the file again.",
+          "$ref": "#/$defs/rawPath"
+        },
+        "outcome": {
+          "$ref": "#/$defs/actionItemOutcome"
+        },
+        "message": {
+          "type": "string"
+        },
+        "bytes": {
+          "$ref": "#/$defs/decimalInteger"
+        }
+      }
+    },
+    "journalRecord": {
+      "description": "One action the helper performed, as the durable journal holds it.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "planId",
+        "operation",
+        "startedAt",
+        "state",
+        "completed",
+        "skipped",
+        "failed",
+        "selectedBytes",
+        "bytesMovedToTrash",
+        "items"
+      ],
+      "properties": {
+        "id": {
+          "$ref": "#/$defs/identifier"
+        },
+        "planId": {
+          "$ref": "#/$defs/identifier"
+        },
+        "operation": {
+          "type": "string"
+        },
+        "startedAt": {
+          "$ref": "#/$defs/timestamp"
+        },
+        "finishedAt": {
+          "$ref": "#/$defs/timestamp"
+        },
+        "state": {
+          "$ref": "#/$defs/actionState"
+        },
+        "completed": {
+          "$ref": "#/$defs/decimalInteger"
+        },
+        "skipped": {
+          "$ref": "#/$defs/decimalInteger"
+        },
+        "failed": {
+          "$ref": "#/$defs/decimalInteger"
+        },
+        "selectedBytes": {
+          "$ref": "#/$defs/decimalInteger"
+        },
+        "bytesMovedToTrash": {
+          "$ref": "#/$defs/decimalInteger"
+        },
+        "freeBytesBefore": {
+          "$ref": "#/$defs/decimalInteger"
+        },
+        "freeBytesAfter": {
+          "$ref": "#/$defs/decimalInteger"
+        },
+        "undoAvailable": {
+          "type": "boolean"
+        },
+        "items": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/journalItem"
+          }
+        }
+      }
     }
   }
 }

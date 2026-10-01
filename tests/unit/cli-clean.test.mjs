@@ -187,13 +187,16 @@ test("text output marks data that is in use", async () => {
   assert.match(profileLine, /in use/);
 });
 
-test("clean plan and clean apply still refuse, because nothing applies anything yet", async () => {
-  for (const words of [["clean", "plan", "FINDING", "--json"], ["clean", "apply", "PLAN", "--json"]]) {
-    const context = cleanContext();
-    const status = await runCli(words, context);
-    assert.equal(status, 2);
-    assert.equal(JSON.parse(context.captured.stdout).error.code, "not-implemented");
-  }
+test("clean itself still applies nothing: a plan is a separate, deliberate command", async () => {
+  const context = cleanContext();
+  await runCli(["clean", "--json"], context);
+  const envelope = JSON.parse(context.captured.stdout);
+
+  // Listing names the actions each finding could support, and offers no way to
+  // run one. Reaching an action takes `clean plan` and then `clean apply`.
+  assert.deepEqual(envelope.data.findings[0].availableActionIds, ["trash"]);
+  assert.equal(envelope.data.findings[1].availableActionIds.length, 0);
+  assert.equal(context.recordedFootprint.request.measureSizes, true);
 });
 
 test("--limit refuses a number above the documented maximum", async () => {

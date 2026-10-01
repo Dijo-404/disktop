@@ -1,0 +1,33 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/Dijo-404/disktop/schemas/cli/v1/undo.json",
+  "title": "disktop undo --json",
+  "description": "What putting one Trash action back achieved. A name something else now occupies is skipped, never overwritten.",
+  "type": "object",
+  "allOf": [
+    {
+      "$ref": "envelope.json"
+    }
+  ],
+  "properties": {
+    "command": {
+      "const": "undo"
+    },
+    "data": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "result",
+        "record"
+      ],
+      "properties": {
+        "result": {
+          "$ref": "common.json#/$defs/actionResult"
+        },
+        "record": {
+          "$ref": "common.json#/$defs/journalRecord"
+        }
+      }
+    }
+  }
+}

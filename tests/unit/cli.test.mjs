@@ -134,13 +134,13 @@ test("an incomplete inventory reports 3 and says what it missed", async () => {
 
 test("a declared but unbuilt command refuses in the same envelope shape", async () => {
   const context = fakeContext();
-  assert.equal(await runCli(["find", "duplicates", "--json"], context), 2);
+  assert.equal(await runCli(["report", "--json"], context), 2);
   const envelope = JSON.parse(context.captured.stdout);
   assert.equal(envelope.status, "error");
   assert.equal(envelope.error.code, "not-implemented");
 
   const text = fakeContext();
-  assert.equal(await runCli(["history"], text), 2);
+  assert.equal(await runCli(["timer", "install"], text), 2);
   assert.equal(text.captured.stdout, "");
   assert.match(text.captured.stderr, /not implemented yet/);
 });

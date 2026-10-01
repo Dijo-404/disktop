@@ -6,6 +6,8 @@ import type { ProviderReport } from "../application/footprint.js";
 import type { CategoryTotal, Finding, FindingSize } from "../domain/findings.js";
 import { decimalBytes } from "../domain/sizes.js";
 import type { OperationFailure } from "../domain/errors.js";
+import type { ActionPlan, ActionResult } from "../domain/actions.js";
+import type { JournalRecord } from "../ports/actions.js";
 
 export const SCHEMA_VERSION = "1";
 
@@ -262,5 +264,94 @@ export function encodeCategoryTotal(total: CategoryTotal): Record<string, unknow
     bytes: decimalBytes(total.bytes),
     unmeasured: total.unmeasured,
     nested: total.nested,
+  };
+}
+
+export function encodeActionPlan(plan: ActionPlan): Record<string, unknown> {
+  return {
+    id: plan.id,
+    operation: plan.operation,
+    createdAt: plan.createdAt,
+    expiresAt: plan.expiresAt,
+    providerId: plan.providerId,
+    ...(plan.findingId === undefined ? {} : { findingId: plan.findingId }),
+    scopeSummary: plan.scopeSummary,
+    reversibility: plan.reversibility,
+    permission: plan.permission,
+    ...(plan.exactItemCount === undefined ? {} : { exactItemCount: decimalBytes(plan.exactItemCount) }),
+    selectedBytes: decimalBytes(plan.selectedBytes),
+    ...(plan.entries === undefined
+      ? {}
+      : {
+          entries: plan.entries.map((entry) => ({
+            path: encodeRawPath(entry.path),
+            expected: {
+              device: decimalBytes(entry.expected.device),
+              inode: decimalBytes(entry.expected.inode),
+              mountId: entry.expected.mountId,
+              kind: entry.expected.kind,
+              apparentBytes: decimalBytes(entry.expected.apparentBytes),
+              modifiedNanoseconds: decimalBytes(entry.expected.modifiedNanoseconds),
+            },
+            reviewedBytes: decimalBytes(entry.reviewedBytes),
+          })),
+        }),
+    ...(plan.managerScope === undefined ? {} : { managerScope: plan.managerScope }),
+    ...(plan.regenerationCost === undefined ? {} : { regenerationCost: plan.regenerationCost }),
+    warnings: [...plan.warnings],
+  };
+}
+
+/**
+ * Three numbers, never folded into one: what the plan selected, what actually
+ * moved into Trash, and what the filesystem's own reading changed by. A Trash
+ * move on one filesystem makes the first two large and the third zero.
+ */
+export function encodeActionResult(
+  result: ActionResult,
+  observedFreeSpaceChange?: bigint,
+  notes: readonly string[] = [],
+): Record<string, unknown> {
+  return {
+    planId: result.planId,
+    journalId: result.journalId,
+    state: result.state,
+    completed: decimalBytes(result.completed),
+    skipped: decimalBytes(result.skipped),
+    failed: decimalBytes(result.failed),
+    selectedBytes: decimalBytes(result.selectedBytes),
+    bytesMovedToTrash: decimalBytes(result.bytesMovedToTrash),
+    ...(result.freeBytesBefore === undefined ? {} : { freeBytesBefore: decimalBytes(result.freeBytesBefore) }),
+    ...(result.freeBytesAfter === undefined ? {} : { freeBytesAfter: decimalBytes(result.freeBytesAfter) }),
+    ...(observedFreeSpaceChange === undefined
+      ? {}
+      : { observedFreeSpaceChange: observedFreeSpaceChange.toString(10) }),
+    undoAvailable: result.undoAvailable,
+    ...(notes.length === 0 ? {} : { notes: [...notes] }),
+  };
+}
+
+export function encodeJournalRecord(record: JournalRecord): Record<string, unknown> {
+  return {
+    id: record.id,
+    planId: record.planId,
+    operation: record.operation,
+    startedAt: record.startedAt,
+    ...(record.finishedAt === undefined ? {} : { finishedAt: record.finishedAt }),
+    state: record.state,
+    completed: decimalBytes(record.completed),
+    skipped: decimalBytes(record.skipped),
+    failed: decimalBytes(record.failed),
+    selectedBytes: decimalBytes(record.selectedBytes),
+    bytesMovedToTrash: decimalBytes(record.bytesMovedToTrash),
+    ...(record.freeBytesBefore === undefined ? {} : { freeBytesBefore: decimalBytes(record.freeBytesBefore) }),
+    ...(record.freeBytesAfter === undefined ? {} : { freeBytesAfter: decimalBytes(record.freeBytesAfter) }),
+    items: record.items.map((item) => ({
+      path: encodeRawPath(item.path),
+      ...(item.destination === undefined ? {} : { destination: encodeRawPath(item.destination) }),
+      outcome: item.outcome,
+      ...(item.message === undefined ? {} : { message: item.message }),
+      bytes: decimalBytes(item.bytes),
+    })),
   };
 }

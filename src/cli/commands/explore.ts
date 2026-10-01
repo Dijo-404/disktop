@@ -145,7 +145,10 @@ export async function runExplore(context: CliContext, options: ExploreOptions): 
 }
 
 /** The newest snapshot one of whose roots is the path or an ancestor of it. */
-async function newestCovering(context: CliContext, wanted: RawPath): Promise<SnapshotSummary | undefined> {
+export async function newestCovering(
+  context: CliContext,
+  wanted: RawPath,
+): Promise<SnapshotSummary | undefined> {
   const target = pathBytes(wanted);
   const snapshots = await context.storage.snapshots.list();
   return snapshots.find((snapshot) => snapshot.scope.roots.some((root) => isWithin(pathBytes(root), target)));

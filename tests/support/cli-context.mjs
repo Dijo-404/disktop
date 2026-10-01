@@ -170,6 +170,25 @@ export function fakeContext(overrides = {}) {
       },
     },
     storage: overrides.storage ?? fakeStorage(overrides, recorded),
+    // Every handler receives the action pipeline; a test that does not exercise
+    // it still has to be handed one, because no handler may reach around it.
+    actions: overrides.actions ?? {
+      async plan() {
+        return { kind: "refused", failure: { code: "invalid-input", message: "No finding was discovered." } };
+      },
+      async apply() {
+        return { kind: "refused", failure: { code: "invalid-plan", message: "No reviewed plan is stored." } };
+      },
+      async history() {
+        return { records: [], reconciled: 0n };
+      },
+      async restore() {
+        return { kind: "refused", failure: { code: "invalid-input", message: "No action is in the journal." } };
+      },
+      async find() {
+        return { kind: "found", entries: [] };
+      },
+    },
     recorded,
     signals: { listen() {}, stop() {} },
     resolvePath: (path) => (path === "." ? "/home/example/projects" : path),

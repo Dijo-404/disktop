@@ -1,0 +1,44 @@
+{
+  "schemaVersion": "1",
+  "command": "undo",
+  "generatedAt": "2026-10-01T08:50:11.902Z",
+  "status": "complete",
+  "exitCode": 0,
+  "data": {
+    "record": {
+      "id": "act-1759305679004-9f2c1ab07d4e5610",
+      "planId": "plan-20261001T084119004Z-9f2c1ab0",
+      "operation": "trash",
+      "startedAt": "2026-10-01T08:41:19.004Z",
+      "finishedAt": "2026-10-01T08:41:19.231Z",
+      "state": "complete",
+      "completed": "1",
+      "skipped": "0",
+      "failed": "0",
+      "selectedBytes": "7314112512",
+      "bytesMovedToTrash": "7314112512",
+      "items": [
+        {
+          "path": {
+            "bytesBase64": "L2hvbWUvZXhhbXBsZS8uY2FyZ28vcmVnaXN0cnk=",
+            "display": "/home/example/.cargo/registry",
+            "utf8": "/home/example/.cargo/registry"
+          },
+          "outcome": "completed",
+          "bytes": "7314112512"
+        }
+      ]
+    },
+    "result": {
+      "planId": "plan-20261001T084119004Z-9f2c1ab0",
+      "journalId": "act-1759305811902-7c1d0e2f3a4b5c6d",
+      "state": "complete",
+      "completed": "1",
+      "skipped": "0",
+      "failed": "0",
+      "selectedBytes": "7314112512",
+      "bytesMovedToTrash": "0",
+      "undoAvailable": false
+    }
+  }
+}

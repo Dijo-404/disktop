@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
+import { existsSync } from "node:fs";
 import { test } from "node:test";
 import { compileBundle } from "../support/schemas.mjs";
 
@@ -125,10 +126,28 @@ test("disktop clean lists detectors on this host and applies nothing", () => {
   }
 });
 
-test("disktop clean plan still refuses, because nothing applies anything yet", () => {
-  const result = disktop(["clean", "plan", "some-finding", "--json"]);
+test("disktop clean plan refuses a protected path without touching it", () => {
+  const result = disktop(["clean", "plan", "--path", "/etc/passwd", "--json"]);
   const envelope = envelopeFrom(result);
 
   assert.equal(result.status, 2);
-  assert.equal(envelope.error.code, "not-implemented");
+  assert.equal(envelope.error.code, "protected-path");
+  assert.ok(existsSync("/etc/passwd"), "nothing was changed");
+});
+
+test("disktop clean apply refuses a plan nobody reviewed", () => {
+  const result = disktop(["clean", "apply", "plan-does-not-exist", "--yes", "--json"]);
+  const envelope = envelopeFrom(result);
+
+  assert.equal(result.status, 2);
+  assert.equal(envelope.error.code, "invalid-plan");
+});
+
+test("disktop history reads the journal and validates against its schema", () => {
+  const result = disktop(["history", "--json"]);
+  const envelope = envelopeFrom(result);
+
+  assert.equal(result.status, 0);
+  validate("history", envelope);
+  assert.ok(Array.isArray(envelope.data.records));
 });
