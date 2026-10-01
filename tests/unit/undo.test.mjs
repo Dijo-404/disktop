@@ -101,6 +101,11 @@ test("undoing a Trash action restores it and reports what came back", async () =
 
   assert.equal(outcome.kind, "restored");
   assert.equal(outcome.result.completed, 1n);
+  assert.equal(
+    outcome.result.planId,
+    TRASHED.planId,
+    "the restore reports the plan it undid; only the record knows which one that was",
+  );
   assert.deepEqual(
     calls.filter((call) => call.kind === "restore"),
     [{ kind: "restore", journalId: TRASHED.id }],

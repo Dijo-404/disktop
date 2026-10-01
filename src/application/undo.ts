@@ -75,7 +75,9 @@ export function createUndoService(dependencies: UndoDependencies): UndoService {
 
       try {
         const result = await dependencies.actions.restore(journalId, signal);
-        return { kind: "restored", record, result };
+        // The restore undid one reviewed plan, so it reports that plan's ID.
+        // The helper does not know it; only the record does.
+        return { kind: "restored", record, result: { ...result, planId: record.planId } };
       } catch (error) {
         if (error instanceof CapabilityUnavailable) {
           return { kind: "unavailable", capability: error.capability };
