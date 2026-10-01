@@ -130,8 +130,37 @@ export interface FindingInput {
   readonly active?: boolean;
 }
 
-/** Build a finding with the defaults a read-only detector wants. */
+/** Operations that act on paths, as against going through a package manager. */
+const GENERIC_ACTIONS: readonly ActionOperation[] = [
+  "trash",
+  "permanent",
+  "move",
+  "compress",
+  "dedup-hardlink",
+];
+
+/**
+ * Build a finding with the defaults a read-only detector wants.
+ *
+ * Two rules are applied here rather than left to each detector to remember.
+ * Data that is in use offers no generic action: a browser profile and a model
+ * store are findings worth reporting and not things to move to Trash behind
+ * somebody's back. And a finding that names no path offers nothing generic,
+ * because there is nothing for a generic action to act on; only a manager can
+ * reach a manager's own state.
+ *
+ * A detector can still narrow this further, and `clean plan` re-checks the
+ * path against the protected-path policy afterwards. This is the floor.
+ */
 export function buildFinding(input: FindingInput): Finding {
+  const requested = input.actions ?? [];
+  const active = input.active ?? false;
+  const paths = input.paths ?? [];
+  const actions =
+    active || paths.length === 0
+      ? requested.filter((action) => !GENERIC_ACTIONS.includes(action))
+      : requested;
+
   return {
     id: `${input.providerId}:${input.slug}`,
     providerId: input.providerId,
@@ -144,7 +173,7 @@ export function buildFinding(input: FindingInput): Finding {
     size: input.size ?? unmeasured(),
     confidence: input.confidence ?? "observed",
     capability: input.capability ?? { status: "available", explanation: "The path was read." },
-    availableActionIds: [...(input.actions ?? [])],
+    availableActionIds: [...actions],
     ...(input.regenerationCost === undefined ? {} : { regenerationCost: input.regenerationCost }),
     active: input.active ?? false,
   };
