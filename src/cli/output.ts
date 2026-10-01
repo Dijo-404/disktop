@@ -170,6 +170,8 @@ export function encodeIndexedEntry(entry: IndexedEntry): Record<string, unknown>
     ownerId: decimalBytes(entry.ownerId),
     modifiedNanoseconds: decimalBytes(entry.modifiedNanoseconds),
     shared: entry.shared,
+    ...(entry.childEntries === undefined ? {} : { childEntries: decimalBytes(entry.childEntries) }),
+    ...(entry.broken === undefined ? {} : { broken: entry.broken }),
   };
 }
 

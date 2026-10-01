@@ -100,6 +100,10 @@ struct FilterArguments {
     owner_id: Option<String>,
     #[serde(default)]
     kinds: Option<Vec<String>>,
+    #[serde(default)]
+    max_child_entries: Option<String>,
+    #[serde(default)]
+    broken: Option<bool>,
 }
 
 #[derive(Deserialize)]
@@ -688,6 +692,12 @@ fn query_index(responder: &Responder, arguments: Map<String, Value>) {
                         row.modified_nanoseconds.to_string().into(),
                     );
                     entry.insert("shared".to_owned(), row.shared.into());
+                    // Absent rather than zero when the walk never entered the
+                    // directory: an unreadable directory is not an empty one.
+                    if let Some(children) = row.child_entries {
+                        entry.insert("childEntries".to_owned(), children.to_string().into());
+                    }
+                    entry.insert("broken".to_owned(), row.broken.into());
                     Value::Object(entry)
                 })
                 .collect(),
@@ -844,6 +854,11 @@ fn query_request(arguments: &QueryIndexArguments) -> Result<QueryRequest, String
             )?,
             owner_id: optional_u64(filter.owner_id.as_deref(), "ownerId")?,
             kinds,
+            max_child_entries: optional_u64(
+                filter.max_child_entries.as_deref(),
+                "maxChildEntries",
+            )?,
+            broken: filter.broken,
         },
         sort,
         order,

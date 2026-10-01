@@ -193,6 +193,29 @@ fn metadata_at_flags(parent: RawFd, name: &[u8], flags: libc::c_int) -> io::Resu
     })
 }
 
+/// Whether the name resolves to anything at all, following a final symlink.
+///
+/// This is how a dangling link is told from a live one. It is a metadata read
+/// and never an open, so nothing the link points at is held, executed, or
+/// descended into; a link that leaves the subtree is answered for and then
+/// forgotten.
+pub fn target_exists(parent: RawFd, name: &[u8]) -> bool {
+    let Ok(child) = cstring(name) else {
+        return false;
+    };
+    let mut buffer = std::mem::MaybeUninit::<libc::statx>::zeroed();
+    let result = unsafe {
+        libc::statx(
+            parent,
+            child.as_ptr(),
+            libc::AT_STATX_DONT_SYNC | libc::AT_NO_AUTOMOUNT,
+            libc::STATX_TYPE,
+            buffer.as_mut_ptr(),
+        )
+    };
+    result == 0
+}
+
 /// Metadata for an already-open descriptor, used for a scan root.
 pub fn metadata_of(descriptor: RawFd) -> io::Result<Metadata> {
     metadata_at_flags(

@@ -246,6 +246,14 @@
         },
         "shared": {
           "type": "boolean"
+        },
+        "childEntries": {
+          "description": "Names directly inside a directory the scan entered, excluding `.` and `..`. Absent for anything else, including a directory that could not be opened: nobody looking is not the same answer as nothing being there.",
+          "$ref": "#/$defs/decimalInteger"
+        },
+        "broken": {
+          "description": "True only for a symlink whose target does not resolve. Removing one frees the link, not what it pointed at.",
+          "type": "boolean"
         }
       }
     },
@@ -315,6 +323,14 @@
         "underPath": {
           "description": "Restrict the page to this path and everything below it. A path the scan never saw is refused rather than answered with an empty page.",
           "$ref": "#/$defs/pathBytes"
+        },
+        "maxChildEntries": {
+          "description": "Keep only rows with at most this many direct children. A row with no count is left out, so an unreadable directory never answers a search for empty ones.",
+          "$ref": "#/$defs/decimalInteger"
+        },
+        "broken": {
+          "description": "Keep only broken symlinks, or only unbroken entries.",
+          "type": "boolean"
         }
       }
     },

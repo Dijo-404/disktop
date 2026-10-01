@@ -78,6 +78,14 @@ export interface IndexedEntry {
   readonly modifiedNanoseconds: bigint;
   /** True for a hardlink whose bytes were attributed to an earlier path. */
   readonly shared: boolean;
+  /**
+   * Names directly inside a directory the scan entered. Absent for anything
+   * else, including a directory it could not open: nobody looking and nothing
+   * being there are different answers.
+   */
+  readonly childEntries?: bigint;
+  /** True only for a symlink whose target does not resolve. */
+  readonly broken?: boolean;
 }
 
 export type AlertKind = "low-space" | "low-inodes";

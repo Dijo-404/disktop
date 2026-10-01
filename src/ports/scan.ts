@@ -62,6 +62,10 @@ export interface EntryFilter {
   readonly modifiedBeforeNanoseconds?: bigint;
   readonly ownerId?: bigint;
   readonly kinds?: readonly EntryKindFilter[];
+  /** At most this many direct children. A row with no count is left out. */
+  readonly maxChildEntries?: bigint;
+  /** Only broken symlinks, or only entries that are not one. */
+  readonly broken?: boolean;
 }
 
 export type EntrySort = "allocated" | "apparent" | "modified" | "name";
