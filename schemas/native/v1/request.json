@@ -208,6 +208,26 @@
           }
         }
       }
+    },
+    {
+      "if": {
+        "type": "object",
+        "properties": {
+          "operation": {
+            "const": "restore"
+          }
+        },
+        "required": [
+          "operation"
+        ]
+      },
+      "then": {
+        "properties": {
+          "arguments": {
+            "$ref": "#/$defs/restoreArguments"
+          }
+        }
+      }
     }
   ],
   "$defs": {
@@ -406,6 +426,23 @@
           "items": {
             "$ref": "common.json#/$defs/mutationTarget"
           }
+        }
+      }
+    },
+    "restoreArguments": {
+      "description": "Put back what one Trash action moved. The journal record is the authority for where each item went and where it came from; nothing is reconstructed from a path the caller supplied.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "journalDirectory",
+        "journalId"
+      ],
+      "properties": {
+        "journalDirectory": {
+          "$ref": "common.json#/$defs/pathBytes"
+        },
+        "journalId": {
+          "$ref": "common.json#/$defs/planId"
         }
       }
     }

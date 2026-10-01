@@ -326,9 +326,7 @@ impl Journal {
         Ok(unresolved.len() as u64)
     }
 
-    /// One record by ID. `restore` reads it to find where a trashed file went;
-    /// until that operation exists, only the tests here call it.
-    #[allow(dead_code)]
+    /// One record by ID. `restore` reads it to find where a trashed file went.
     pub fn get(&self, id: &str) -> rusqlite::Result<Option<ActionRecord>> {
         let record = self
             .connection

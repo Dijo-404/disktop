@@ -53,6 +53,14 @@ pub struct EmptyTrashRequest {
     pub trash_directories: Vec<Vec<u8>>,
 }
 
+/// Putting back what a Trash move moved. The journal is the authority for
+/// where each item went and where it came from; nothing is reconstructed from
+/// a path the caller supplied.
+pub struct RestoreRequest {
+    pub journal_directory: PathBuf,
+    pub journal_id: String,
+}
+
 pub struct TrashRequest {
     pub plan_id: String,
     pub journal_directory: PathBuf,
@@ -141,6 +149,7 @@ enum Operation {
     Trash,
     Erase,
     EmptyTrash,
+    Restore,
 }
 
 impl Operation {
@@ -149,6 +158,7 @@ impl Operation {
             Operation::Trash => "trash",
             Operation::Erase => "erase",
             Operation::EmptyTrash => "empty-trash",
+            Operation::Restore => "restore",
         }
     }
 
@@ -459,6 +469,245 @@ fn erase_one(
         None,
     );
     report
+}
+
+/// Put back every item a Trash move moved, where its original path is free.
+///
+/// An item's destination comes from the journal, not from the caller: the
+/// record is the only thing that knows where a file went, and reconstructing
+/// it from a name would let a mistaken request move an unrelated file into a
+/// place somebody else's data used to be. A record that removed things
+/// permanently has nothing to put back and is refused rather than attempted.
+pub fn run_restore(
+    request: &RestoreRequest,
+    report: &mut dyn FnMut(ItemReport),
+    cancelled: &AtomicBool,
+) -> Result<ActionSummary, ActionRefusal> {
+    let journal = Journal::open(&request.journal_directory).map_err(|error| {
+        ActionRefusal::new(
+            "journal-write-failed",
+            format!("The action journal could not be opened: {error}"),
+        )
+    })?;
+
+    let record = journal
+        .get(&request.journal_id)
+        .map_err(|error| {
+            ActionRefusal::new(
+                "journal-write-failed",
+                format!("The action journal could not be read: {error}"),
+            )
+        })?
+        .ok_or_else(|| {
+            ActionRefusal::new(
+                "unknown-request",
+                "No action with that ID is in the journal.",
+            )
+        })?;
+
+    if record.operation != "trash" {
+        return Err(ActionRefusal::new(
+            "invalid-arguments",
+            format!(
+                "A '{}' action moved nothing to Trash, so there is nothing to put back.",
+                record.operation
+            ),
+        ));
+    }
+    if record.state == State::InProgress || record.state == State::Uncertain {
+        return Err(ActionRefusal::new(
+            "invalid-arguments",
+            "That action has not been resolved yet. Reconcile the journal before undoing it.",
+        ));
+    }
+
+    // Each completed item becomes a target of its own, so one that cannot come
+    // back does not stop the rest.
+    let restorable: Vec<&crate::journal::ItemRecord> = record
+        .items
+        .iter()
+        .filter(|item| item.outcome == Outcome::Completed && item.destination.is_some())
+        .collect();
+    let targets: Vec<Target> = restorable
+        .iter()
+        .map(|item| Target {
+            path: item.path.clone(),
+            expected: UNCHECKED,
+            reviewed_bytes: item.bytes,
+        })
+        .collect();
+    let destinations: Vec<Vec<u8>> = restorable
+        .iter()
+        .map(|item| item.destination.clone().unwrap_or_default())
+        .collect();
+
+    run_action(
+        Operation::Restore,
+        &record.plan_id,
+        &request.journal_directory,
+        &targets,
+        report,
+        cancelled,
+        |guard, journal, journal_id, position, target| {
+            let from = destinations
+                .get(position as usize)
+                .cloned()
+                .unwrap_or_default();
+            restore_one(guard, journal, journal_id, position, target, &from)
+        },
+    )
+}
+
+/// Move one item out of Trash and back to the path it came from.
+fn restore_one(
+    guard: &Guard,
+    journal: &Journal,
+    journal_id: &str,
+    position: u64,
+    target: &Target,
+    from: &[u8],
+) -> ItemReport {
+    let refuse = |code: &'static str, message: String, outcome: Outcome| ItemReport {
+        path: target.path.clone(),
+        outcome,
+        reason: Some(code),
+        message: Some(message),
+        bytes: 0,
+    };
+
+    if let Err(refusal) = guard.classify(&target.path) {
+        return refuse(refusal.code, refusal.message, Outcome::Failed);
+    }
+    let source = match guard::resolve_parent(from) {
+        Ok(source) => source,
+        Err(refusal) => {
+            let outcome = outcome_for(refusal.code);
+            return refuse(
+                refusal.code,
+                format!(
+                    "What Trash was holding could not be reached: {}",
+                    refusal.message
+                ),
+                outcome,
+            );
+        }
+    };
+    if sys::metadata_at(source.descriptor(), &source.name).is_err() {
+        return refuse(
+            "changed-target",
+            "Trash no longer holds this item, so there is nothing to put back.".to_owned(),
+            Outcome::Skipped,
+        );
+    }
+    let destination = match guard::resolve_parent(&target.path) {
+        Ok(destination) => destination,
+        Err(refusal) => {
+            let outcome = outcome_for(refusal.code);
+            return refuse(
+                refusal.code,
+                format!(
+                    "The original location could not be reached: {}",
+                    refusal.message
+                ),
+                outcome,
+            );
+        }
+    };
+
+    if let Err(error) = journal.record_intent(journal_id, position, &target.path, Some(from)) {
+        return refuse(
+            "journal-write-failed",
+            format!("This item's intent could not be recorded, so it was not moved: {error}"),
+            Outcome::Failed,
+        );
+    }
+
+    // No-replace again: an undo that overwrote whatever is at the original
+    // path now would undo one loss by causing another.
+    let moved = sys::renameat_no_replace(
+        source.descriptor(),
+        &source.name,
+        destination.descriptor(),
+        &destination.name,
+    );
+
+    let report = match moved {
+        Ok(()) => {
+            remove_trash_metadata(from);
+            ItemReport {
+                path: target.path.clone(),
+                outcome: Outcome::Completed,
+                reason: None,
+                message: None,
+                bytes: target.reviewed_bytes,
+            }
+        }
+        Err(error) => {
+            let (code, message, outcome) = match error.raw_os_error() {
+                Some(libc::EEXIST) | Some(libc::ENOTEMPTY) => (
+                    "changed-target",
+                    "Something else is at the original path now, so it was left alone.".to_owned(),
+                    Outcome::Skipped,
+                ),
+                Some(libc::ENOENT) => (
+                    "changed-target",
+                    "Trash no longer holds this item, so there is nothing to put back.".to_owned(),
+                    Outcome::Skipped,
+                ),
+                Some(libc::EXDEV) => (
+                    "unsupported-filesystem",
+                    "Trash and the original location are on different filesystems now.".to_owned(),
+                    Outcome::Failed,
+                ),
+                _ => (
+                    "internal-error",
+                    format!("The move out of Trash failed: {error}"),
+                    Outcome::Failed,
+                ),
+            };
+            ItemReport {
+                path: target.path.clone(),
+                outcome,
+                reason: Some(code),
+                message: Some(message),
+                bytes: 0,
+            }
+        }
+    };
+
+    let _ = journal.record_outcome(
+        journal_id,
+        position,
+        report.outcome,
+        report.message.as_deref(),
+        report.bytes,
+        None,
+    );
+    report
+}
+
+/// Drop the `.trashinfo` beside a file that has left Trash. A leftover one
+/// would describe something Trash no longer holds.
+///
+/// The path is rebuilt rather than reached through `..`: every descent here
+/// uses `RESOLVE_BENEATH`, which is exactly a refusal to walk upwards, and
+/// relaxing it for a convenience would relax it for everything.
+fn remove_trash_metadata(trashed: &[u8]) {
+    let Some(name) = trashed.rsplit(|byte| *byte == b'/').next() else {
+        return;
+    };
+    let files = parent_path(trashed);
+    if !files.ends_with(b"/files") {
+        return;
+    }
+    let mut info = files[..files.len() - b"files".len()].to_vec();
+    info.extend_from_slice(b"info/");
+    info.extend_from_slice(name);
+    info.extend_from_slice(b".trashinfo");
+
+    if let Ok(parent) = guard::resolve_parent(&info) {
+        let _ = sys::unlinkat(parent.descriptor(), &parent.name, false);
+    }
 }
 
 /// Empty every directory that really is a Trash.
