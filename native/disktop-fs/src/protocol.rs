@@ -1127,8 +1127,18 @@ mod tests {
         parse(&recorder.0.lock().expect("recorder").clone())
     }
 
+    /// Parse whole lines only.
+    ///
+    /// `session` reads this buffer while the server thread is still writing to
+    /// it, so the last line can be half an event. The real client has the same
+    /// rule for the same reason: a message is a message once its newline
+    /// arrives, and not before.
     fn parse(bytes: &[u8]) -> Vec<Value> {
-        bytes
+        let complete = match bytes.iter().rposition(|byte| *byte == b'\n') {
+            Some(last) => &bytes[..=last],
+            None => &[][..],
+        };
+        complete
             .split(|byte| *byte == b'\n')
             .filter(|line| !line.is_empty())
             .map(|line| serde_json::from_slice(line).unwrap())
