@@ -1,6 +1,6 @@
 /** A CLI context backed by fixed readings, so a test never depends on the host's disks. */
 
-function rawPath(display) {
+export function rawPath(display) {
   return { bytesBase64: Buffer.from(display, "utf8").toString("base64"), display, utf8: display };
 }
 

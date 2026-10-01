@@ -1,0 +1,57 @@
+{
+  "schemaVersion": "1",
+  "command": "clean",
+  "generatedAt": "2026-10-01T08:41:19.004Z",
+  "status": "complete",
+  "exitCode": 0,
+  "data": {
+    "capability": {
+      "status": "available",
+      "explanation": "One detector ran."
+    },
+    "measured": true,
+    "findings": [
+      {
+        "id": "cache.language:npm",
+        "providerId": "cache.language",
+        "providerVersion": 1,
+        "category": "language-cache",
+        "title": "npm cache",
+        "evidence": [],
+        "paths": [
+          {
+            "bytesBase64": "L2hvbWUvZXhhbXBsZS8ubnBt",
+            "display": "/home/example/.npm"
+          }
+        ],
+        "size": {
+          "bytes": "104857600",
+          "explanation": "A number with no source is not a measurement."
+        },
+        "confidence": "observed",
+        "capability": {
+          "status": "available",
+          "explanation": "The directory was read."
+        },
+        "availableActionIds": [
+          "trash"
+        ],
+        "active": false
+      }
+    ],
+    "providers": [
+      {
+        "providerId": "cache.language",
+        "version": 1,
+        "capability": {
+          "status": "available",
+          "explanation": "One cache root exists."
+        },
+        "findings": 1,
+        "complete": true,
+        "ran": true
+      }
+    ],
+    "categoryTotals": []
+  }
+}

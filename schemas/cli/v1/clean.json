@@ -1,0 +1,57 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/Dijo-404/disktop/schemas/cli/v1/clean.json",
+  "title": "disktop clean --json",
+  "description": "Everything the providers found, with nothing applied. `providers` lists every detector that ran, including the ones that could not look, so a short finding list is never mistaken for an empty disk.",
+  "type": "object",
+  "allOf": [
+    {
+      "$ref": "envelope.json"
+    }
+  ],
+  "properties": {
+    "command": {
+      "const": "clean"
+    },
+    "data": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "capability",
+        "measured",
+        "findings",
+        "providers",
+        "categoryTotals"
+      ],
+      "properties": {
+        "capability": {
+          "$ref": "common.json#/$defs/capability"
+        },
+        "measured": {
+          "description": "False when sizes were not measured, which is why findings may carry an unknown size.",
+          "type": "boolean"
+        },
+        "findings": {
+          "type": "array",
+          "maxItems": 10000,
+          "items": {
+            "$ref": "common.json#/$defs/finding"
+          }
+        },
+        "providers": {
+          "type": "array",
+          "items": {
+            "$ref": "common.json#/$defs/providerReport"
+          },
+          "description": "Every detector that was asked, including the ones that could not look. A category filter that matches no detector leaves this empty; it is never omitted."
+        },
+        "categoryTotals": {
+          "type": "array",
+          "items": {
+            "$ref": "common.json#/$defs/categoryTotal"
+          }
+        }
+      }
+    }
+  }
+}

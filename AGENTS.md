@@ -1,6 +1,6 @@
 # Agent guide for Disktop
 
-Read [PLAN.md](PLAN.md) before implementation. It is the product scope, target folder structure, interface map, phase gates, and acceptance checklist. **Phases 0, 1, and 2 are complete; Phase 3 is the next gate.** The contracts are normative and enforced:
+Read [PLAN.md](PLAN.md) before implementation. It is the product scope, target folder structure, interface map, phase gates, and acceptance checklist. **Phases 0, 1, 2, and 3 are complete; Phase 4 is the next gate.** The contracts are normative and enforced:
 `schemas/cli/v1/` and `schemas/native/v1/` define public JSON and the helper protocol,
 `src/domain/paths.ts` and `src/domain/protected-paths.ts` define path bytes and the refusal
 policy, `src/storage/` defines configuration, `eslint.config.mjs` enforces the dependency rule,
@@ -9,12 +9,24 @@ policy, `src/storage/` defines configuration, `eslint.config.mjs` enforces the d
 in the same commit.
 
 The TypeScript CLI implements `devices`, the `--json` dashboard, `alerts check`, the 80×24
-dashboard TUI, and `scan`, `explore`, and `snapshots list|diff` against real `lsblk`,
-`/proc/self/mountinfo`, `statfs`, and helper readings. Every other command is declared in
-`src/cli/parser.ts` and refuses with `not-implemented`. The Rust helper implements the read
-operations `hello`, `probe`, `scan`, `query-index`, and `cancel`, and refuses every operation
-that would change a user file, so no cleanup, journal, or export capability exists yet. Use
-the package scripts for checks and the phase gates in the plan for feature completion.
+dashboard TUI, `scan`, `explore`, `snapshots list|diff`, and `clean` (listing only) against
+real `lsblk`, `/proc/self/mountinfo`, `statfs`, and helper readings. Every other command is
+declared in `src/cli/parser.ts` and refuses with `not-implemented`. The Rust helper implements
+the read operations `hello`, `probe`, `scan`, `query-index`, and `cancel`, and refuses every
+operation that would change a user file, so no cleanup, journal, or export capability exists
+yet. Use the package scripts for checks and the phase gates in the plan for feature
+completion.
+
+Phase 3's contracts: a `Finding` lives in `src/domain/findings.ts` with the policy that
+merges two of them. `size.basis` is mandatory and there is no basis meaning "zero because
+nobody looked": an unmeasured footprint is `unknown` and carries no number. No provider
+traverses a tree, runs a command, or deletes; it names paths and
+`src/application/footprint.ts` measures them in one pass through the `FootprintPort`.
+Commands go through the `ToolPort`, whose allowlist in `src/platform/linux/tools.ts` is the
+whole set of programs Disktop can run. A `permission-denied` detector makes the whole result
+incomplete and `disktop clean` exit `3`; a `missing-tool` one does not, because the feature is
+absent rather than hidden. Detectors are registered in `src/providers/index.ts` and nowhere
+else.
 
 Phase 2's contracts: `scan` and `query-index` take an `indexDirectory` because a query usually
 runs in a different helper process from the scan that wrote the index. A directory row's byte

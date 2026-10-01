@@ -1,6 +1,6 @@
 # CLI contract
 
-Status: planned `1.0.0` command surface. `devices`, the `--json` dashboard, `alerts check`, `scan`, `explore`, and `snapshots list|diff` are implemented; every other command is declared in the parser and refuses with `not-implemented`. The JSON output contract in [`schemas/cli/v1/`](../schemas/cli/v1/) is normative and is validated by `tests/contract/cli-schema.test.mjs` against examples and by `tests/integration/cli-output.test.mjs` against what the CLI actually writes on a running host. The parser and generated help are normative now; completions become normative when they are implemented. See [PLAN.md](../PLAN.md#cli-and-outputs).
+Status: planned `1.0.0` command surface. `devices`, the `--json` dashboard, `alerts check`, `scan`, `explore`, `snapshots list|diff`, and `clean` (listing only) are implemented; every other command is declared in the parser and refuses with `not-implemented`. The JSON output contract in [`schemas/cli/v1/`](../schemas/cli/v1/) is normative and is validated by `tests/contract/cli-schema.test.mjs` against examples and by `tests/integration/cli-output.test.mjs` against what the CLI actually writes on a running host. The parser and generated help are normative now; completions become normative when they are implemented. See [PLAN.md](../PLAN.md#cli-and-outputs).
 
 ## What works today
 
@@ -13,6 +13,7 @@ Status: planned `1.0.0` command surface. `devices`, the `--json` dashboard, `ale
 | `disktop scan [PATH] [--json]` | Walks `PATH` (the working directory by default) through the helper, writes the detailed index, and saves a snapshot. `--accounting allocated\|apparent`, `--cross-filesystems`, `--throttle RATE`, `--max-depth DEPTH`. Ctrl+C stops it at a directory boundary and still reports what was measured. |
 | `disktop explore [PATH] [--json]` | One page of `PATH` and everything below it, from the most recent scan covering it. `--sort`, `--order`, `--kind`, `--min-size`, `--max-size`, `--ext`, `--name`, `--older-than DAYS`, `--limit`, `--cursor`, `--type-totals`. |
 | `disktop snapshots list\|diff [--json]` | Lists saved snapshots, or compares two of them (`--from`, `--to`; the two most recent by default). |
+| `disktop clean [--json]` | Lists what every detector found, and changes nothing. `--dry-run` is accepted and redundant. `--category CATEGORY` narrows the list, `--limit COUNT` shortens it, and `--no-sizes` skips measurement so every size stays unknown. |
 | `disktop --units iec\|si` | Switches human-readable units. Byte values in JSON never change. |
 | `disktop --help`, `disktop --version` | Generated from the one command table in `src/cli/parser.ts`. |
 
@@ -64,6 +65,32 @@ disktop completion bash|zsh|fish
 ```
 
 The parser in `src/cli/parser.ts` will define commands and options once, and drive help plus completions. The CLI and TUI invoke the same application use cases. Any command that scans shows progress on stderr, can be cancelled, and reports an incomplete result when it could not inspect the full selected scope. Disktop does not use an interactive prompt when `--json` is requested or stdout is not a TTY.
+
+## Listing what was found
+
+`disktop clean` runs every detector and prints what they found. It applies
+nothing: `clean plan` and `clean apply` still refuse with `not-implemented`,
+and no detector can delete.
+
+Four rules shape the output. Every detector appears in `providers` with its
+capability, including the ones that could not look; `ran` is false when it
+never answered, whether it was absent, denied, or it threw. A detector that is
+`permission-denied` makes the whole result incomplete — the data is there and
+Disktop could not read it — and the command exits `3`; a `missing-tool`
+detector does not, because the feature is genuinely absent. Every size carries
+a `basis`: a footprint nothing measured is `unknown` and carries no number,
+never zero. And a `categoryTotal` counts each byte once: `nested` is how many
+findings in that category sit inside another one, so a browser profile and the
+cache directories inside it do not add up to more than the filesystem holds.
+
+Sizes are measured in one pass after discovery, by the same scan index `scan`
+and `explore` read, so every number in one result shares an accounting mode.
+Asking for sizes and getting none is an incomplete result, not a complete one.
+`--no-sizes` skips the pass on purpose, which is much faster, leaves directory
+footprints unknown, and stays complete.
+
+Ctrl+C stops discovery at the next detector boundary. `clean` prints no
+progress while it runs; that is Phase 7's work.
 
 ## Reviewed actions
 

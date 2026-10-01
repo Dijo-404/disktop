@@ -1,6 +1,7 @@
 import type { Alert, Filesystem, IndexedEntry, StorageDevice, Warning } from "../domain/models.js";
 import type { ScanSummary } from "../application/scan.js";
 import type { SnapshotDiff } from "../application/snapshots.js";
+import type { FootprintSummary, ProviderReport } from "../application/footprint.js";
 import type { TypeTotal } from "../ports/scan.js";
 import type { SnapshotSummary } from "../ports/snapshots.js";
 import { formatBytes, usedPercentOfInodes, usedPercentOfSpace } from "../domain/sizes.js";
@@ -173,4 +174,60 @@ export function diffLines(diff: SnapshotDiff, units: Units): string[] {
     lines.push(`${row.delta.padStart(deltaWidth)}  ${row.kind.padEnd(kindWidth)}  ${row.path}`);
   }
   return lines;
+}
+
+/**
+ * What the detectors found, grouped by category and widest first.
+ *
+ * A finding nothing measured prints `unknown` rather than a number, and data
+ * that is in use is marked, so a Firefox profile is never read off the screen
+ * as a cache that can go.
+ */
+export function findingLines(summary: FootprintSummary, units: Units): string[] {
+  if (summary.findings.length === 0) {
+    return ["No detector found anything. Run 'disktop scan ~' first if no scan covers your home directory."];
+  }
+
+  const rows = summary.findings.map((finding) => ({
+    size: finding.size.bytes === undefined ? "unknown" : formatBytes(finding.size.bytes, units),
+    category: finding.category,
+    title: finding.title,
+    note: [
+      finding.active ? "in use" : undefined,
+      finding.confidence === "observed" ? undefined : finding.confidence,
+      finding.availableActionIds.length === 0 ? "no action" : finding.availableActionIds.join("/"),
+    ]
+      .filter((part) => part !== undefined)
+      .join(", "),
+  }));
+
+  const sizeWidth = Math.max(7, ...rows.map((row) => row.size.length));
+  const categoryWidth = Math.max(8, ...rows.map((row) => row.category.length));
+  const lines = [
+    `${"Size".padStart(sizeWidth)}  ${"Category".padEnd(categoryWidth)}  What`,
+    ...rows.map((row) => `${row.size.padStart(sizeWidth)}  ${row.category.padEnd(categoryWidth)}  ${row.title} (${row.note})`),
+    "",
+  ];
+
+  for (const total of summary.categoryTotals) {
+    const notes = [
+      total.unmeasured === 0 ? undefined : `${total.unmeasured} unmeasured`,
+      total.nested === 0 ? undefined : `${total.nested} inside another, counted once`,
+    ].filter((note) => note !== undefined);
+    const suffix = notes.length === 0 ? "" : `, ${notes.join(", ")}`;
+    lines.push(`${total.category}: ${formatBytes(total.bytes, units)} across ${total.findings} findings${suffix}`);
+  }
+  if (!summary.measured) {
+    lines.push(
+      "Directory footprints were not measured. Any size above comes from a package manager or one stat call; everything else is unknown.",
+    );
+  }
+  return lines;
+}
+
+/** The detectors that did not answer, with the reason, on stderr. */
+export function providerLines(reports: readonly ProviderReport[]): string[] {
+  return reports
+    .filter((report) => !report.ran)
+    .map((report) => `${report.providerId}: ${report.capability.status}: ${report.capability.explanation}`);
 }

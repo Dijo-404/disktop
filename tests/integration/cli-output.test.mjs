@@ -108,3 +108,27 @@ test("text output stays usable when stdout is a pipe rather than a terminal", ()
   assert.ok([0, 3].includes(result.status));
   assert.match(result.stdout, /Mount\s+Type/);
 });
+
+test("disktop clean lists detectors on this host and applies nothing", () => {
+  const result = disktop(["clean", "--no-sizes", "--json"]);
+  const envelope = envelopeFrom(result);
+  validate("clean", envelope);
+
+  assert.equal(envelope.command, "clean");
+  assert.ok([0, 3].includes(result.status), `unexpected exit ${result.status}`);
+  assert.equal(result.status, envelope.exitCode);
+  assert.equal(envelope.data.measured, false, "--no-sizes measures nothing");
+  // Every finding carries a labelled size, and an unmeasured one carries no number.
+  for (const finding of envelope.data.findings) {
+    assert.ok(typeof finding.size.basis === "string");
+    assert.equal(finding.size.basis === "unknown", finding.size.bytes === undefined);
+  }
+});
+
+test("disktop clean plan still refuses, because nothing applies anything yet", () => {
+  const result = disktop(["clean", "plan", "some-finding", "--json"]);
+  const envelope = envelopeFrom(result);
+
+  assert.equal(result.status, 2);
+  assert.equal(envelope.error.code, "not-implemented");
+});

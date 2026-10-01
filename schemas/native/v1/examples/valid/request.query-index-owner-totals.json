@@ -1,0 +1,14 @@
+{
+  "protocolVersion": 1,
+  "requestId": "query-index-owners-1",
+  "operation": "query-index",
+  "arguments": {
+    "scanId": "scan-20260930-8f2ac1d4",
+    "indexDirectory": "L2hvbWUvZXhhbXBsZS8uY2FjaGUvZGlza3RvcA==",
+    "filter": {},
+    "sort": "allocated",
+    "order": "descending",
+    "limit": "1",
+    "includeOwnerTotals": true
+  }
+}

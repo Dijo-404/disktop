@@ -140,11 +140,19 @@ export interface NativeTypeTotal {
   readonly apparentBytes: bigint;
 }
 
+export interface NativeOwnerTotal {
+  readonly ownerId: bigint;
+  readonly entries: bigint;
+  readonly allocatedBytes: bigint;
+  readonly apparentBytes: bigint;
+}
+
 export interface NativeIndexPage {
   readonly scanId: string;
   readonly entries: readonly NativeIndexEntry[];
   readonly nextCursor?: string;
   readonly typeTotals?: readonly NativeTypeTotal[];
+  readonly ownerTotals?: readonly NativeOwnerTotal[];
 }
 
 /**
@@ -206,11 +214,13 @@ export function parseIndexPage(result: unknown): NativeIndexPage {
   }
   const entries = result.entries.map((entry: unknown) => parseIndexEntry(entry));
   const totals = result.typeTotals;
+  const owners = result.ownerTotals;
   return {
     scanId: result.scanId,
     entries,
     ...(typeof result.nextCursor === "string" ? { nextCursor: result.nextCursor } : {}),
     ...(Array.isArray(totals) ? { typeTotals: totals.map((total: unknown) => parseTypeTotal(total)) } : {}),
+    ...(Array.isArray(owners) ? { ownerTotals: owners.map((total: unknown) => parseOwnerTotal(total)) } : {}),
   };
 }
 
@@ -248,6 +258,18 @@ function parseTypeTotal(value: unknown): NativeTypeTotal {
   }
   return {
     extension: value.extension,
+    entries: decimal(value.entries, "entries"),
+    allocatedBytes: decimal(value.allocatedBytes, "allocatedBytes"),
+    apparentBytes: decimal(value.apparentBytes, "apparentBytes"),
+  };
+}
+
+function parseOwnerTotal(value: unknown): NativeOwnerTotal {
+  if (!isRecord(value)) {
+    throw new Error("The helper returned an owner total that is not an object");
+  }
+  return {
+    ownerId: decimal(value.ownerId, "ownerId"),
     entries: decimal(value.entries, "entries"),
     allocatedBytes: decimal(value.allocatedBytes, "allocatedBytes"),
     apparentBytes: decimal(value.apparentBytes, "apparentBytes"),

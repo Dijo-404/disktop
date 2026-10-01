@@ -116,6 +116,8 @@ struct QueryIndexArguments {
     cursor: Option<String>,
     #[serde(default)]
     include_type_totals: Option<bool>,
+    #[serde(default)]
+    include_owner_totals: Option<bool>,
 }
 
 enum InputLine {
@@ -712,6 +714,24 @@ fn query_index(responder: &Responder, arguments: Map<String, Value>) {
             ),
         );
     }
+    if let Some(totals) = page.owner_totals {
+        result.insert(
+            "ownerTotals".to_owned(),
+            Value::Array(
+                totals
+                    .iter()
+                    .map(|total| {
+                        json!({
+                            "ownerId": total.owner_id.to_string(),
+                            "entries": total.entries.to_string(),
+                            "allocatedBytes": total.allocated_bytes.to_string(),
+                            "apparentBytes": total.apparent_bytes.to_string(),
+                        })
+                    })
+                    .collect(),
+            ),
+        );
+    }
 
     responder.emit("complete", json!({ "result": Value::Object(result) }));
 }
@@ -830,6 +850,7 @@ fn query_request(arguments: &QueryIndexArguments) -> Result<QueryRequest, String
         limit: limit.min(u64::from(query::MAX_LIMIT)) as u32,
         cursor: arguments.cursor.clone(),
         include_type_totals: arguments.include_type_totals.unwrap_or(false),
+        include_owner_totals: arguments.include_owner_totals.unwrap_or(false),
     })
 }
 

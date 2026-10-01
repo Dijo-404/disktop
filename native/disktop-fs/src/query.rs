@@ -14,6 +14,7 @@ use rusqlite::{Connection, params_from_iter};
 /// request asks for.
 pub const MAX_LIMIT: u32 = 1000;
 const MAX_TYPE_TOTALS: u32 = 64;
+const MAX_OWNER_TOTALS: u32 = 64;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum Sort {
@@ -112,6 +113,7 @@ pub struct QueryRequest {
     pub limit: u32,
     pub cursor: Option<String>,
     pub include_type_totals: bool,
+    pub include_owner_totals: bool,
 }
 
 pub struct IndexRow {
@@ -131,6 +133,13 @@ pub struct IndexRow {
     search_name: String,
 }
 
+pub struct OwnerTotal {
+    pub owner_id: i64,
+    pub entries: i64,
+    pub allocated_bytes: i64,
+    pub apparent_bytes: i64,
+}
+
 pub struct TypeTotal {
     pub extension: String,
     pub entries: i64,
@@ -142,6 +151,7 @@ pub struct QueryPage {
     pub entries: Vec<IndexRow>,
     pub next_cursor: Option<String>,
     pub type_totals: Option<Vec<TypeTotal>>,
+    pub owner_totals: Option<Vec<OwnerTotal>>,
 }
 
 /// One page, plus the cursor that continues it when more rows remain.
@@ -219,11 +229,67 @@ pub fn query(connection: &Connection, request: &QueryRequest) -> rusqlite::Resul
         None
     };
 
+    let owner_totals = if request.include_owner_totals {
+        Some(owner_totals(connection, request)?)
+    } else {
+        None
+    };
+
     Ok(QueryPage {
         entries,
         next_cursor,
         type_totals,
+        owner_totals,
     })
+}
+
+/// Per-owner totals over regular files only.
+///
+/// Same rule as the per-extension totals, and for the same reason: a directory
+/// row carries its whole subtree and a second hardlink to a counted inode
+/// carries bytes already attributed elsewhere, so including either would
+/// report more bytes than the filesystem holds.
+fn owner_totals(
+    connection: &Connection,
+    request: &QueryRequest,
+) -> rusqlite::Result<Vec<OwnerTotal>> {
+    let mut clauses = vec![
+        "scan_id = ?".to_owned(),
+        "kind = 0".to_owned(),
+        "shared = 0".to_owned(),
+    ];
+    let mut arguments: Vec<Value> = vec![Value::Text(request.scan_id.clone())];
+    let filter = EntryFilter {
+        under: request.filter.under,
+        parent_id: request.filter.parent_id,
+        name_contains: request.filter.name_contains.clone(),
+        extension: request.filter.extension.clone(),
+        min_allocated_bytes: request.filter.min_allocated_bytes,
+        max_allocated_bytes: request.filter.max_allocated_bytes,
+        modified_before_nanoseconds: request.filter.modified_before_nanoseconds,
+        owner_id: request.filter.owner_id,
+        kinds: None,
+    };
+    push_filters(&filter, &mut clauses, &mut arguments);
+    arguments.push(Value::Integer(i64::from(MAX_OWNER_TOTALS)));
+
+    let sql = format!(
+        "SELECT owner_id, COUNT(*), SUM(allocated_bytes), SUM(apparent_bytes)
+         FROM entry WHERE {} GROUP BY owner_id ORDER BY SUM(allocated_bytes) DESC LIMIT ?",
+        clauses.join(" AND "),
+    );
+    let mut statement = connection.prepare(&sql)?;
+    let mut rows = statement.query(params_from_iter(arguments.iter()))?;
+    let mut totals = Vec::new();
+    while let Some(row) = rows.next()? {
+        totals.push(OwnerTotal {
+            owner_id: row.get(0)?,
+            entries: row.get(1)?,
+            allocated_bytes: row.get::<_, Option<i64>>(2)?.unwrap_or(0),
+            apparent_bytes: row.get::<_, Option<i64>>(3)?.unwrap_or(0),
+        });
+    }
+    Ok(totals)
 }
 
 /// Per-extension totals over regular files only.
@@ -408,6 +474,7 @@ mod tests {
             limit: 100,
             cursor: None,
             include_type_totals: false,
+            include_owner_totals: false,
         }
     }
 
@@ -473,6 +540,38 @@ mod tests {
 
         assert_eq!(page.entries.len(), 1);
         assert!(page.entries[0].path.ends_with(b"large.log"));
+    }
+
+    #[test]
+    fn owner_totals_count_regular_files_only() {
+        let sandbox = Sandbox::new("query-owner-totals");
+        sandbox.directory(b"logs");
+        sandbox.file(b"logs/one.log", 8192);
+        sandbox.file(b"logs/two.log", 8192);
+        sandbox.file(b"notes.txt", 4096);
+
+        let (connection, scan_id) = scanned(&sandbox, "owners");
+        let mut with_totals = request(&scan_id);
+        with_totals.include_owner_totals = true;
+        let page = query(&connection, &with_totals).unwrap();
+
+        let totals = page.owner_totals.expect("owner totals were requested");
+        assert_eq!(totals.len(), 1, "one user wrote every file in the sandbox");
+        // Three regular files; the directory rows aggregate the same bytes and
+        // must not be added to them.
+        assert_eq!(totals[0].entries, 3);
+        assert_eq!(totals[0].apparent_bytes, 20480);
+    }
+
+    #[test]
+    fn owner_totals_are_absent_unless_they_were_asked_for() {
+        let sandbox = Sandbox::new("query-owner-absent");
+        sandbox.file(b"notes.txt", 4096);
+
+        let (connection, scan_id) = scanned(&sandbox, "owners-absent");
+        let page = query(&connection, &request(&scan_id)).unwrap();
+
+        assert!(page.owner_totals.is_none());
     }
 
     #[test]
@@ -586,6 +685,7 @@ mod subtree_tests {
                 limit: 100,
                 cursor: None,
                 include_type_totals: false,
+                include_owner_totals: false,
             },
         )
         .unwrap();
@@ -656,6 +756,7 @@ mod subtree_tests {
                 limit: 100,
                 cursor: None,
                 include_type_totals: false,
+                include_owner_totals: false,
             },
         )
         .unwrap();

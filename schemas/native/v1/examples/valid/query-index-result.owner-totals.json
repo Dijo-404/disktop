@@ -1,0 +1,24 @@
+{
+  "protocolVersion": 1,
+  "requestId": "query-index-owners-1",
+  "eventId": "1",
+  "event": "complete",
+  "result": {
+    "scanId": "scan-20260930-8f2ac1d4",
+    "entries": [],
+    "ownerTotals": [
+      {
+        "ownerId": "1000",
+        "entries": "418223",
+        "allocatedBytes": "214748364800",
+        "apparentBytes": "214203768832"
+      },
+      {
+        "ownerId": "0",
+        "entries": "90114",
+        "allocatedBytes": "12884901888",
+        "apparentBytes": "12871168000"
+      }
+    ]
+  }
+}
