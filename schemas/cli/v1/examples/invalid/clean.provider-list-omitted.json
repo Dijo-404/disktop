@@ -1,0 +1,17 @@
+{
+  "schemaVersion": "1",
+  "command": "clean",
+  "generatedAt": "2026-10-01T08:41:19.004Z",
+  "status": "complete",
+  "exitCode": 0,
+  "data": {
+    "capability": {
+      "status": "available",
+      "explanation": "Detectors ran."
+    },
+    "measured": true,
+    "findings": [],
+    "providers": [],
+    "categoryTotals": []
+  }
+}

@@ -1,5 +1,6 @@
 import type { ActionPlan } from "../domain/actions.js";
-import type { Capability, Finding } from "../domain/models.js";
+import type { Finding } from "../domain/findings.js";
+import type { Capability } from "../domain/models.js";
 
 export interface ProviderContext {
   readonly scanId?: string;

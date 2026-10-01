@@ -558,6 +558,245 @@
           "$ref": "#/$defs/signedDecimalInteger"
         }
       }
+    },
+    "findingCategory": {
+      "type": "string",
+      "enum": [
+        "dev-environment",
+        "project-artifact",
+        "language-cache",
+        "ai-cache",
+        "ide-cache",
+        "browser-cache",
+        "app-cache",
+        "game-data",
+        "vm-image",
+        "system-snapshot",
+        "installed-app",
+        "log",
+        "crash-dump",
+        "swap",
+        "temporary",
+        "diagnostic",
+        "per-user-usage"
+      ]
+    },
+    "sizeBasis": {
+      "description": "Where a byte count came from. There is no basis meaning `zero because nobody looked`: an unmeasured footprint is `unknown` and carries no number.",
+      "type": "string",
+      "enum": [
+        "measured-allocated",
+        "measured-apparent",
+        "manager-reported",
+        "stat",
+        "unknown"
+      ]
+    },
+    "findingSize": {
+      "description": "A labelled byte count. `explanation` says what the number covers and what it leaves out.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "basis",
+        "explanation"
+      ],
+      "properties": {
+        "bytes": {
+          "$ref": "#/$defs/decimalInteger"
+        },
+        "basis": {
+          "$ref": "#/$defs/sizeBasis"
+        },
+        "explanation": {
+          "type": "string",
+          "minLength": 1
+        }
+      },
+      "allOf": [
+        {
+          "if": {
+            "type": "object",
+            "properties": {
+              "basis": {
+                "const": "unknown"
+              }
+            },
+            "required": [
+              "basis"
+            ]
+          },
+          "then": {
+            "description": "An unknown size carries no number.",
+            "properties": {
+              "bytes": false
+            }
+          },
+          "else": {
+            "description": "Every other basis names the number it measured.",
+            "required": [
+              "bytes"
+            ]
+          }
+        }
+      ]
+    },
+    "findingConfidence": {
+      "type": "string",
+      "enum": [
+        "observed",
+        "likely",
+        "uncertain"
+      ]
+    },
+    "actionOperation": {
+      "description": "An operation a later phase could offer for this finding. Phase 3 discovers; it applies nothing.",
+      "type": "string",
+      "enum": [
+        "trash",
+        "permanent",
+        "move",
+        "compress",
+        "dedup-hardlink",
+        "manager"
+      ]
+    },
+    "finding": {
+      "description": "One thing a provider noticed. A finding is a suggestion: it names the bytes it is about, where its number came from, and which operations could be offered, and it carries none of them out.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "providerId",
+        "providerVersion",
+        "category",
+        "title",
+        "evidence",
+        "paths",
+        "size",
+        "confidence",
+        "capability",
+        "availableActionIds",
+        "active"
+      ],
+      "properties": {
+        "id": {
+          "description": "`<providerId>:<slug>`, stable across releases.",
+          "$ref": "#/$defs/identifier"
+        },
+        "providerId": {
+          "$ref": "#/$defs/identifier"
+        },
+        "providerVersion": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "category": {
+          "$ref": "#/$defs/findingCategory"
+        },
+        "title": {
+          "type": "string",
+          "minLength": 1
+        },
+        "evidence": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "paths": {
+          "description": "The bytes this finding is about. Empty when the scope belongs to a manager.",
+          "type": "array",
+          "maxItems": 1000,
+          "items": {
+            "$ref": "#/$defs/rawPath"
+          }
+        },
+        "managerScope": {
+          "description": "A bounded manager selection, never a shell line.",
+          "type": "string",
+          "maxLength": 512
+        },
+        "size": {
+          "$ref": "#/$defs/findingSize"
+        },
+        "confidence": {
+          "$ref": "#/$defs/findingConfidence"
+        },
+        "capability": {
+          "$ref": "#/$defs/capability"
+        },
+        "availableActionIds": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/actionOperation"
+          }
+        },
+        "regenerationCost": {
+          "type": "string"
+        },
+        "active": {
+          "description": "True when the data is in use: a browser profile, a model store, a running image.",
+          "type": "boolean"
+        }
+      }
+    },
+    "providerReport": {
+      "description": "One provider's outcome. A provider that could not look is listed with its reason, never omitted, so an absent detector is never read as an empty disk.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "providerId",
+        "version",
+        "capability",
+        "findings",
+        "complete"
+      ],
+      "properties": {
+        "providerId": {
+          "$ref": "#/$defs/identifier"
+        },
+        "version": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "capability": {
+          "$ref": "#/$defs/capability"
+        },
+        "findings": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "complete": {
+          "type": "boolean"
+        }
+      }
+    },
+    "categoryTotal": {
+      "description": "Bytes per category over measured findings only. `unmeasured` is how many findings in the category contributed nothing because nothing measured them.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "category",
+        "findings",
+        "bytes",
+        "unmeasured"
+      ],
+      "properties": {
+        "category": {
+          "$ref": "#/$defs/findingCategory"
+        },
+        "findings": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "bytes": {
+          "$ref": "#/$defs/decimalInteger"
+        },
+        "unmeasured": {
+          "type": "integer",
+          "minimum": 0
+        }
+      }
     }
   }
 }

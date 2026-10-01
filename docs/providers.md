@@ -1,6 +1,6 @@
 # Findings and providers
 
-Status: planned provider contract and release inventory. See [PLAN.md](../PLAN.md#provider-inventory-for-the-one-release) for the full acceptance matrix.
+Status: the finding contract and the Phase 3 detectors. See [PLAN.md](../PLAN.md#provider-inventory-for-the-one-release) for the full acceptance matrix.
 
 ## Provider boundary
 
@@ -17,6 +17,49 @@ Every new provider must state:
 5. Its action reversibility and what a partial or failed result looks like.
 6. Its stable ID and effect on public JSON or saved plan compatibility.
 7. Its fixture and [feature-matrix](../PLAN.md#feature-acceptance-matrix) acceptance check.
+
+## What a finding carries
+
+`src/domain/findings.ts` defines the value and the policy; `schemas/cli/v1/common.json`
+publishes it. Every finding has:
+
+| Field | Meaning |
+| --- | --- |
+| `id` | `<providerId>:<slug>`, stable across releases so a saved plan keeps its meaning. |
+| `providerId`, `providerVersion` | Which rule produced it, and which version of that rule. |
+| `category` | One of a closed set, so a surface can group findings without parsing prose. |
+| `title`, `evidence` | What it is, and what proved it. |
+| `paths` | The bytes the finding is about. Empty when the scope belongs to a manager. |
+| `managerScope` | A bounded manager selection, never a shell line. |
+| `size` | `{ bytes?, basis, explanation }`. |
+| `confidence` | `observed`, `likely`, or `uncertain`. |
+| `capability` | Why a reading is absent, when it is. |
+| `availableActionIds` | What a later phase could offer. Phase 3 applies nothing. |
+| `regenerationCost` | What getting the data back would cost, when it is reproducible. |
+| `active` | True when the data is in use: a browser profile, a model store, a disk image. |
+
+### No unlabelled size
+
+`size.basis` is one of `measured-allocated`, `measured-apparent`,
+`manager-reported`, `stat`, or `unknown`. There is no basis that means "zero
+because nobody looked": a footprint nothing measured is `unknown` and carries
+no number at all, in memory and in JSON. `findingSize` refuses a number with an
+`unknown` basis and refuses any other basis without a number, so the rule
+cannot be broken by a provider that forgets it.
+
+A provider does not measure its own directories. It reports the paths, and
+`src/application/footprint.ts` measures them through the `FootprintPort`, which
+reads the helper's scan index. Nothing in `src/providers` walks a tree.
+
+### No duplicate findings
+
+Two providers can legitimately reach the same directory: an Electron detector
+and an IDE detector both see `~/.config/Code/Cache`. `deduplicateFindings`
+keeps the broader scope and drops the narrower one when it comes from a
+*different* provider, recording the dropped id in the survivor's evidence so
+nothing disappears silently. A provider is trusted about its own tree, so
+`dev.conda` may report a prefix and the `pkgs` cache inside it. A repeated id
+survives once.
 
 ## Capability states
 
