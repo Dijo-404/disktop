@@ -14,6 +14,13 @@ import {
   createIdeCacheProvider,
   createLanguageCacheProvider,
 } from "./caches/index.js";
+import {
+  createSteamProvider,
+  createSwapProvider,
+  createSystemSnapshotsProvider,
+  createVirtualMachineProvider,
+  createWineProvider,
+} from "./storage/index.js";
 
 /**
  * Every detector Disktop ships, in one list.
@@ -35,5 +42,10 @@ export function createBuiltInProviders(): readonly FindingProvider[] {
     createIdeCacheProvider(),
     createBrowserCacheProvider(),
     createElectronCacheProvider(),
+    createSteamProvider(),
+    createWineProvider(),
+    createVirtualMachineProvider(),
+    createSystemSnapshotsProvider(),
+    createSwapProvider(),
   ];
 }
