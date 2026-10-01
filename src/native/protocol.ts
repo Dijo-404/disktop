@@ -323,3 +323,155 @@ function decimal(value: unknown, field: string): bigint {
   }
   return BigInt(value);
 }
+
+export interface NativeActionResult {
+  readonly journalId: string;
+  readonly state: "complete" | "partial" | "uncertain";
+  readonly completed: bigint;
+  readonly skipped: bigint;
+  readonly failed: bigint;
+  readonly selectedBytes: bigint;
+  readonly bytesMovedToTrash: bigint;
+  readonly freeBytesBefore?: bigint;
+  readonly freeBytesAfter?: bigint;
+  readonly undoAvailable: boolean;
+}
+
+export interface NativeJournalItem {
+  readonly position: bigint;
+  readonly path: string;
+  readonly destination?: string;
+  readonly outcome: "in-progress" | "completed" | "skipped" | "failed" | "uncertain";
+  readonly message?: string;
+  readonly bytes: bigint;
+}
+
+export interface NativeJournalRecord {
+  readonly id: string;
+  readonly planId: string;
+  readonly operation: string;
+  readonly startedAtMilliseconds: bigint;
+  readonly finishedAtMilliseconds?: bigint;
+  readonly state: "in-progress" | "complete" | "partial" | "uncertain";
+  readonly completed: bigint;
+  readonly skipped: bigint;
+  readonly failed: bigint;
+  readonly selectedBytes: bigint;
+  readonly bytesMovedToTrash: bigint;
+  readonly freeBytesBefore?: bigint;
+  readonly freeBytesAfter?: bigint;
+  readonly items: readonly NativeJournalItem[];
+}
+
+export interface NativeJournalPage {
+  readonly reconciled: bigint;
+  readonly records: readonly NativeJournalRecord[];
+  readonly nextCursor?: string;
+}
+
+const ACTION_STATES = new Set(["complete", "partial", "uncertain"]);
+const ITEM_OUTCOMES = new Set(["in-progress", "completed", "skipped", "failed", "uncertain"]);
+
+/**
+ * Decode what one action did.
+ *
+ * A result that claims success without naming a durable journal record is
+ * refused here rather than returned: `docs/native-protocol.md` calls that a
+ * protocol violation, and the whole recovery story rests on every completed
+ * action having a record behind it.
+ */
+export function parseActionResult(result: unknown): NativeActionResult {
+  if (!isRecord(result)) {
+    throw new Error("The helper returned an action result that is not an object");
+  }
+  if (typeof result.journalId !== "string" || result.journalId === "") {
+    throw new Error("The helper reported an action with no durable journal record");
+  }
+  const state = result.state;
+  if (typeof state !== "string" || !ACTION_STATES.has(state)) {
+    throw new Error("The helper returned an action in a state this build does not know");
+  }
+  if (typeof result.undoAvailable !== "boolean") {
+    throw new Error("The helper did not say whether this action can be undone");
+  }
+  return {
+    journalId: result.journalId,
+    state: state as NativeActionResult["state"],
+    completed: decimal(result.completed, "completed"),
+    skipped: decimal(result.skipped, "skipped"),
+    failed: decimal(result.failed, "failed"),
+    selectedBytes: decimal(result.selectedBytes, "selectedBytes"),
+    bytesMovedToTrash: decimal(result.bytesMovedToTrash, "bytesMovedToTrash"),
+    ...(result.freeBytesBefore === undefined
+      ? {}
+      : { freeBytesBefore: decimal(result.freeBytesBefore, "freeBytesBefore") }),
+    ...(result.freeBytesAfter === undefined
+      ? {}
+      : { freeBytesAfter: decimal(result.freeBytesAfter, "freeBytesAfter") }),
+    undoAvailable: result.undoAvailable,
+  };
+}
+
+export function parseJournalPage(result: unknown): NativeJournalPage {
+  if (!isRecord(result) || !Array.isArray(result.records)) {
+    throw new Error("The helper returned a journal page without records");
+  }
+  return {
+    reconciled: decimal(result.reconciled, "reconciled"),
+    records: result.records.map((record: unknown) => parseJournalRecord(record)),
+    ...(typeof result.nextCursor === "string" ? { nextCursor: result.nextCursor } : {}),
+  };
+}
+
+function parseJournalRecord(value: unknown): NativeJournalRecord {
+  if (!isRecord(value) || typeof value.id !== "string" || typeof value.planId !== "string") {
+    throw new Error("The helper returned a journal record with no identity");
+  }
+  const state = value.state;
+  if (typeof state !== "string" || !(ACTION_STATES.has(state) || state === "in-progress")) {
+    throw new Error("The helper returned a journal record in an unknown state");
+  }
+  if (typeof value.operation !== "string" || !Array.isArray(value.items)) {
+    throw new Error("The helper returned a journal record without its operation or items");
+  }
+  return {
+    id: value.id,
+    planId: value.planId,
+    operation: value.operation,
+    startedAtMilliseconds: decimal(value.startedAtMilliseconds, "startedAtMilliseconds"),
+    ...(value.finishedAtMilliseconds === undefined
+      ? {}
+      : { finishedAtMilliseconds: decimal(value.finishedAtMilliseconds, "finishedAtMilliseconds") }),
+    state: state as NativeJournalRecord["state"],
+    completed: decimal(value.completed, "completed"),
+    skipped: decimal(value.skipped, "skipped"),
+    failed: decimal(value.failed, "failed"),
+    selectedBytes: decimal(value.selectedBytes, "selectedBytes"),
+    bytesMovedToTrash: decimal(value.bytesMovedToTrash, "bytesMovedToTrash"),
+    ...(value.freeBytesBefore === undefined
+      ? {}
+      : { freeBytesBefore: decimal(value.freeBytesBefore, "freeBytesBefore") }),
+    ...(value.freeBytesAfter === undefined
+      ? {}
+      : { freeBytesAfter: decimal(value.freeBytesAfter, "freeBytesAfter") }),
+    items: value.items.map((item: unknown) => parseJournalItem(item)),
+  };
+}
+
+function parseJournalItem(value: unknown): NativeJournalItem {
+  if (!isRecord(value) || typeof value.path !== "string") {
+    throw new Error("The helper returned a journal item without a byte path");
+  }
+  const outcome = value.outcome;
+  if (typeof outcome !== "string" || !ITEM_OUTCOMES.has(outcome)) {
+    throw new Error("The helper returned a journal item with an unknown outcome");
+  }
+  return {
+    position: decimal(value.position, "position"),
+    path: value.path,
+    ...(typeof value.destination === "string" ? { destination: value.destination } : {}),
+    outcome: outcome as NativeJournalItem["outcome"],
+    ...(typeof value.message === "string" ? { message: value.message } : {}),
+    bytes: decimal(value.bytes, "bytes"),
+  };
+}
