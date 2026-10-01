@@ -32,24 +32,24 @@ use std::thread::JoinHandle;
 
 const PROTOCOL_VERSION: u16 = 1;
 const MAX_REQUEST_BYTES: usize = 1024 * 1024;
-const SUPPORTED_OPERATIONS: [&str; 7] = [
+const SUPPORTED_OPERATIONS: [&str; 9] = [
     "hello",
     "probe",
     "cancel",
     "scan",
     "query-index",
     "trash",
+    "erase",
+    "empty-trash",
     "journal-reconcile",
 ];
-const PLANNED_OPERATIONS: [&str; 11] = [
+const PLANNED_OPERATIONS: [&str; 9] = [
     "hash-candidates",
     "inspect",
     "restore",
-    "erase",
     "copy-move",
     "compress",
     "dedup-hardlink",
-    "empty-trash",
     "manager-begin",
     "manager-append",
     "manager-finish",
@@ -97,6 +97,22 @@ struct TrashArguments {
     journal_directory: String,
     home_trash_directory: String,
     targets: Vec<TargetArguments>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct EraseArguments {
+    plan_id: String,
+    journal_directory: String,
+    targets: Vec<TargetArguments>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct EmptyTrashArguments {
+    plan_id: String,
+    journal_directory: String,
+    trash_directories: Vec<String>,
 }
 
 #[derive(Deserialize)]
@@ -365,6 +381,8 @@ fn handle_request(server: &Arc<Server>, line: &[u8]) {
 
     match request.operation.as_str() {
         "trash" => trash(server, responder, request.arguments),
+        "erase" => erase(server, responder, request.arguments),
+        "empty-trash" => empty_trash(server, responder, request.arguments),
         "journal-reconcile" => journal_reconcile(&responder, request.arguments),
         "hello" | "probe" if request.arguments.is_empty() => {
             responder.emit("complete", json!({ "result": hello_result() }));
@@ -811,22 +829,88 @@ fn trash(server: &Arc<Server>, responder: Responder, arguments: Map<String, Valu
         Err(message) => return fail(&responder, "invalid-arguments", &message),
     };
 
-    if let Err(error) = crate::sys::openat2_available() {
-        return fail(
-            &responder,
-            "unsupported-kernel",
-            &format!(
-                "Changing a file needs openat2 containment, which this kernel refused: {error}. \
-                 There is no unsafe fallback."
-            ),
-        );
+    if let Err(message) = require_containment() {
+        return fail(&responder, "unsupported-kernel", &message);
     }
 
+    spawn_mutation(server, responder, "trash", move |responder, cancelled| {
+        report_action(
+            responder,
+            actions::run_trash(&request, &mut reporter(responder), cancelled),
+        );
+    });
+}
+
+/// Remove every reviewed target permanently.
+fn erase(server: &Arc<Server>, responder: Responder, arguments: Map<String, Value>) {
+    let arguments: EraseArguments = match decode(arguments) {
+        Ok(arguments) => arguments,
+        Err(message) => return fail(&responder, "invalid-arguments", &message),
+    };
+    let request = match erase_request(&arguments) {
+        Ok(request) => request,
+        Err(message) => return fail(&responder, "invalid-arguments", &message),
+    };
+    if let Err(message) = require_containment() {
+        return fail(&responder, "unsupported-kernel", &message);
+    }
+    spawn_mutation(server, responder, "erase", move |responder, cancelled| {
+        report_action(
+            responder,
+            actions::run_erase(&request, &mut reporter(responder), cancelled),
+        );
+    });
+}
+
+/// Empty every directory that really is a Trash.
+fn empty_trash(server: &Arc<Server>, responder: Responder, arguments: Map<String, Value>) {
+    let arguments: EmptyTrashArguments = match decode(arguments) {
+        Ok(arguments) => arguments,
+        Err(message) => return fail(&responder, "invalid-arguments", &message),
+    };
+    let request = match empty_trash_request(&arguments) {
+        Ok(request) => request,
+        Err(message) => return fail(&responder, "invalid-arguments", &message),
+    };
+    if let Err(message) = require_containment() {
+        return fail(&responder, "unsupported-kernel", &message);
+    }
+    spawn_mutation(
+        server,
+        responder,
+        "empty-trash",
+        move |responder, cancelled| {
+            report_action(
+                responder,
+                actions::run_empty_trash(&request, &mut reporter(responder), cancelled),
+            );
+        },
+    );
+}
+
+fn require_containment() -> Result<(), String> {
+    crate::sys::openat2_available().map_err(|error| {
+        format!(
+            "Changing a file needs openat2 containment, which this kernel refused: {error}. \
+             There is no unsafe fallback."
+        )
+    })
+}
+
+/// Run one mutation on its own thread, registered for cancellation.
+///
+/// It runs off the reading thread for the same reason a scan does: somebody who
+/// changes their mind halfway through a long list has to be able to say so, and
+/// `cancel` can only be read while this is still going.
+fn spawn_mutation<F>(server: &Arc<Server>, responder: Responder, operation: &str, work: F)
+where
+    F: FnOnce(&Responder, &AtomicBool) + Send + 'static,
+{
     let cancelled = Arc::new(AtomicBool::new(false));
     registry(server).insert(responder.request_id.clone(), Arc::clone(&cancelled));
     responder.emit(
         "accepted",
-        json!({ "accepted": { "operation": "trash", "cancellable": true } }),
+        json!({ "accepted": { "operation": operation, "cancellable": true } }),
     );
 
     let owned = Arc::clone(server);
@@ -835,7 +919,7 @@ fn trash(server: &Arc<Server>, responder: Responder, arguments: Map<String, Valu
         // A panicking worker still has to settle its request: a client waits
         // for a terminal event and has no timeout.
         let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            run_mutation(&responder, &request, &cancelled);
+            work(&responder, &cancelled);
         }));
         if outcome.is_err() {
             fail(
@@ -850,8 +934,20 @@ fn trash(server: &Arc<Server>, responder: Responder, arguments: Map<String, Valu
     server.workers.lock().expect("workers").push(worker);
 }
 
-fn run_mutation(responder: &Responder, request: &TrashRequest, cancelled: &AtomicBool) {
-    let mut report = |item: actions::ItemReport| {
+fn report_action(
+    responder: &Responder,
+    outcome: Result<actions::ActionSummary, actions::ActionRefusal>,
+) {
+    match outcome {
+        Ok(summary) => responder.emit("complete", json!({ "result": action_result(&summary) })),
+        Err(refusal) => fail(responder, refusal.code, &refusal.message),
+    }
+}
+
+/// Turn each settled item into its own event, so a long action is legible
+/// while it runs rather than only once it ends.
+fn reporter(responder: &Responder) -> impl FnMut(actions::ItemReport) + '_ {
+    |item: actions::ItemReport| {
         let mut body = Map::new();
         body.insert("path".to_owned(), crate::base64::encode(&item.path).into());
         body.insert("outcome".to_owned(), item_outcome(item.outcome).into());
@@ -865,11 +961,6 @@ fn run_mutation(responder: &Responder, request: &TrashRequest, cancelled: &Atomi
             body.insert("bytesMoved".to_owned(), item.bytes.to_string().into());
         }
         responder.emit("item-result", json!({ "itemResult": Value::Object(body) }));
-    };
-
-    match actions::run_trash(request, &mut report, cancelled) {
-        Ok(summary) => responder.emit("complete", json!({ "result": action_result(&summary) })),
-        Err(refusal) => fail(responder, refusal.code, &refusal.message),
     }
 }
 
@@ -920,8 +1011,53 @@ fn trash_request(arguments: &TrashArguments) -> Result<TrashRequest, String> {
         return Err("homeTrashDirectory must be an absolute path".to_owned());
     }
 
-    let mut targets = Vec::with_capacity(arguments.targets.len());
-    for target in &arguments.targets {
+    Ok(TrashRequest {
+        plan_id: arguments.plan_id.clone(),
+        journal_directory,
+        home_trash_directory,
+        targets: decoded_targets(&arguments.targets)?,
+    })
+}
+
+fn erase_request(arguments: &EraseArguments) -> Result<actions::EraseRequest, String> {
+    if arguments.targets.is_empty() {
+        return Err("A mutation needs at least one target".to_owned());
+    }
+    Ok(actions::EraseRequest {
+        plan_id: arguments.plan_id.clone(),
+        journal_directory: decoded_directory(&arguments.journal_directory)?,
+        targets: decoded_targets(&arguments.targets)?,
+    })
+}
+
+fn empty_trash_request(
+    arguments: &EmptyTrashArguments,
+) -> Result<actions::EmptyTrashRequest, String> {
+    if arguments.trash_directories.is_empty() {
+        return Err("Emptying Trash needs at least one directory".to_owned());
+    }
+    let mut directories = Vec::with_capacity(arguments.trash_directories.len());
+    for encoded in &arguments.trash_directories {
+        let path = decode_path(encoded)?;
+        if path.first() != Some(&b'/') {
+            return Err("A Trash directory must be an absolute path".to_owned());
+        }
+        directories.push(path);
+    }
+    Ok(actions::EmptyTrashRequest {
+        plan_id: arguments.plan_id.clone(),
+        journal_directory: decoded_directory(&arguments.journal_directory)?,
+        trash_directories: directories,
+    })
+}
+
+fn decoded_directory(encoded: &str) -> Result<PathBuf, String> {
+    Ok(PathBuf::from(OsStr::from_bytes(&decode_path(encoded)?)))
+}
+
+fn decoded_targets(arguments: &[TargetArguments]) -> Result<Vec<actions::Target>, String> {
+    let mut targets = Vec::with_capacity(arguments.len());
+    for target in arguments {
         targets.push(actions::Target {
             path: decode_path(&target.path)?,
             expected: fingerprint(&target.expected)?,
@@ -929,12 +1065,7 @@ fn trash_request(arguments: &TrashArguments) -> Result<TrashRequest, String> {
                 .unwrap_or(0),
         });
     }
-    Ok(TrashRequest {
-        plan_id: arguments.plan_id.clone(),
-        journal_directory,
-        home_trash_directory,
-        targets,
-    })
+    Ok(targets)
 }
 
 fn fingerprint(arguments: &FingerprintArguments) -> Result<Fingerprint, String> {
@@ -1418,6 +1549,8 @@ mod tests {
                 "scan",
                 "query-index",
                 "trash",
+                "erase",
+                "empty-trash",
                 "journal-reconcile"
             ])
         );
@@ -1442,10 +1575,10 @@ mod tests {
     #[test]
     fn mutating_operation_is_explicitly_unsupported() {
         let output = responses(
-            "{\"protocolVersion\":1,\"requestId\":\"erase-1\",\"operation\":\"erase\",\"arguments\":{}}\n",
+            "{\"protocolVersion\":1,\"requestId\":\"compress-1\",\"operation\":\"compress\",\"arguments\":{}}\n",
         );
         assert_eq!(output[0]["event"], "error");
-        assert_eq!(output[0]["requestId"], "erase-1");
+        assert_eq!(output[0]["requestId"], "compress-1");
         assert_eq!(output[0]["error"]["code"], "unsupported-operation");
     }
 
@@ -1922,6 +2055,197 @@ mod tests {
         assert_eq!(record["items"].as_array().unwrap().len(), 1);
         assert_eq!(record["items"][0]["outcome"], "completed");
         assert!(record["items"][0]["destination"].is_string());
+    }
+
+    // --- Erase and emptying Trash -------------------------------------------
+
+    fn erase_request(id: &str, sandbox: &Sandbox, targets: &[String]) -> String {
+        let mut state = sandbox.bytes();
+        state.extend_from_slice(b"/state");
+        format!(
+            "{{\"protocolVersion\":1,\"requestId\":\"{id}\",\"operation\":\"erase\",\
+               \"arguments\":{{\"planId\":\"plan-0123456789abcd\",\
+               \"journalDirectory\":\"{}\",\"targets\":[{}]}}}}\n",
+            crate::base64::encode(&state),
+            targets.join(","),
+        )
+    }
+
+    fn run_erase(id: &str, sandbox: &Sandbox, targets: &[String]) -> Vec<Value> {
+        session(&[erase_request(id, sandbox, targets)], |events| {
+            terminal(events, id)
+        })
+    }
+
+    #[test]
+    fn erasing_removes_a_file_and_a_whole_directory_tree() {
+        let sandbox = Sandbox::new("erase-tree");
+        sandbox.directory(b"work");
+        sandbox.file(b"work/one.bin", 64);
+        sandbox.directory(b"work/tree");
+        sandbox.directory(b"work/tree/deep");
+        sandbox.file(b"work/tree/deep/leaf", 32);
+        sandbox.file(b"work/tree/top", 16);
+
+        let mut file = sandbox.bytes();
+        file.extend_from_slice(b"/work/one.bin");
+        let mut tree = sandbox.bytes();
+        tree.extend_from_slice(b"/work/tree");
+
+        let events = run_erase(
+            "erase-1",
+            &sandbox,
+            &[target(&file, 64), target(&tree, 112)],
+        );
+        let result = &completion(&events, "erase-1")["result"];
+
+        assert_eq!(result["completed"], "2");
+        assert_eq!(result["state"], "complete");
+        assert_eq!(result["bytesMovedToTrash"], "0", "nothing went to Trash");
+        assert_eq!(result["undoAvailable"], false, "erasing cannot be undone");
+        assert!(!sandbox.path().join("work/one.bin").exists());
+        assert!(!sandbox.path().join("work/tree").exists());
+        assert!(
+            sandbox.path().join("work").exists(),
+            "only what was named went"
+        );
+    }
+
+    #[test]
+    fn erasing_removes_a_symlink_without_touching_what_it_points_at() {
+        let sandbox = Sandbox::new("erase-symlink");
+        sandbox.directory(b"work");
+        sandbox.file(b"work/real.bin", 16);
+        sandbox.directory(b"work/holder");
+        sandbox.symlink(b"../real.bin", b"work/holder/alias");
+
+        let mut holder = sandbox.bytes();
+        holder.extend_from_slice(b"/work/holder");
+        let events = run_erase("erase-2", &sandbox, &[target(&holder, 4096)]);
+
+        assert_eq!(completion(&events, "erase-2")["result"]["completed"], "1");
+        assert!(!sandbox.path().join("work/holder").exists());
+        assert!(
+            sandbox.path().join("work/real.bin").exists(),
+            "a link is removed as a link, never followed"
+        );
+    }
+
+    #[test]
+    fn erasing_refuses_a_protected_root_and_skips_a_changed_target() {
+        let sandbox = Sandbox::new("erase-refusals");
+        sandbox.directory(b"work");
+        let path = sandbox.file(b"work/data.bin", 128);
+        let mut file = sandbox.bytes();
+        file.extend_from_slice(b"/work/data.bin");
+        let reviewed = target(&file, 128);
+        std::fs::write(&path, vec![b'z'; 4096]).unwrap();
+
+        let protected = format!(
+            "{{\"path\":\"{}\",\"expected\":{{\"device\":\"1\",\"inode\":\"2\",\"mountId\":\"3\",\
+               \"kind\":\"directory\",\"apparentBytes\":\"4\",\"modifiedNanoseconds\":\"5\"}}}}",
+            crate::base64::encode(b"/usr/lib"),
+        );
+
+        let events = run_erase("erase-3", &sandbox, &[reviewed, protected]);
+        let result = &completion(&events, "erase-3")["result"];
+        assert_eq!(result["skipped"], "1");
+        assert_eq!(result["failed"], "1");
+        assert_eq!(result["completed"], "0");
+        assert_eq!(result["state"], "partial");
+        assert!(path.exists(), "a changed target is left alone");
+        assert!(std::path::Path::new("/usr/lib").exists());
+    }
+
+    #[test]
+    fn a_directory_something_was_added_to_since_review_is_not_erased() {
+        let sandbox = Sandbox::new("erase-addition");
+        sandbox.directory(b"work");
+        sandbox.directory(b"work/cache");
+        sandbox.file(b"work/cache/old", 16);
+
+        let mut directory = sandbox.bytes();
+        directory.extend_from_slice(b"/work/cache");
+        let reviewed = target(&directory, 4096);
+
+        // Something lands in the reviewed directory after review. Its
+        // modification time is what makes that visible.
+        sandbox.file(b"work/cache/new", 16);
+
+        let events = run_erase("erase-4", &sandbox, &[reviewed]);
+        assert_eq!(completion(&events, "erase-4")["result"]["skipped"], "1");
+        assert!(sandbox.path().join("work/cache/new").exists());
+        assert!(sandbox.path().join("work/cache/old").exists());
+    }
+
+    fn empty_trash_request(id: &str, sandbox: &Sandbox, directories: &[Vec<u8>]) -> String {
+        let mut state = sandbox.bytes();
+        state.extend_from_slice(b"/state");
+        let encoded: Vec<String> = directories
+            .iter()
+            .map(|directory| format!("\"{}\"", crate::base64::encode(directory)))
+            .collect();
+        format!(
+            "{{\"protocolVersion\":1,\"requestId\":\"{id}\",\"operation\":\"empty-trash\",\
+               \"arguments\":{{\"planId\":\"plan-0123456789abcd\",\
+               \"journalDirectory\":\"{}\",\"trashDirectories\":[{}]}}}}\n",
+            crate::base64::encode(&state),
+            encoded.join(","),
+        )
+    }
+
+    #[test]
+    fn emptying_trash_removes_what_is_in_it_and_frees_the_space_the_move_did_not() {
+        let sandbox = Sandbox::new("empty-trash");
+        sandbox.directory(b"work");
+        sandbox.file(b"work/one.bin", 64 * 1024);
+        let mut file = sandbox.bytes();
+        file.extend_from_slice(b"/work/one.bin");
+        run_trash("trash-20", &sandbox, &[target(&file, 65536)]);
+        assert!(sandbox.path().join("trash-home/files/one.bin").exists());
+
+        let mut trash = sandbox.bytes();
+        trash.extend_from_slice(b"/trash-home");
+        let events = session(
+            &[empty_trash_request("empty-1", &sandbox, &[trash])],
+            |events| terminal(events, "empty-1"),
+        );
+        let result = &completion(&events, "empty-1")["result"];
+
+        assert_eq!(result["state"], "complete");
+        assert_eq!(result["undoAvailable"], false);
+        assert!(!sandbox.path().join("trash-home/files/one.bin").exists());
+        assert!(
+            !sandbox
+                .path()
+                .join("trash-home/info/one.bin.trashinfo")
+                .exists()
+        );
+        assert!(
+            sandbox.path().join("trash-home/files").exists(),
+            "the Trash itself stays; only its contents go"
+        );
+    }
+
+    #[test]
+    fn a_directory_that_is_not_a_trash_is_refused_by_empty_trash() {
+        let sandbox = Sandbox::new("empty-not-trash");
+        sandbox.directory(b"documents");
+        sandbox.file(b"documents/thesis.txt", 4096);
+
+        let mut directory = sandbox.bytes();
+        directory.extend_from_slice(b"/documents");
+        let events = session(
+            &[empty_trash_request("empty-2", &sandbox, &[directory])],
+            |events| terminal(events, "empty-2"),
+        );
+        let result = &completion(&events, "empty-2")["result"];
+        assert_eq!(result["failed"], "1");
+        assert_eq!(result["completed"], "0");
+        assert!(sandbox.path().join("documents/thesis.txt").exists());
+
+        let item = item_results(&events, "empty-2")[0];
+        assert_eq!(item["itemResult"]["reason"], "protected-path");
     }
 
     /// Feeds `serve` one queued chunk at a time and reports end-of-stream only

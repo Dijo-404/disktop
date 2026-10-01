@@ -18,7 +18,7 @@
 use crate::guard::{self, Fingerprint, Guard, GuardContext};
 use crate::journal::{Counts, Journal, Outcome, State};
 use crate::sys::{self, EntryKind};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 
 /// Disktop's own directories are private to the user who owns them, and so is
@@ -33,6 +33,24 @@ pub struct Target {
     /// re-measure a subtree it is about to rename in one syscall; it reports
     /// the plan's own number, partitioned by what actually happened to it.
     pub reviewed_bytes: u64,
+}
+
+/// A permanent removal. There is no Trash here and no undo; the plan that
+/// authorised it said so, and `--permanent` at apply time only acknowledged
+/// what that plan already contained.
+pub struct EraseRequest {
+    pub plan_id: String,
+    pub journal_directory: PathBuf,
+    pub targets: Vec<Target>,
+}
+
+/// Emptying Trash. Each directory must look like a Trash before anything in it
+/// is touched, so a plan that named the wrong directory cannot erase somebody's
+/// documents on the strength of being listed as Trash.
+pub struct EmptyTrashRequest {
+    pub plan_id: String,
+    pub journal_directory: PathBuf,
+    pub trash_directories: Vec<Vec<u8>>,
 }
 
 pub struct TrashRequest {
@@ -86,18 +104,77 @@ pub fn run_trash(
     report: &mut dyn FnMut(ItemReport),
     cancelled: &AtomicBool,
 ) -> Result<ActionSummary, ActionRefusal> {
+    let home_trash = request.home_trash_directory.clone();
+    run_action(
+        Operation::Trash,
+        &request.plan_id,
+        &request.journal_directory,
+        &request.targets,
+        report,
+        cancelled,
+        |guard, journal, journal_id, position, target| {
+            trash_one(guard, &home_trash, journal, journal_id, position, target)
+        },
+    )
+}
+
+/// Remove every reviewed target permanently. Nothing here is recoverable, and
+/// the result says so: no bytes moved to Trash, and no undo.
+pub fn run_erase(
+    request: &EraseRequest,
+    report: &mut dyn FnMut(ItemReport),
+    cancelled: &AtomicBool,
+) -> Result<ActionSummary, ActionRefusal> {
+    run_action(
+        Operation::Erase,
+        &request.plan_id,
+        &request.journal_directory,
+        &request.targets,
+        report,
+        cancelled,
+        erase_one,
+    )
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Operation {
+    Trash,
+    Erase,
+    EmptyTrash,
+}
+
+impl Operation {
+    fn as_str(self) -> &'static str {
+        match self {
+            Operation::Trash => "trash",
+            Operation::Erase => "erase",
+            Operation::EmptyTrash => "empty-trash",
+        }
+    }
+
+    /// Only a Trash move leaves something to put back.
+    fn reversible(self) -> bool {
+        self == Operation::Trash
+    }
+}
+
+/// The sequence every mutation shares. An operation supplies only what it does
+/// to one item once that item has been judged.
+fn run_action(
+    operation: Operation,
+    plan_id: &str,
+    journal_directory: &Path,
+    targets: &[Target],
+    report: &mut dyn FnMut(ItemReport),
+    cancelled: &AtomicBool,
+    mut act: impl FnMut(&Guard, &Journal, &str, u64, &Target) -> ItemReport,
+) -> Result<ActionSummary, ActionRefusal> {
     let guard = Guard::new(&GuardContext {
-        journal_directory: Some(
-            request
-                .journal_directory
-                .as_os_str()
-                .as_encoded_bytes()
-                .to_vec(),
-        ),
+        journal_directory: Some(journal_directory.as_os_str().as_encoded_bytes().to_vec()),
     })
     .map_err(|refusal| ActionRefusal::new(refusal.code, refusal.message))?;
 
-    let journal = Journal::open(&request.journal_directory).map_err(|error| {
+    let journal = Journal::open(journal_directory).map_err(|error| {
         ActionRefusal::new(
             "journal-write-failed",
             format!("The action journal could not be opened: {error}"),
@@ -106,14 +183,11 @@ pub fn run_trash(
 
     // Read free space before anything moves, on the filesystem holding the
     // first target's parent: the target itself is about to stop existing there.
-    let anchor = request
-        .targets
-        .first()
-        .map(|target| parent_path(&target.path));
+    let anchor = targets.first().map(|target| parent_path(&target.path));
     let free_before = anchor.as_deref().and_then(guard::free_bytes);
 
     let journal_id = journal
-        .begin(&request.plan_id, "trash", free_before)
+        .begin(plan_id, operation.as_str(), free_before)
         .map_err(|error| {
             ActionRefusal::new(
                 "journal-write-failed",
@@ -125,7 +199,7 @@ pub fn run_trash(
     let mut undo_available = false;
     let mut cancelled_early = false;
 
-    for (position, target) in request.targets.iter().enumerate() {
+    for (position, target) in targets.iter().enumerate() {
         counts.selected_bytes = counts.selected_bytes.saturating_add(target.reviewed_bytes);
 
         // Cancellation is read between items and never inside one. Stopping
@@ -145,19 +219,15 @@ pub fn run_trash(
             continue;
         }
 
-        let outcome = trash_one(
-            &guard,
-            &request.home_trash_directory,
-            &journal,
-            &journal_id,
-            position as u64,
-            target,
-        );
+        let outcome = act(&guard, &journal, &journal_id, position as u64, target);
         match &outcome.outcome {
             Outcome::Completed => {
                 counts.completed += 1;
-                counts.trashed_bytes = counts.trashed_bytes.saturating_add(target.reviewed_bytes);
-                undo_available = true;
+                if operation.reversible() {
+                    counts.trashed_bytes =
+                        counts.trashed_bytes.saturating_add(target.reviewed_bytes);
+                    undo_available = true;
+                }
             }
             Outcome::Skipped => counts.skipped += 1,
             _ => counts.failed += 1,
@@ -308,6 +378,301 @@ fn trash_one(
         None,
     );
     report
+}
+
+/// Remove one reviewed target for good.
+///
+/// The revalidation above it is what stops an addition: a directory somebody
+/// dropped a file into since review has a different modification time, so it
+/// is skipped rather than erased with the new file inside it. Below the
+/// reviewed entry there is no second manifest — the plan named this directory,
+/// and the whole of it goes — which is why the preview says so and why a
+/// changed one is refused rather than re-reviewed here.
+fn erase_one(
+    guard: &Guard,
+    journal: &Journal,
+    journal_id: &str,
+    position: u64,
+    target: &Target,
+) -> ItemReport {
+    let refuse = |code: &'static str, message: String, outcome: Outcome| ItemReport {
+        path: target.path.clone(),
+        outcome,
+        reason: Some(code),
+        message: Some(message),
+        bytes: 0,
+    };
+
+    if let Err(refusal) = guard.classify(&target.path) {
+        return refuse(refusal.code, refusal.message, Outcome::Failed);
+    }
+    let parent = match guard::resolve_parent(&target.path) {
+        Ok(parent) => parent,
+        Err(refusal) => {
+            let outcome = outcome_for(refusal.code);
+            return refuse(refusal.code, refusal.message, outcome);
+        }
+    };
+    let live = match guard::revalidate(&parent, &target.expected) {
+        Ok(live) => live,
+        Err(refusal) => {
+            let outcome = outcome_for(refusal.code);
+            return refuse(refusal.code, refusal.message, outcome);
+        }
+    };
+
+    if let Err(error) = journal.record_intent(journal_id, position, &target.path, None) {
+        return refuse(
+            "journal-write-failed",
+            format!("This item's intent could not be recorded, so it was not removed: {error}"),
+            Outcome::Failed,
+        );
+    }
+
+    let removed = remove_entry(parent.descriptor(), &parent.name, live.kind);
+    let report = match removed {
+        Ok(()) => ItemReport {
+            path: target.path.clone(),
+            outcome: Outcome::Completed,
+            reason: None,
+            message: None,
+            bytes: target.reviewed_bytes,
+        },
+        Err(error) => {
+            let (code, message) = describe_removal(&error);
+            ItemReport {
+                path: target.path.clone(),
+                outcome: Outcome::Failed,
+                reason: Some(code),
+                message: Some(message),
+                bytes: 0,
+            }
+        }
+    };
+
+    let _ = journal.record_outcome(
+        journal_id,
+        position,
+        report.outcome,
+        report.message.as_deref(),
+        report.bytes,
+        None,
+    );
+    report
+}
+
+/// Empty every directory that really is a Trash.
+pub fn run_empty_trash(
+    request: &EmptyTrashRequest,
+    report: &mut dyn FnMut(ItemReport),
+    cancelled: &AtomicBool,
+) -> Result<ActionSummary, ActionRefusal> {
+    // Every Trash directory is its own item, so one that is not a Trash refuses
+    // on its own without stopping the others.
+    let targets: Vec<Target> = request
+        .trash_directories
+        .iter()
+        .map(|path| Target {
+            path: path.clone(),
+            expected: UNCHECKED,
+            reviewed_bytes: 0,
+        })
+        .collect();
+
+    run_action(
+        Operation::EmptyTrash,
+        &request.plan_id,
+        &request.journal_directory,
+        &targets,
+        report,
+        cancelled,
+        empty_one,
+    )
+}
+
+/// A Trash directory has no reviewed fingerprint: it is named by its role, not
+/// by the identity it had at review time, and it is checked by what it holds.
+const UNCHECKED: Fingerprint = Fingerprint {
+    device: 0,
+    inode: 0,
+    mount_id: 0,
+    kind: EntryKind::Directory,
+    apparent_bytes: 0,
+    modified_nanoseconds: 0,
+};
+
+fn empty_one(
+    guard: &Guard,
+    journal: &Journal,
+    journal_id: &str,
+    position: u64,
+    target: &Target,
+) -> ItemReport {
+    let refuse = |code: &'static str, message: String| ItemReport {
+        path: target.path.clone(),
+        outcome: Outcome::Failed,
+        reason: Some(code),
+        message: Some(message),
+        bytes: 0,
+    };
+
+    if let Err(refusal) = guard.classify(&target.path) {
+        return refuse(refusal.code, refusal.message);
+    }
+    let parent = match guard::resolve_parent(&target.path) {
+        Ok(parent) => parent,
+        Err(refusal) => return refuse(refusal.code, refusal.message),
+    };
+    let directory = match sys::open_directory_no_symlinks(parent.descriptor(), &parent.name) {
+        Ok(descriptor) => descriptor,
+        Err(error) => {
+            return refuse(
+                "no-safe-trash",
+                format!("The Trash directory could not be opened: {error}"),
+            );
+        }
+    };
+
+    // The shape is the check. A directory holding `files` and `info` is a
+    // Trash; one that merely appears in a plan is not, and the difference is
+    // what stops a mistyped plan erasing somebody's documents.
+    let shaped = ["files", "info"].iter().all(|name| {
+        sys::metadata_at(directory, name.as_bytes())
+            .map(|metadata| metadata.kind == EntryKind::Directory)
+            .unwrap_or(false)
+    });
+    if !shaped {
+        sys::close(directory);
+        return refuse(
+            "protected-path",
+            "That directory holds no 'files' and 'info' pair, so it is not a Trash and nothing \
+             in it was touched."
+                .to_owned(),
+        );
+    }
+
+    if let Err(error) = journal.record_intent(journal_id, position, &target.path, None) {
+        sys::close(directory);
+        return refuse(
+            "journal-write-failed",
+            format!("This item's intent could not be recorded, so it was not emptied: {error}"),
+        );
+    }
+
+    let emptied = ["files", "info"]
+        .iter()
+        .try_for_each(|name| empty_directory(directory, name.as_bytes()));
+    sys::close(directory);
+
+    let report = match emptied {
+        Ok(()) => ItemReport {
+            path: target.path.clone(),
+            outcome: Outcome::Completed,
+            reason: None,
+            message: None,
+            bytes: 0,
+        },
+        Err(error) => {
+            let (code, message) = describe_removal(&error);
+            ItemReport {
+                path: target.path.clone(),
+                outcome: Outcome::Failed,
+                reason: Some(code),
+                message: Some(message),
+                bytes: 0,
+            }
+        }
+    };
+
+    let _ = journal.record_outcome(
+        journal_id,
+        position,
+        report.outcome,
+        report.message.as_deref(),
+        0,
+        None,
+    );
+    report
+}
+
+/// Remove everything inside a directory, leaving the directory itself.
+fn empty_directory(parent: libc::c_int, name: &[u8]) -> std::io::Result<()> {
+    // `remove_children` takes the descriptor and closes it with its stream.
+    remove_children(sys::open_directory_no_symlinks(parent, name)?)
+}
+
+/// Remove one entry, recursively if it is a directory.
+///
+/// A symlink is unlinked as the link object it is and never followed, which is
+/// what makes erasing a directory safe: a link inside it to somewhere else is
+/// removed, and what it pointed at is not.
+fn remove_entry(parent: libc::c_int, name: &[u8], kind: EntryKind) -> std::io::Result<()> {
+    if kind != EntryKind::Directory {
+        return sys::unlinkat(parent, name, false);
+    }
+    let descriptor = sys::open_directory_no_symlinks(parent, name)?;
+    remove_children(descriptor)?;
+    sys::unlinkat(parent, name, true)
+}
+
+/// Remove every entry under an open directory, depth first.
+///
+/// `openat2` without mount crossing is what refuses a nested mount: a tree with
+/// something mounted inside it fails rather than deleting through the mount
+/// point, and the item reports why.
+fn remove_children(descriptor: libc::c_int) -> std::io::Result<()> {
+    let mut stream = sys::Directory::from_descriptor(descriptor)?;
+    // One directory's names are read before any of them is removed: what
+    // `readdir` returns after entries have been unlinked under it is
+    // unspecified, and a walk that silently missed one would report a tree as
+    // gone while something was still in it. Memory follows the widest
+    // directory, not the size of the tree.
+    let mut names = Vec::new();
+    while let Some(name) = stream.next_name()? {
+        names.push(name);
+    }
+    let descriptor = stream.descriptor();
+    for name in names {
+        let metadata = match sys::metadata_at(descriptor, &name) {
+            Ok(metadata) => metadata,
+            // Something else removed it first. The outcome is the one asked
+            // for, so this is not a failure.
+            Err(error) if error.raw_os_error() == Some(libc::ENOENT) => continue,
+            Err(error) => return Err(error),
+        };
+        if metadata.kind == EntryKind::Directory {
+            let child = sys::open_directory_no_symlinks(descriptor, &name)?;
+            remove_children(child)?;
+            sys::unlinkat(descriptor, &name, true)?;
+        } else {
+            sys::unlinkat(descriptor, &name, false)?;
+        }
+    }
+    Ok(())
+}
+
+fn describe_removal(error: &std::io::Error) -> (&'static str, String) {
+    match error.raw_os_error() {
+        Some(libc::EXDEV) | Some(libc::ELOOP) => (
+            "protected-path",
+            "Something is mounted inside this tree, or a component of it is a symlink, so it \
+             was left alone rather than removed through the mount point."
+                .to_owned(),
+        ),
+        Some(libc::EACCES) | Some(libc::EPERM) => (
+            "permission-denied",
+            format!("This user may not remove part of the target: {error}"),
+        ),
+        Some(libc::ENOENT) => (
+            "changed-target",
+            "The target went away between the check and the removal.".to_owned(),
+        ),
+        Some(libc::ENOTEMPTY) | Some(libc::EBUSY) => (
+            "changed-target",
+            format!("The target changed while it was being removed: {error}"),
+        ),
+        _ => ("internal-error", format!("The removal failed: {error}")),
+    }
 }
 
 /// A refusal to resolve or revalidate is not a failure of this action: the

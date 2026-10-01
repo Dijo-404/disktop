@@ -289,11 +289,15 @@
       "additionalProperties": false,
       "required": [
         "planId",
+        "journalDirectory",
         "trashDirectories"
       ],
       "properties": {
         "planId": {
           "$ref": "common.json#/$defs/planId"
+        },
+        "journalDirectory": {
+          "$ref": "common.json#/$defs/pathBytes"
         },
         "trashDirectories": {
           "type": "array",
@@ -302,7 +306,8 @@
             "$ref": "common.json#/$defs/pathBytes"
           }
         }
-      }
+      },
+      "description": "Emptying Trash. Each named directory must hold a `files` and an `info` directory before anything in it is touched, so a plan naming the wrong directory cannot erase somebody's documents on the strength of being listed as Trash."
     },
     "queryIndexArguments": {
       "description": "One page of an existing scan index. The helper never returns the whole tree.",
