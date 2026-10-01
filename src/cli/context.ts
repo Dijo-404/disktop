@@ -1,6 +1,10 @@
 import type { DashboardService, DashboardSettings } from "../application/dashboard.js";
 import type { ExploreService } from "../application/explore.js";
+import type { ApplyService } from "../application/apply-action.js";
+import type { FindService } from "../application/find.js";
 import type { FootprintService } from "../application/footprint.js";
+import type { PlanService } from "../application/plan-action.js";
+import type { UndoService } from "../application/undo.js";
 import type { ScanService } from "../application/scan.js";
 import type { SnapshotService } from "../application/snapshots.js";
 import type { RawPath } from "../domain/models.js";
@@ -41,6 +45,20 @@ export interface InterruptSource {
 }
 
 /**
+ * The reviewed-action pipeline, as the surfaces see it.
+ *
+ * There is no fifth method and no way around these four: a handler cannot reach
+ * a helper, build a plan of its own, or delete anything.
+ */
+export interface ActionServices {
+  readonly plan: PlanService["plan"];
+  readonly apply: ApplyService["apply"];
+  readonly history: UndoService["history"];
+  readonly restore: UndoService["restore"];
+  readonly find: FindService["find"];
+}
+
+/**
  * Everything a command handler is allowed to reach. Services arrive already
  * built, so no CLI module constructs an adapter or decides where data comes
  * from; the composition root does that once.
@@ -53,6 +71,8 @@ export interface CliContext {
   readonly storage: StorageServices;
   /** What the detectors found. Discovery only; nothing here applies anything. */
   readonly footprint: FootprintService;
+  /** Reviewing, applying, undoing, and finding. The only path to a mutation. */
+  readonly actions: ActionServices;
   readonly signals: InterruptSource;
   readonly now: () => Date;
   /** Resolve a path the user typed against the working directory. */

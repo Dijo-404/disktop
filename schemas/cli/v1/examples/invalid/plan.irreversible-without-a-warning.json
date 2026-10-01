@@ -1,0 +1,22 @@
+{
+  "schemaVersion": "1",
+  "command": "clean plan",
+  "generatedAt": "2026-10-01T08:41:19.004Z",
+  "status": "complete",
+  "exitCode": 0,
+  "data": {
+    "plan": {
+      "id": "plan-20261001T084119004Z-9f2c1ab0",
+      "operation": "permanent",
+      "createdAt": "2026-10-01T08:41:19.004Z",
+      "expiresAt": "2026-10-01T09:41:19.004Z",
+      "providerId": "cache.language",
+      "scopeSummary": "1 directory, starting at /home/example/.cargo/registry",
+      "reversibility": "irreversible",
+      "permission": "user",
+      "exactItemCount": "1",
+      "selectedBytes": "7314112512",
+      "warnings": []
+    }
+  }
+}

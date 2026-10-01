@@ -1,0 +1,32 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/Dijo-404/disktop/schemas/cli/v1/apply.json",
+  "title": "disktop clean apply --json",
+  "description": "What applying one reviewed plan did, including what it refused to do.",
+  "type": "object",
+  "allOf": [
+    {
+      "$ref": "envelope.json"
+    }
+  ],
+  "properties": {
+    "command": {
+      "const": "clean apply"
+    },
+    "data": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "result"
+      ],
+      "properties": {
+        "result": {
+          "$ref": "common.json#/$defs/actionResult"
+        },
+        "plan": {
+          "$ref": "common.json#/$defs/actionPlan"
+        }
+      }
+    }
+  }
+}

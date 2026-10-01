@@ -3,6 +3,8 @@ import type { ScanSummary } from "../application/scan.js";
 import type { SnapshotDiff } from "../application/snapshots.js";
 import type { FootprintSummary, ProviderReport } from "../application/footprint.js";
 import type { TypeTotal } from "../ports/scan.js";
+import type { ActionPlan, ActionResult } from "../domain/actions.js";
+import type { JournalRecord } from "../ports/actions.js";
 import type { SnapshotSummary } from "../ports/snapshots.js";
 import { formatBytes, usedPercentOfInodes, usedPercentOfSpace } from "../domain/sizes.js";
 
@@ -230,4 +232,81 @@ export function providerLines(reports: readonly ProviderReport[]): string[] {
   return reports
     .filter((report) => !report.ran)
     .map((report) => `${report.providerId}: ${report.capability.status}: ${report.capability.explanation}`);
+}
+
+/**
+ * A plan, read before anybody agrees to it.
+ *
+ * Scope, totals, reversibility, and every warning come before the command that
+ * would carry it out, because somebody skimming this has to be able to stop.
+ */
+export function planLines(plan: ActionPlan, units: Units): string[] {
+  const lines = [
+    `Plan ${plan.id}`,
+    `  ${plan.operation === "trash" ? "Move to Trash" : "Remove permanently"}: ${plan.scopeSummary}`,
+    `  Selected: ${formatBytes(plan.selectedBytes, units)}${
+      plan.exactItemCount === undefined ? "" : ` across ${plan.exactItemCount} reviewed item(s)`
+    }`,
+    `  Reversible: ${plan.reversibility === "undo-from-trash" ? "yes, with 'disktop undo'" : "no"}`,
+    `  Expires: ${plan.expiresAt}`,
+  ];
+  if (plan.regenerationCost !== undefined) {
+    lines.push(`  If you need it back: ${plan.regenerationCost}`);
+  }
+  for (const warning of plan.warnings) {
+    lines.push(`  ! ${warning}`);
+  }
+  lines.push(
+    "",
+    `Apply it with: disktop clean apply ${plan.id} --yes${
+      plan.reversibility === "irreversible" ? " --permanent" : ""
+    }`,
+  );
+  return lines;
+}
+
+/**
+ * What an action did, with the three numbers kept apart.
+ *
+ * Bytes moved to Trash is not space anybody got back, and the observed change
+ * is not this action's doing alone. Printing them on one line as a single
+ * figure would be the one lie this whole pipeline exists to avoid.
+ */
+export function resultLines(
+  result: ActionResult,
+  observedFreeSpaceChange: bigint | undefined,
+  notes: readonly string[],
+  units: Units,
+): string[] {
+  const lines = [
+    `${result.completed} completed, ${result.skipped} skipped, ${result.failed} failed (${result.state})`,
+    `  Selected:            ${formatBytes(result.selectedBytes, units)}`,
+    `  Moved to Trash:      ${formatBytes(result.bytesMovedToTrash, units)}`,
+    `  Free space changed:  ${
+      observedFreeSpaceChange === undefined
+        ? "not readable"
+        : formatBytes(observedFreeSpaceChange, units)
+    }`,
+    `  Journal record:      ${result.journalId}`,
+  ];
+  if (result.undoAvailable) {
+    lines.push(`  Undo it with: disktop undo ${result.journalId} --yes`);
+  }
+  for (const note of notes) {
+    lines.push(`  note: ${note}`);
+  }
+  return lines;
+}
+
+export function historyLines(records: readonly JournalRecord[], units: Units): string[] {
+  if (records.length === 0) {
+    return ["Disktop has not changed anything on this machine."];
+  }
+  return records.map((record) => {
+    const undo = record.operation === "trash" && record.state !== "uncertain" ? "  undo available" : "";
+    return `${record.startedAt}  ${record.operation.padEnd(12)} ${record.state.padEnd(10)} ${formatBytes(
+      record.bytesMovedToTrash,
+      units,
+    ).padStart(12)} to Trash  ${record.id}${undo}`;
+  });
 }
