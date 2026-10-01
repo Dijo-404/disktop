@@ -2,6 +2,7 @@ import type { CliContext } from "./context.js";
 import { parseArguments, renderHelp, type CommandSpec, type ParsedCommand } from "./parser.js";
 import { EXIT, buildEnvelope, writeEnvelope } from "./output.js";
 import { runAlertsCheck, parseThreshold } from "./commands/alerts.js";
+import { runClean } from "./commands/clean.js";
 import { runDashboard } from "./commands/dashboard.js";
 import { runDevices } from "./commands/devices.js";
 import { runExplore } from "./commands/explore.js";
@@ -64,6 +65,14 @@ export async function runCli(args: readonly string[], context: CliContext): Prom
       ...(optional(parsed, "cursor")),
       typeTotals: parsed.flags.has("type-totals"),
     } as Parameters<typeof runExplore>[1]);
+  }
+  if (name === "clean") {
+    return runClean(withUnits, {
+      asJson,
+      ...(optional(parsed, "category")),
+      ...(optional(parsed, "limit")),
+      measureSizes: !parsed.flags.has("no-sizes"),
+    });
   }
   if (name === "snapshots") {
     return runSnapshots(withUnits, {
