@@ -40,10 +40,10 @@
         },
         "providers": {
           "type": "array",
-          "minItems": 1,
           "items": {
             "$ref": "common.json#/$defs/providerReport"
-          }
+          },
+          "description": "Every detector that was asked, including the ones that could not look. A category filter that matches no detector leaves this empty; it is never omitted."
         },
         "categoryTotals": {
           "type": "array",

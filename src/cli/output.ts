@@ -2,6 +2,8 @@ import type { Alert, Capability, Filesystem, IndexedEntry, RawPath, ScanComplete
 import type { ScanTotals, TypeTotal } from "../ports/scan.js";
 import type { SnapshotSummary } from "../ports/snapshots.js";
 import type { DirectoryChange } from "../application/snapshots.js";
+import type { ProviderReport } from "../application/footprint.js";
+import type { CategoryTotal, Finding, FindingSize } from "../domain/findings.js";
 import { decimalBytes } from "../domain/sizes.js";
 import type { OperationFailure } from "../domain/errors.js";
 
@@ -210,5 +212,51 @@ export function encodeDirectoryChange(change: DirectoryChange): Record<string, u
     earlierBytes: decimalBytes(change.earlierBytes),
     laterBytes: decimalBytes(change.laterBytes),
     deltaBytes: change.deltaBytes.toString(10),
+  };
+}
+
+export function encodeFindingSize(size: FindingSize): Record<string, unknown> {
+  return {
+    ...(size.bytes === undefined ? {} : { bytes: decimalBytes(size.bytes) }),
+    basis: size.basis,
+    explanation: size.explanation,
+  };
+}
+
+export function encodeFinding(finding: Finding): Record<string, unknown> {
+  return {
+    id: finding.id,
+    providerId: finding.providerId,
+    providerVersion: finding.providerVersion,
+    category: finding.category,
+    title: finding.title,
+    evidence: [...finding.evidence],
+    paths: finding.paths.map(encodeRawPath),
+    ...(finding.managerScope === undefined ? {} : { managerScope: finding.managerScope }),
+    size: encodeFindingSize(finding.size),
+    confidence: finding.confidence,
+    capability: encodeCapability(finding.capability),
+    availableActionIds: [...finding.availableActionIds],
+    ...(finding.regenerationCost === undefined ? {} : { regenerationCost: finding.regenerationCost }),
+    active: finding.active,
+  };
+}
+
+export function encodeProviderReport(report: ProviderReport): Record<string, unknown> {
+  return {
+    providerId: report.providerId,
+    version: report.version,
+    capability: encodeCapability(report.capability),
+    findings: report.findings,
+    complete: report.complete,
+  };
+}
+
+export function encodeCategoryTotal(total: CategoryTotal): Record<string, unknown> {
+  return {
+    category: total.category,
+    findings: total.findings,
+    bytes: decimalBytes(total.bytes),
+    unmeasured: total.unmeasured,
   };
 }

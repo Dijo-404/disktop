@@ -1,5 +1,6 @@
 import type { DashboardService, DashboardSettings } from "../application/dashboard.js";
 import type { ExploreService } from "../application/explore.js";
+import type { FootprintService } from "../application/footprint.js";
 import type { ScanService } from "../application/scan.js";
 import type { SnapshotService } from "../application/snapshots.js";
 import type { RawPath } from "../domain/models.js";
@@ -50,6 +51,8 @@ export interface CliContext {
   readonly settings: CliSettings;
   readonly dashboard: DashboardService;
   readonly storage: StorageServices;
+  /** What the detectors found. Discovery only; nothing here applies anything. */
+  readonly footprint: FootprintService;
   readonly signals: InterruptSource;
   readonly now: () => Date;
   /** Resolve a path the user typed against the working directory. */
