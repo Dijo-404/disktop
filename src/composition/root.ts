@@ -164,6 +164,7 @@ export async function createServices(options: CompositionOptions = {}): Promise<
           rawPathFromUtf8(locations.configDirectory),
           rawPathFromUtf8(homeTrashDirectory),
         ],
+        trashDirectory: rawPathFromUtf8(homeTrashDirectory),
         expiryMinutes: config.cleanup.planExpiryMinutes,
       },
       now: () => new Date(),

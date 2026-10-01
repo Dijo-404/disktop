@@ -47,11 +47,24 @@ item's intent to the journal, performs one constrained syscall, and writes the
 outcome. A Trash move reserves its `.trashinfo` with an exclusive create and renames
 with `RENAME_NOREPLACE`, so the kernel refuses rather than overwriting.
 
+An item whose outcome could not be written to the journal is reported `uncertain`, not
+completed: the record is the authority an undo and a restart read, so an outcome nobody
+could record is something Disktop cannot prove happened.
+
+`clean plan --operation empty-trash` plans the one operation whose target the generic
+policy excludes. It can name this user's own Trash and nothing else, the helper checks
+the same thing from its side against the home Trash it was given and the two per-mount
+locations the specification defines, and it is irreversible, so applying it needs
+`--permanent`.
+
 `history` reconciles before it lists: an item whose intent was written and whose
 outcome was not reads as `uncertain`, and the action holding it is uncertain too.
 `undo` refuses a permanent removal, refuses an unreconciled action, and restores with
 `RENAME_NOREPLACE`, so a name something else has taken is skipped and the newer file
-is left alone.
+is left alone. It also compares what is in Trash against the device and inode recorded
+when the move happened: a name is free again the moment somebody takes the original out
+by hand, and an undo that trusted the name alone would move a stranger's file to a path
+it never came from.
 
 ### Limits this phase does not remove
 

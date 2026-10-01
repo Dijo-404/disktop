@@ -44,14 +44,16 @@ export interface FindOptions {
 }
 
 /** The operations `clean plan` can fix today. The rest belong to later phases. */
-const PLANNABLE: readonly ActionOperation[] = ["trash", "permanent"];
+const PLANNABLE: readonly ActionOperation[] = ["trash", "permanent", "empty-trash"];
 
 /**
  * Review one finding or path into a stored plan. Nothing changes on disk here;
  * a plan is a description that `clean apply` may later act on.
  */
 export async function runPlan(context: CliContext, options: PlanOptions): Promise<number> {
-  if (options.findingId === undefined && options.path === undefined) {
+  const operation = (options.operation ?? "trash") as ActionOperation;
+  // Emptying Trash needs no subject: Disktop already knows where Trash is.
+  if (operation !== "empty-trash" && options.findingId === undefined && options.path === undefined) {
     return refuse(context, "clean plan", options.asJson, {
       code: "invalid-input",
       message: "'clean plan' needs a FINDING_ID, or --path with a path to review.",
@@ -64,11 +66,10 @@ export async function runPlan(context: CliContext, options: PlanOptions): Promis
     });
   }
 
-  const operation = (options.operation ?? "trash") as ActionOperation;
   if (!PLANNABLE.includes(operation)) {
     return refuse(context, "clean plan", options.asJson, {
       code: "not-implemented",
-      message: `'--operation ${operation}' is declared but not implemented yet. 'trash' and 'permanent' work today.`,
+      message: `'--operation ${operation}' is declared but not implemented yet. ${PLANNABLE.join(", ")} work today.`,
     });
   }
 

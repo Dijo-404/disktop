@@ -156,6 +156,45 @@ test("Trash moves nothing out of the way of free space, and emptying it does", a
   assert.ok(result.notes.some((note) => /until Trash is emptied/i.test(note)));
 });
 
+test("emptying Trash releases the space a Trash move did not", async () => {
+  const home = await disktopHome();
+  const tree = await createActionTree(home);
+
+  const trashed = planAndApply(home, tree.cache);
+  assert.equal(trashed.status, 0);
+  assert.equal(existsSync(join(trashFiles(home), "pip", "wheel.bin")), true);
+
+  const emptied = planAndApply(home, join(home, "data", "Trash"), {
+    planWith: ["--operation", "empty-trash"],
+    applyWith: ["--permanent"],
+  });
+  assert.equal(emptied.status, 0);
+  assert.equal(emptied.plan.operation, "empty-trash");
+  assert.equal(emptied.plan.reversibility, "irreversible");
+  assert.equal(emptied.apply.data.result.bytesMovedToTrash, "0", "nothing went into Trash");
+  assert.equal(emptied.apply.data.result.undoAvailable, false);
+  assert.equal(existsSync(join(trashFiles(home), "pip")), false);
+  assert.equal(existsSync(join(trashInfo(home), "pip.trashinfo")), false);
+  assert.equal(existsSync(trashFiles(home)), true, "the Trash itself stays");
+
+  // What Trash was holding is gone for good, so the undo is refused rather
+  // than reported as having restored nothing.
+  const refused = disktop(home, ["undo", trashed.apply.data.result.journalId, "--yes", "--json"]);
+  assert.equal(refused.status, 3, "the undo found nothing left to put back");
+});
+
+test("empty-trash cannot be pointed at an ordinary directory", async () => {
+  const home = await disktopHome();
+  const tree = await createActionTree(home);
+
+  const refused = disktop(home, [
+    "clean", "plan", "--path", tree.artifacts, "--operation", "empty-trash", "--json",
+  ]);
+  assert.equal(refused.status, 2);
+  assert.equal(JSON.parse(refused.stdout).error.code, "protected-path");
+  assert.equal(existsSync(tree.artifacts), true);
+});
+
 test("a protected root is refused at planning time and never reaches the helper", async () => {
   const home = await disktopHome();
   await createActionTree(home);

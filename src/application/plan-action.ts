@@ -26,6 +26,8 @@ export interface PlanSettings {
   readonly allowedRoots: readonly RawPath[];
   /** Trash, Disktop's own state, and anything else named as off limits. */
   readonly excludedRoots: readonly RawPath[];
+  /** This user's own Trash, which only `empty-trash` may name as a target. */
+  readonly trashDirectory: RawPath;
   readonly expiryMinutes: number;
 }
 
@@ -49,7 +51,7 @@ export interface PlanDependencies {
 }
 
 /** The operations a generic plan may fix. Everything else belongs to a later phase. */
-const GENERIC_OPERATIONS: readonly ActionOperation[] = ["trash", "permanent"];
+const GENERIC_OPERATIONS: readonly ActionOperation[] = ["trash", "permanent", "empty-trash"];
 
 /**
  * Turn a finding or a selected path into a reviewed, immutable plan.
@@ -81,10 +83,24 @@ export function createPlanService(dependencies: PlanDependencies): PlanService {
         return { kind: "refused", failure: subject.failure };
       }
 
-      for (const path of subject.paths) {
-        const verdict = classifyGenericTarget(path, context);
-        if (!verdict.allowed) {
-          return refuse(verdict.code, `${path.display} cannot be cleaned up: ${verdict.reason}.`);
+      // Emptying Trash is the one operation whose target is a directory the
+      // generic policy excludes, so it is judged by a rule of its own: it may
+      // name this user's Trash and nothing else. Every other operation goes
+      // through the policy that refuses Trash along with everything else.
+      if (request.operation === "empty-trash") {
+        const trash = dependencies.settings.trashDirectory;
+        if (subject.paths.some((path) => path.bytesBase64 !== trash.bytesBase64)) {
+          return refuse(
+            "protected-path",
+            `Only ${trash.display} can be emptied. 'empty-trash' is not a way to remove an ordinary directory.`,
+          );
+        }
+      } else {
+        for (const path of subject.paths) {
+          const verdict = classifyGenericTarget(path, context);
+          if (!verdict.allowed) {
+            return refuse(verdict.code, `${path.display} cannot be cleaned up: ${verdict.reason}.`);
+          }
         }
       }
 
@@ -153,6 +169,17 @@ async function resolveSubject(
   request: PlanRequest,
   signal: AbortSignal,
 ): Promise<Subject | { readonly failure: OperationFailure }> {
+  if (request.operation === "empty-trash") {
+    const trash = request.path ?? dependencies.settings.trashDirectory;
+    return {
+      paths: [trash],
+      providerId: "trash",
+      warnings: [
+        "Everything in Trash goes. Anything Disktop moved there is no longer recoverable with 'disktop undo'.",
+      ],
+    };
+  }
+
   if (request.path !== undefined) {
     return {
       paths: [request.path],
@@ -277,7 +304,12 @@ function toEntry(path: RawPath, facts: PathFacts, measuredBytes: bigint | undefi
       mountId: facts.mountId,
       kind: facts.kind as "file" | "directory" | "symlink",
       apparentBytes: facts.apparentBytes,
-      modifiedNanoseconds: facts.modifiedNanoseconds,
+      // A restored archive or a network filesystem can hand back a timestamp
+      // before the epoch. The helper clamps those to zero, and a plan that
+      // carried a negative one would compare against a number the other side
+      // cannot hold, after failing to serialise on the way out.
+      modifiedNanoseconds:
+        facts.modifiedNanoseconds < 0n ? 0n : facts.modifiedNanoseconds,
     },
     // What a person is told they are reclaiming is what was measured on disk,
     // not what the files claim to be. For a directory that means its whole

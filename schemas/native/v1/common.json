@@ -621,6 +621,13 @@
         },
         "bytes": {
           "$ref": "#/$defs/decimalInteger"
+        },
+        "movedDevice": {
+          "description": "The device of what was moved. A destination is a name, and a name is free again as soon as the file leaves Trash, so an undo compares this before it moves anything back.",
+          "$ref": "#/$defs/decimalInteger"
+        },
+        "movedInode": {
+          "$ref": "#/$defs/decimalInteger"
         }
       }
     },

@@ -14,7 +14,7 @@ Status: planned `1.0.0` command surface. `devices`, the `--json` dashboard, `ale
 | `disktop explore [PATH] [--json]` | One page of `PATH` and everything below it, from the most recent scan covering it. `--sort`, `--order`, `--kind`, `--min-size`, `--max-size`, `--ext`, `--name`, `--older-than DAYS`, `--limit`, `--cursor`, `--type-totals`. |
 | `disktop snapshots list\|diff [--json]` | Lists saved snapshots, or compares two of them (`--from`, `--to`; the two most recent by default). |
 | `disktop clean [--json]` | Lists what every detector found, and changes nothing. `--dry-run` is accepted and redundant. `--category CATEGORY` narrows the list, `--limit COUNT` shortens it, and `--no-sizes` skips measurement so every size stays unknown. |
-| `disktop clean plan [FINDING_ID] [--path PATH] [--operation trash\|permanent] [--json]` | Reviews one finding or path into a stored, expiring plan. Changes nothing. |
+| `disktop clean plan [FINDING_ID] [--path PATH] [--operation trash\|permanent\|empty-trash] [--json]` | Reviews one finding or path into a stored, expiring plan. Changes nothing. `--operation empty-trash` needs no subject and can name only this user's own Trash. |
 | `disktop clean apply PLAN_ID --yes [--permanent] [--json]` | Applies an already-reviewed plan, revalidating every item against the identity the plan recorded. |
 | `disktop history [--json]` | The durable action journal, with interrupted records resolved as it is read. |
 | `disktop undo ACTION_ID --yes [--json]` | Puts back what one Trash action moved. |

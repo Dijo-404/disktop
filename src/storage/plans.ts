@@ -6,9 +6,8 @@ import type {
   ActionPlan,
   EntryFingerprint,
   PlannedEntry,
-  Reversibility,
 } from "../domain/actions.js";
-import { isExpired } from "../domain/actions.js";
+import { ACTION_OPERATIONS, isExpired, reversibilityOf } from "../domain/actions.js";
 import type { RawPath } from "../domain/models.js";
 import { rawPathFromBytes } from "../domain/paths.js";
 import { decimalBytes, parseDecimalBytes } from "../domain/sizes.js";
@@ -158,15 +157,23 @@ function decodePlan(document: unknown): ActionPlan | undefined {
     return undefined;
   }
   const entries = document.entries;
+  // An operation this build does not know is a plan it cannot carry out, and
+  // guessing at one would be running something nobody reviewed.
+  const operation = text(document.operation) as ActionOperation;
+  if (!ACTION_OPERATIONS.includes(operation)) {
+    return undefined;
+  }
   const plan: ActionPlan = {
     id: text(document.id),
-    operation: text(document.operation) as ActionOperation,
+    operation,
     createdAt: text(document.createdAt),
     expiresAt: text(document.expiresAt),
     providerId: text(document.providerId),
     ...(document.findingId === undefined ? {} : { findingId: text(document.findingId) }),
     scopeSummary: text(document.scopeSummary),
-    reversibility: text(document.reversibility) as Reversibility,
+    // Re-derived, never read: a stored claim that a permanent removal can be
+    // undone would slip past the acknowledgement an irreversible plan needs.
+    reversibility: reversibilityOf(operation),
     permission: text(document.permission) === "manager-privilege" ? "manager-privilege" : "user",
     ...(document.exactItemCount === undefined
       ? {}

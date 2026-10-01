@@ -134,8 +134,11 @@ export function createApplyService(dependencies: ApplyDependencies): ApplyServic
 
 function describe(plan: ActionPlan): string {
   const scope = plan.scopeSummary;
-  return plan.operation === "trash"
-    ? `move ${scope} to Trash`
+  if (plan.operation === "trash") {
+    return `move ${scope} to Trash`;
+  }
+  return plan.operation === "empty-trash"
+    ? `empty ${scope}, which releases everything Disktop has moved there`
     : `remove ${scope} permanently`;
 }
 

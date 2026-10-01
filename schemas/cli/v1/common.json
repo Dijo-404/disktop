@@ -657,11 +657,12 @@
       ]
     },
     "actionOperation": {
-      "description": "An operation a later phase could offer for this finding. Phase 3 discovers; it applies nothing.",
+      "description": "An operation a plan can fix. `empty-trash` releases everything in this user's Trash and is irreversible; it can name no other directory.",
       "type": "string",
       "enum": [
         "trash",
         "permanent",
+        "empty-trash",
         "move",
         "compress",
         "dedup-hardlink",

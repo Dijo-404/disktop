@@ -4,6 +4,7 @@ import type { Bytes, RawPath } from "./models.js";
 export type ActionOperation =
   | "trash"
   | "permanent"
+  | "empty-trash"
   | "move"
   | "compress"
   | "dedup-hardlink"
@@ -97,7 +98,29 @@ export interface PlanInput {
   readonly random?: () => string;
 }
 
-const IRREVERSIBLE: readonly ActionOperation[] = ["permanent", "dedup-hardlink"];
+export const ACTION_OPERATIONS: readonly ActionOperation[] = [
+  "trash",
+  "permanent",
+  "empty-trash",
+  "move",
+  "compress",
+  "dedup-hardlink",
+  "manager",
+];
+
+const IRREVERSIBLE: readonly ActionOperation[] = ["permanent", "empty-trash", "dedup-hardlink"];
+
+/**
+ * Whether what an operation does can be taken back.
+ *
+ * This is the only place that decides. A stored plan's own claim about its
+ * reversibility is re-derived from its operation rather than believed, so a
+ * file that said a permanent removal could be undone cannot slip past the
+ * acknowledgement an irreversible plan needs.
+ */
+export function reversibilityOf(operation: ActionOperation): Reversibility {
+  return IRREVERSIBLE.includes(operation) ? "irreversible" : "undo-from-trash";
+}
 
 const IRREVERSIBLE_WARNING =
   "This cannot be undone. The bytes are released rather than moved, and no journal entry can bring them back.";
@@ -135,9 +158,7 @@ export function buildPlan(input: PlanInput): ActionPlan {
     throw new RangeError("A plan has to expire at some point after it was made");
   }
 
-  const reversibility: Reversibility = IRREVERSIBLE.includes(input.operation)
-    ? "irreversible"
-    : "undo-from-trash";
+  const reversibility = reversibilityOf(input.operation);
   const warnings = [...input.warnings];
   if (reversibility === "irreversible" && !warnings.includes(IRREVERSIBLE_WARNING)) {
     warnings.push(IRREVERSIBLE_WARNING);

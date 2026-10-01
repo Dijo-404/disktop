@@ -119,6 +119,7 @@ struct RestoreArguments {
 struct EmptyTrashArguments {
     plan_id: String,
     journal_directory: String,
+    home_trash_directory: String,
     trash_directories: Vec<String>,
 }
 
@@ -1085,9 +1086,14 @@ fn empty_trash_request(
         }
         directories.push(path);
     }
+    let home_trash_directory = decode_path(&arguments.home_trash_directory)?;
+    if home_trash_directory.first() != Some(&b'/') {
+        return Err("homeTrashDirectory must be an absolute path".to_owned());
+    }
     Ok(actions::EmptyTrashRequest {
         plan_id: arguments.plan_id.clone(),
         journal_directory: decoded_directory(&arguments.journal_directory)?,
+        home_trash_directory,
         trash_directories: directories,
     })
 }
@@ -2227,11 +2233,15 @@ mod tests {
             .iter()
             .map(|directory| format!("\"{}\"", crate::base64::encode(directory)))
             .collect();
+        let mut home_trash = sandbox.bytes();
+        home_trash.extend_from_slice(b"/trash-home");
         format!(
             "{{\"protocolVersion\":1,\"requestId\":\"{id}\",\"operation\":\"empty-trash\",\
                \"arguments\":{{\"planId\":\"plan-0123456789abcd\",\
-               \"journalDirectory\":\"{}\",\"trashDirectories\":[{}]}}}}\n",
+               \"journalDirectory\":\"{}\",\"homeTrashDirectory\":\"{}\",\
+               \"trashDirectories\":[{}]}}}}\n",
             crate::base64::encode(&state),
+            crate::base64::encode(&home_trash),
             encoded.join(","),
         )
     }
@@ -2440,6 +2450,65 @@ mod tests {
             .find(|event| event["requestId"] == "restore-6" && event["event"] == "error")
             .expect("an unknown record is refused");
         assert_eq!(event["error"]["code"], "unknown-request");
+    }
+
+    #[test]
+    fn an_undo_refuses_a_name_that_now_holds_something_else_entirely() {
+        let sandbox = Sandbox::new("restore-identity");
+        sandbox.directory(b"work");
+        sandbox.file(b"work/notes.txt", 32);
+        let mut file = sandbox.bytes();
+        file.extend_from_slice(b"/work/notes.txt");
+
+        let trashed = run_trash("trash-40", &sandbox, &[target(&file, 32)]);
+        let journal_id = journal_id_of(&trashed, "trash-40");
+
+        // Something else takes the name in Trash: a file manager put the
+        // original back by hand, and a different file of the same name landed
+        // where it used to be.
+        let trashed_path = sandbox.path().join("trash-home/files/notes.txt");
+        std::fs::remove_file(&trashed_path).unwrap();
+        std::fs::write(&trashed_path, "a completely different file").unwrap();
+
+        let events = run_restore("restore-10", &sandbox, &journal_id);
+        let result = &completion(&events, "restore-10")["result"];
+        assert_eq!(result["completed"], "0");
+        assert_eq!(result["skipped"], "1");
+        assert_eq!(
+            std::fs::read_to_string(&trashed_path).unwrap(),
+            "a completely different file",
+            "the stranger in Trash was left exactly where it was",
+        );
+        assert!(
+            !sandbox.path().join("work/notes.txt").exists(),
+            "and it was not moved to a path it never came from",
+        );
+
+        let item = item_results(&events, "restore-10")[0];
+        assert_eq!(item["itemResult"]["reason"], "changed-target");
+    }
+
+    #[test]
+    fn emptying_refuses_a_directory_that_is_not_one_of_this_users_trashes() {
+        let sandbox = Sandbox::new("empty-foreign");
+        // The shape of a Trash, in a place no Trash belongs.
+        sandbox.directory(b"data/files");
+        sandbox.directory(b"data/info");
+        sandbox.file(b"data/files/thesis.txt", 4096);
+
+        let mut directory = sandbox.bytes();
+        directory.extend_from_slice(b"/data");
+        let events = session(
+            &[empty_trash_request("empty-10", &sandbox, &[directory])],
+            |events| terminal(events, "empty-10"),
+        );
+        let result = &completion(&events, "empty-10")["result"];
+        assert_eq!(result["failed"], "1");
+        assert!(sandbox.path().join("data/files/thesis.txt").exists());
+        assert_eq!(
+            item_results(&events, "empty-10")[0]["itemResult"]["reason"],
+            "protected-path"
+        );
     }
 
     /// Feeds `serve` one queued chunk at a time and reports end-of-stream only
