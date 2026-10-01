@@ -105,3 +105,40 @@ test("a directory whose name is not valid UTF-8 is measured from its bytes", asy
   assert.ok(reading.measurements[0].bytes > 0n, `measured ${reading.measurements[0].basis}: ${reading.measurements[0].explanation}`);
   assert.equal(reading.measurements[0].basis, "measured-allocated");
 });
+
+test("the helper groups a scan's files by owner and the totals reach Node intact", async () => {
+  const root = await sandbox();
+  await sizedDirectory(root, "owned", 6, 4096);
+  // The index lives outside the scanned tree: the helper's own database files
+  // would otherwise be counted as this user's files.
+  const scanner = createNativeScanner({
+    indexDirectory: join(await sandbox(), "index"),
+    start: () => NativeHelperClient.start(),
+  });
+
+  let scanId;
+  for await (const event of scanner.run(
+    { roots: [rawPathFromUtf8(root)], crossFilesystems: false, excludes: [], accounting: "allocated" },
+    new AbortController().signal,
+  )) {
+    if (event.kind === "complete") {
+      scanId = event.scanId;
+    }
+  }
+
+  const page = await scanner.query({
+    scanId,
+    filter: {},
+    sort: "allocated",
+    order: "descending",
+    limit: 1,
+    includeOwnerTotals: true,
+  });
+
+  assert.ok(Array.isArray(page.ownerTotals), "owner totals were requested");
+  const mine = page.ownerTotals.find((total) => total.ownerId === BigInt(process.getuid()));
+  assert.ok(mine !== undefined, `no row for this user in ${JSON.stringify(page.ownerTotals.map((t) => t.ownerId.toString()))}`);
+  assert.equal(mine.entries, 6n, "six regular files, with no directory row added in");
+  assert.ok(mine.allocatedBytes > 0n);
+  assert.equal(typeof mine.allocatedBytes, "bigint", "a byte total never passes through Number");
+});

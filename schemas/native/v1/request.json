@@ -313,6 +313,9 @@
         },
         "indexDirectory": {
           "$ref": "common.json#/$defs/pathBytes"
+        },
+        "includeOwnerTotals": {
+          "type": "boolean"
         }
       }
     }

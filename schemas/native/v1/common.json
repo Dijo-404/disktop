@@ -440,6 +440,12 @@
           "items": {
             "$ref": "#/$defs/typeTotal"
           }
+        },
+        "ownerTotals": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/ownerTotal"
+          }
         }
       }
     },
@@ -514,6 +520,31 @@
         "cancelled",
         "internal-error"
       ]
+    },
+    "ownerTotal": {
+      "description": "Bytes per owning user id over regular files only. Directory rows carry their whole subtree and a second hardlink carries bytes already attributed elsewhere, so including either would report more bytes than the filesystem holds.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "ownerId",
+        "entries",
+        "allocatedBytes",
+        "apparentBytes"
+      ],
+      "properties": {
+        "ownerId": {
+          "$ref": "#/$defs/decimalInteger"
+        },
+        "entries": {
+          "$ref": "#/$defs/decimalInteger"
+        },
+        "allocatedBytes": {
+          "$ref": "#/$defs/decimalInteger"
+        },
+        "apparentBytes": {
+          "$ref": "#/$defs/decimalInteger"
+        }
+      }
     }
   }
 }
