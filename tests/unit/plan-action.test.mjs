@@ -79,6 +79,21 @@ function service(overrides = {}) {
         },
       },
       paths: { async facts() { return overrides.facts ?? facts(); } },
+      footprints: {
+        async measure(paths) {
+          return {
+            measurements: paths.map((path) => ({
+              path,
+              ...(overrides.measured === null
+                ? {}
+                : { bytes: overrides.measured ?? 7_314_112_512n }),
+              basis: overrides.measured === null ? "unknown" : "measured-allocated",
+              explanation: "Blocks on disk, measured by the scan that covered this path.",
+            })),
+            warnings: [],
+          };
+        },
+      },
       store: { async save(plan) { saved.push(plan); } },
       settings: {
         home: HOME,
@@ -111,7 +126,12 @@ test("planning a finding fixes the identity each path had at review time", async
     apparentBytes: 4096n,
     modifiedNanoseconds: 1758000000123456789n,
   });
-  assert.equal(outcome.plan.entries[0].reviewedBytes, 41943040n);
+  assert.equal(
+    outcome.plan.entries[0].reviewedBytes,
+    7_314_112_512n,
+    "a directory is reviewed at its whole subtree, not at the bytes of its own inode",
+  );
+  assert.equal(outcome.plan.selectedBytes, 7_314_112_512n);
   assert.deepEqual(saved, [outcome.plan], "a plan is stored before it can be applied");
 });
 
@@ -210,4 +230,16 @@ test("an inventory that could not be read refuses every plan rather than skippin
   const outcome = await planner.plan({ operation: "trash", findingId: "cache.language:pip" }, SIGNAL);
   assert.equal(outcome.kind, "refused");
   assert.equal(outcome.failure.code, "invalid-plan");
+});
+
+test("a directory nothing could measure falls back to its own stat and says so", async () => {
+  const { service: planner } = service({ measured: null });
+  const outcome = await planner.plan({ operation: "trash", findingId: "cache.language:pip" }, SIGNAL);
+
+  assert.equal(outcome.kind, "planned");
+  assert.equal(outcome.plan.entries[0].reviewedBytes, 41943040n);
+  assert.ok(
+    outcome.plan.warnings.some((warning) => /could not be measured/i.test(warning)),
+    `warnings were ${JSON.stringify(outcome.plan.warnings)}`,
+  );
 });

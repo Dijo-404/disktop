@@ -37,7 +37,7 @@
       "pattern": "^[A-Za-z0-9._-]+$"
     },
     "entryFingerprint": {
-      "description": "What the reviewed plan observed. The helper refuses an item whose live identity differs.",
+      "description": "What the reviewed plan observed. The helper refuses an item whose live identity differs. Identity is the device, inode, kind, size, and modification time; `mountId` travels with them as context and is not compared, because the client cannot read the kernel's mount id and would be sending a number it invented.",
       "type": "object",
       "additionalProperties": false,
       "required": [

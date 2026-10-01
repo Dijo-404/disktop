@@ -1,6 +1,6 @@
 # Native helper protocol
 
-Status: version 1 is normative in [`schemas/native/v1/`](../schemas/native/v1/); the current Rust build implements the read operations `hello`, `probe`, `scan`, `query-index`, and `cancel`. It reports `buildChecksum: null` for development builds unless a build checksum is injected, and returns `unsupported-operation` for every recognized planned action operation. It cannot hash, mutate, or journal files. `schemas/native/v1/request.json` and `event.json` are the normative wire contract, validated by `tests/contract/native-schema.test.mjs` and, against the real process, by `tests/integration/native.test.mjs`. The operation list there is complete for `1.0.0`; argument schemas exist for `hello`, `probe`, `cancel`, `scan`, `query-index`, `trash`, `erase`, `empty-trash`, and `journal-reconcile`, result schemas for `hello`/`probe`, `scan`, and `query-index`, and the remaining planned operations narrow their `arguments` in the phase that implements them.
+Status: version 1 is normative in [`schemas/native/v1/`](../schemas/native/v1/); the current Rust build implements the reads `hello`, `probe`, `scan`, `query-index`, and `cancel`, the user-file actions `trash`, `erase`, `empty-trash`, and `restore`, and the recovery operation `journal-reconcile`. It reports `buildChecksum: null` for development builds unless a build checksum is injected, and returns `unsupported-operation` for every planned operation it does not yet implement. It cannot hash files, run a manager, copy across devices, or compress. `schemas/native/v1/request.json` and `event.json` are the normative wire contract, validated by `tests/contract/native-schema.test.mjs` and, against the real process, by `tests/integration/native.test.mjs`. The operation list there is complete for `1.0.0`; argument schemas exist for every implemented operation, result schemas for `hello`/`probe`, `scan`, `query-index`, the actions, and the journal, and the remaining planned operations narrow their `arguments` in the phase that implements them.
 
 ## Transport and negotiation
 
@@ -24,9 +24,10 @@ Device and inode IDs, counts, byte sizes, and nanosecond timestamps will cross I
 | Control | `cancel` | Stop a named in-flight request at a safe item boundary; the cancelled request still emits a final event. |
 | Implemented read | `scan`, `query-index` | Bounded `openat2` traversal into a SQLite index, and keyset-paginated pages out of it. |
 | Planned read | `hash-candidates`, `inspect` | Duplicate pipeline and live metadata. |
-| User-file actions | `trash`, `restore`, `erase`, `copy-move`, `compress`, `dedup-hardlink`, `empty-trash` | Recheck plan and target, perform constrained action, journal per-item outcome. |
+| Implemented actions | `trash`, `erase`, `empty-trash`, `restore` | Recheck plan and target, perform one constrained syscall, journal per-item outcome. |
+| Planned actions | `copy-move`, `compress`, `dedup-hardlink` | Staged output, verification, and publication without overwrite. |
 | Manager journal | `manager-begin`, `manager-append`, `manager-finish` | Record intent, progress, command result, and verification for a fixed-argument Linux manager adapter. The helper does not invent or execute manager commands. |
-| Recovery | `journal-reconcile` | Resolve interrupted records into honest completed, partial, or uncertain states. |
+| Recovery | `journal-reconcile` | Resolve interrupted records into honest completed, partial, or uncertain states, and return a page of history. Reconciling and listing are one operation because a caller that could list without reconciling would read a history still claiming an abandoned action is running. |
 
 The scanner opens each directory with `openat2` and `RESOLVE_BENEATH | RESOLVE_NO_SYMLINKS | RESOLVE_NO_MAGICLINKS`, adding `RESOLVE_NO_XDEV` unless `crossFilesystems` is set, so a symlink, a `..`, a procfs magic link, or a bind mount of the same filesystem cannot move it out of the subtree it was given. There is no fallback that drops those guarantees: a kernel that refuses `openat2` gets `unsupported-kernel` and no scan. It holds one open directory stream per level, so its descriptors and memory follow the tree's depth rather than its entry count, and it aggregates each directory on the way back up so a listing can rank directories by subtree size without a second pass.
 
@@ -36,12 +37,44 @@ Bytes are attributed once per `(device, inode)`. A second hardlink is indexed wi
 
 ## Mutation invariants
 
-Before an operation is implemented, the helper must validate the reviewed plan, protected paths, mount identity, parent directory safety, expected fingerprint, and destination no-overwrite behavior. It must use required Linux path-resolution features and refuse an action if they are unavailable. It will write intent and outcome records durably as the only action-history writer. A successful action response without a corresponding durable journal outcome will be a protocol violation.
+Every implemented action runs one sequence: classify the target against the
+protected-path policy the helper holds independently of Node, resolve its parent one
+segment at a time from `/` with `openat2`, `RESOLVE_BENEATH` and `RESOLVE_NO_SYMLINKS`,
+compare the live entry against the reviewed fingerprint, write the item's intent
+durably, perform one constrained syscall, write the outcome, and emit `item-result`.
+An item that fails a step stops at that step; the next item begins. The helper refuses
+the whole request when `openat2` is unavailable, when the mount table cannot be read,
+or when the invoking user's home directory cannot be resolved — each of those refuses
+every target rather than none.
 
-The action result must distinguish selected bytes, bytes moved to Trash, observed free-space change, completed/skipped/failed counts, and undo eligibility. A manager may only provide estimates or unknown item counts; those are never promoted to exact numbers. See [safety.md](safety.md) for the action sequence and recovery rules.
+Identity is the device, inode, type, size, and modification time. `mountId` travels
+with them as context and is not compared: a client cannot read `stx_mnt_id` through a
+filesystem API and would be sending a number it invented. Nothing is lost by leaving
+it out, because a filesystem swapped under the parent has a different device number
+and a bind mount of the same filesystem reaching the same inode is the same file.
+
+A parent directory any user can write to without a sticky bit is refused outright:
+owning such a directory does not stop anyone else renaming entries inside it, so there
+is no version of the check that wins that race.
+
+The helper writes intent and outcome records durably as the only action-history
+writer, with `synchronous = FULL`, because this file is the record a crash is judged
+against. A successful action response without a corresponding durable journal outcome
+is a protocol violation, and `src/native/protocol.ts` refuses such a result rather
+than returning it.
+
+The action result distinguishes selected bytes, bytes moved to Trash, the free-space
+readings before and after, completed/skipped/failed counts, and undo eligibility.
+Bytes are the plan's own measurement partitioned by outcome, not a fresh total: the
+helper renames a subtree in one syscall and does not walk it to re-measure what it is
+about to move. The free-space readings are the real observation beside it. A manager
+may only provide estimates or unknown item counts; those are never promoted to exact
+numbers. See [safety.md](safety.md) for the action sequence and recovery rules.
 
 ## Contract tests
 
-The Rust tests exercise the `hello` handshake, `probe` argument rejection, protocol mismatch, unknown fields, oversized requests, explicit rejection of a `trash` request, traversal over sandbox trees with hardlinks, symlinks, unreadable directories and names that are not valid UTF-8, index paging and filters, and a live cancellation that still produces a queryable index. `tests/integration/scan.test.mjs` drives the real binary through the CLI against fixture trees, compares allocated totals against `du -x`, and proves a bind mount is not descended into. They do not exercise mutation, which does not exist.
+The Rust tests exercise the `hello` handshake, `probe` argument rejection, protocol mismatch, unknown fields, oversized requests, explicit rejection of an operation this build does not implement, traversal over sandbox trees with hardlinks, symlinks, unreadable directories and names that are not valid UTF-8, index paging and filters, a live cancellation that still produces a queryable index, and every implemented action: a Trash move with its metadata, a name collision that keeps both files, a changed target that is skipped, a protected root that is refused, a recursive erase that removes a symlink without following it, emptying a directory that is shaped like a Trash and refusing one that is not, and a restore that refuses to overwrite whatever now occupies the original path.
+
+`tests/integration/scan.test.mjs` drives the real binary through the CLI against fixture trees, compares allocated totals against `du -x`, and proves a bind mount is not descended into. `tests/integration/actions.test.mjs` does the same for the action pipeline, including that bytes moved to Trash and observed free-space change are reported as distinct values. `tests/recovery/journal.test.mjs` kills the helper mid-action and reads the journal back.
 
 Contract fixtures should cover handshake mismatch, unknown fields, malformed lines, invalid base64 and UTF-8 bytes, large decimal integers, interleaved progress, cancellation, missing final events, changed targets, and restart reconciliation. CLI and helper schemas must be versioned together with deliberate migrations when persistent plans or journal records change.

@@ -55,6 +55,25 @@ alone was rejected because the helper is the component holding the descriptors.
 
 ## Evidence and follow-up
 
-Phase 4's gate: sandbox, symlink and bind-mount, collision, protected-root, invalid-byte,
-crash-injection, and undo tests, with moved-to-Trash and observed free-space reported as
-distinct values. Fault injection runs before and after every journal transition.
+Phase 4 met this gate. `tests/integration/actions.test.mjs` drives the real helper
+through the CLI against a throwaway home: a Trash move and its undo, a hostile name
+that round-trips byte for byte, a collision that keeps both files, a protected root
+refused at planning time, a symlinked parent that is not followed, a permanent erase
+that removes a link without following it and offers no undo, `--permanent` refused on
+a Trash plan, an expired plan, a changed target that is skipped, a journal record
+behind every action, and moved-to-Trash reported apart from an observed free-space
+change of zero. `tests/recovery/journal.test.mjs` kills the helper partway through a
+list of targets and asserts that the record never reads as complete, that no item is
+left claiming to be running after reconciliation, that nothing left its original path
+without the journal accounting for it, and that reconciling twice changes nothing.
+
+Two limits survive this phase and are documented rather than papered over. A reviewed
+directory is revalidated by its own identity, which catches an entry added to it and
+does not catch a file changed further below. And the last-component rename race in
+[threat-model.md](../threat-model.md) is unchanged: the helper narrows the window to
+one `statx` and one syscall against a parent descriptor it opened itself, and refuses
+a parent any user can write to without a sticky bit, but it does not claim to have
+closed it.
+
+Phases 5 and 6 extend the same pipeline to move, compression, hardlink replacement,
+and the manager adapters. None of them may add a code path around it.

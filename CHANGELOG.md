@@ -4,6 +4,43 @@ All public changes will be recorded here when the first complete Linux release i
 
 ## Unreleased
 
+### Phase 4: the safe action engine
+
+- Disktop can now change files. `disktop clean plan` reviews one finding or path
+  into a stored, expiring plan and changes nothing; `clean apply PLAN_ID --yes`
+  carries it out; `disktop history` reads the durable journal; `disktop undo
+  ACTION_ID --yes` puts back what a Trash move moved.
+- The plan fixes the operation at review time. `--permanent` acknowledges a plan
+  that is already irreversible; applying it to a Trash plan is refused rather than
+  read as an upgrade. A plan past its expiry describes a filesystem that may have
+  moved on and is planned again rather than applied to whatever is there now.
+- A result reports three numbers and never folds them into one: what the plan
+  selected, what actually moved into Trash, and what the filesystem's own reading
+  changed by. On one filesystem a Trash move is a large number of bytes moved and
+  no space reclaimed, and the output says so. Two readings nobody could take leave
+  the change unknown rather than zero.
+- The Rust helper gained `trash`, `erase`, `empty-trash`, `restore`, and
+  `journal-reconcile`. It resolves a target's parent one segment at a time from
+  `/` with `openat2` and no symlink resolution, re-applies the protected-path
+  policy from its own side of the process boundary, compares the live entry
+  against the identity the plan recorded, and refuses a parent any user can write
+  to without a sticky bit.
+- Trash follows the freedesktop specification: the `.trashinfo` is reserved with an
+  exclusive create, so two programs cannot both claim one name, and the move is
+  `RENAME_NOREPLACE`, so the kernel refuses rather than overwriting. An undo moves
+  back the same way, and a name something else has taken is skipped.
+- Every item is journalled twice, intent before the syscall and outcome after.
+  That is what makes a crash legible: an item holding only an intent reads as
+  `uncertain`, and so does the action holding it. Nothing is ever promoted to
+  complete. A record whose owning process is still alive is left alone.
+- `disktop find empty` and `find broken` read the index a scan already wrote. The
+  walk now records each directory's direct child count and whether each symlink
+  resolves, so neither search is a second traversal. A directory the scan could
+  not open carries no count at all and never answers a search for empty ones.
+- Data that is in use offers no generic action, and a finding that names no path
+  offers nothing generic. Both rules live in one place rather than in each
+  detector's memory.
+
 ### Phase 3: findings and application inventory
 
 - `disktop clean` lists what every detector found and changes nothing. `clean plan`

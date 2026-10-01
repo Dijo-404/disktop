@@ -1,6 +1,6 @@
 # Agent guide for Disktop
 
-Read [PLAN.md](PLAN.md) before implementation. It is the product scope, target folder structure, interface map, phase gates, and acceptance checklist. **Phases 0, 1, 2, and 3 are complete; Phase 4 is the next gate.** The contracts are normative and enforced:
+Read [PLAN.md](PLAN.md) before implementation. It is the product scope, target folder structure, interface map, phase gates, and acceptance checklist. **Phases 0, 1, 2, 3, and 4 are complete; Phase 5 is the next gate.** The contracts are normative and enforced:
 `schemas/cli/v1/` and `schemas/native/v1/` define public JSON and the helper protocol,
 `src/domain/paths.ts` and `src/domain/protected-paths.ts` define path bytes and the refusal
 policy, `src/storage/` defines configuration, `eslint.config.mjs` enforces the dependency rule,
@@ -9,13 +9,30 @@ policy, `src/storage/` defines configuration, `eslint.config.mjs` enforces the d
 in the same commit.
 
 The TypeScript CLI implements `devices`, the `--json` dashboard, `alerts check`, the 80×24
-dashboard TUI, `scan`, `explore`, `snapshots list|diff`, and `clean` (listing only) against
-real `lsblk`, `/proc/self/mountinfo`, `statfs`, and helper readings. Every other command is
-declared in `src/cli/parser.ts` and refuses with `not-implemented`. The Rust helper implements
-the read operations `hello`, `probe`, `scan`, `query-index`, and `cancel`, and refuses every
-operation that would change a user file, so no cleanup, journal, or export capability exists
-yet. Use the package scripts for checks and the phase gates in the plan for feature
-completion.
+dashboard TUI, `scan`, `explore`, `snapshots list|diff`, `clean`, `clean plan`, `clean apply`,
+`history`, `undo`, and `find empty|broken` against real `lsblk`, `/proc/self/mountinfo`,
+`statfs`, and helper readings. `report`, `timer`, `completion`, and `find duplicates|stale` are
+declared in `src/cli/parser.ts` and refuse with `not-implemented`. The Rust helper implements
+`hello`, `probe`, `scan`, `query-index`, `cancel`, `trash`, `erase`, `empty-trash`, `restore`,
+and `journal-reconcile`; it refuses `copy-move`, `compress`, `dedup-hardlink`,
+`hash-candidates`, `inspect`, and every manager operation, so there is no export, move,
+compression, or manager capability yet. Use the package scripts for checks and the phase gates
+in the plan for feature completion.
+
+Phase 4's contracts: a plan is the authority an apply runs on. `src/domain/actions.ts`
+builds it, fixes its operation, and gives it an expiry; `src/storage/plans.ts` stores it
+byte-exactly under `$XDG_STATE_HOME`; `src/application/apply-action.ts` is the only place it
+becomes an action. `--permanent` acknowledges a plan that is already irreversible and is
+refused on a Trash plan rather than read as an upgrade. The helper repeats every check from
+its own side — its `PROTECTED_ROOTS` and `SHARED_CONTAINER_ROOTS` in `native/disktop-fs/src/guard.rs`
+are deliberate duplicates of `src/domain/protected-paths.ts` and change in the same commit.
+Identity is device, inode, kind, size, and modification time; `mountId` is context and is not
+compared, because Node cannot read it. Every item is journalled twice, intent before the
+syscall and outcome after, which is what makes a crash legible: an item holding only an intent
+is `uncertain`, and so is the action holding it. A result keeps selected bytes, bytes moved to
+Trash, and the two free-space readings apart, and never folds them into one number. A new
+mutation extends `run_action` in `native/disktop-fs/src/actions.rs`; it does not add a path
+around it.
 
 Phase 3's contracts: a `Finding` lives in `src/domain/findings.ts` with the policy that
 merges two of them. `size.basis` is mandatory and there is no basis meaning "zero because

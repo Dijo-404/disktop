@@ -9,7 +9,7 @@ import type { Finding } from "../domain/findings.js";
 import type { RawPath } from "../domain/models.js";
 import { classifyGenericTarget, type ProtectedPathContext } from "../domain/protected-paths.js";
 import type { InventoryPort } from "../ports/inventory.js";
-import type { PathFacts, PathProbe } from "../ports/providers.js";
+import type { FootprintPort, PathFacts, PathProbe } from "../ports/providers.js";
 import type { PlanStore } from "../ports/actions.js";
 import type { FootprintService } from "./footprint.js";
 
@@ -41,6 +41,8 @@ export interface PlanDependencies {
   readonly footprint: Pick<FootprintService, "discover">;
   readonly inventory: InventoryPort;
   readonly paths: Pick<PathProbe, "facts">;
+  /** Measures a directory's whole subtree, which one stat cannot. */
+  readonly footprints: FootprintPort;
   readonly store: Pick<PlanStore, "save">;
   readonly settings: PlanSettings;
   readonly now: () => Date;
@@ -86,6 +88,12 @@ export function createPlanService(dependencies: PlanDependencies): PlanService {
         }
       }
 
+      // One measurement for every path at once. A directory's own stat gives
+      // the bytes of its inode and nothing about what it holds, so a plan built
+      // from stats alone would tell somebody they were reclaiming four
+      // kilobytes while moving a twenty-gigabyte tree.
+      const measured = await measure(dependencies, subject.paths, signal);
+
       const entries: PlannedEntry[] = [];
       for (const path of subject.paths) {
         const facts = await dependencies.paths.facts(path);
@@ -101,7 +109,14 @@ export function createPlanService(dependencies: PlanDependencies): PlanService {
             `${path.display} is not a file, directory, or symlink, so Disktop will not act on it.`,
           );
         }
-        entries.push(toEntry(path, facts));
+        entries.push(toEntry(path, facts, measured.get(path.bytesBase64)));
+      }
+
+      const warnings = [...subject.warnings];
+      if (entries.some((entry) => entry.expected.kind === "directory" && !measured.has(entry.path.bytesBase64))) {
+        warnings.push(
+          "A directory's footprint could not be measured, so the totals here cover the entries themselves and not everything inside them.",
+        );
       }
 
       const plan = buildPlan({
@@ -115,7 +130,7 @@ export function createPlanService(dependencies: PlanDependencies): PlanService {
         ...(subject.regenerationCost === undefined
           ? {}
           : { regenerationCost: subject.regenerationCost }),
-        warnings: subject.warnings,
+        warnings,
       });
 
       await dependencies.store.save(plan);
@@ -227,7 +242,33 @@ async function protectedPathContext(
   };
 }
 
-function toEntry(path: RawPath, facts: PathFacts): PlannedEntry {
+/**
+ * Measured bytes per path, leaving out anything nothing could measure.
+ *
+ * A measurement that comes back unknown is absent from the map rather than
+ * zero, so the caller can say so instead of reporting an empty directory.
+ */
+async function measure(
+  dependencies: PlanDependencies,
+  paths: readonly RawPath[],
+  signal: AbortSignal,
+): Promise<ReadonlyMap<string, bigint>> {
+  const measured = new Map<string, bigint>();
+  try {
+    const reading = await dependencies.footprints.measure(paths, signal);
+    for (const measurement of reading.measurements) {
+      if (measurement.bytes !== undefined) {
+        measured.set(measurement.path.bytesBase64, measurement.bytes);
+      }
+    }
+  } catch {
+    // A measurement that could not run leaves every footprint unknown. The
+    // plan still describes exactly which entries it covers.
+  }
+  return measured;
+}
+
+function toEntry(path: RawPath, facts: PathFacts, measuredBytes: bigint | undefined): PlannedEntry {
   return {
     path,
     expected: {
@@ -239,8 +280,9 @@ function toEntry(path: RawPath, facts: PathFacts): PlannedEntry {
       modifiedNanoseconds: facts.modifiedNanoseconds,
     },
     // What a person is told they are reclaiming is what was measured on disk,
-    // not what the files claim to be.
-    reviewedBytes: facts.allocatedBytes,
+    // not what the files claim to be. For a directory that means its whole
+    // subtree; one stat would only describe its own inode.
+    reviewedBytes: measuredBytes ?? facts.allocatedBytes,
   };
 }
 

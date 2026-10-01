@@ -150,6 +150,7 @@ export async function createServices(options: CompositionOptions = {}): Promise<
       footprint,
       inventory,
       paths: discovery.paths,
+      footprints,
       store: planStore,
       settings: {
         home,

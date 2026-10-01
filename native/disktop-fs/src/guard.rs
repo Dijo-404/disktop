@@ -281,9 +281,15 @@ pub fn revalidate(parent: &ResolvedParent, expected: &Fingerprint) -> Result<Met
         }
     })?;
 
+    // Identity is the device, the inode, the kind, the size, and the
+    // modification time. The mount id is deliberately not part of it: Node
+    // cannot read `stx_mnt_id` through its filesystem API, so it would be
+    // comparing a number it had to invent. Nothing is lost by leaving it out
+    // — a filesystem swapped under the parent has a different device number,
+    // and a bind mount of the same filesystem reaching the same inode is the
+    // same file.
     let matches = live.device == expected.device
         && live.inode == expected.inode
-        && live.mount_id == expected.mount_id
         && live.kind == expected.kind
         && live.apparent_bytes == expected.apparent_bytes
         && live.modified_nanoseconds == expected.modified_nanoseconds;

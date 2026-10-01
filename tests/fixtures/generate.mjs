@@ -405,3 +405,47 @@ export async function createStorageFixture() {
   fixture.cleanup = sandboxCleanup(fixture);
   return fixture;
 }
+
+/**
+ * A tree inside a throwaway home, for the tests that actually change files.
+ *
+ * It lives under the home rather than beside it because generic cleanup is
+ * limited to the user's own roots: a target outside the home is refused by the
+ * protected-path policy, which is the behaviour, not an obstacle to work
+ * around. The caller owns the home and its removal.
+ */
+export async function createActionTree(home) {
+  const resolved = resolve(home);
+  if (dirname(resolved) !== resolve(tmpdir())) {
+    throw new Error(`${home} is not a throwaway home directory`);
+  }
+
+  const cache = join(resolved, ".cache", "pip");
+  await sizedFile(join(cache, "wheel.bin"), 4096);
+  await sizedFile(join(cache, "http", "deep", "entry.bin"), 2048);
+
+  const artifacts = join(resolved, "projects", "api", "node_modules");
+  await sizedFile(join(artifacts, "left-pad", "index.js"), 512);
+
+  const single = join(resolved, "projects", "notes.log");
+  await sizedFile(single, 8192);
+
+  // A name that is not valid UTF-8 has to survive a trip through Trash and back.
+  const oddName = Buffer.from([0x6f, 0x64, 0x64, 0xff, 0xfe, 0x2e, 0x62, 0x69, 0x6e]);
+  const odd = Buffer.concat([Buffer.from(`${join(resolved, "projects")}/`), oddName]);
+  await writeFile(odd, "x".repeat(1024));
+
+  // A link whose target lives outside the tree: erasing the holder must remove
+  // the link and leave what it points at alone.
+  const linked = join(resolved, "keep-me.bin");
+  await sizedFile(linked, 256);
+  const holder = join(resolved, "projects", "holder");
+  await mkdir(holder, { recursive: true });
+  await symlink(linked, join(holder, "alias"));
+
+  // An empty directory and a link to nothing, for `find`.
+  await mkdir(join(resolved, "projects", "empty"), { recursive: true });
+  await symlink(join(resolved, "projects", "nowhere"), join(resolved, "projects", "dangling"));
+
+  return { home: resolved, cache, artifacts, single, odd, holder, linked };
+}
