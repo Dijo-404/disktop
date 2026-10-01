@@ -20,6 +20,8 @@ export interface CacheRoot {
   /**
    * True when the directory holds something that is not disposable: weights
    * somebody downloaded, an SDK, an emulator image, installed extensions.
+   * `buildFinding` drops every generic action from an active finding, so the
+   * table does not have to repeat the rule beside each row.
    */
   readonly active?: boolean;
   readonly actions?: readonly ActionOperation[];
@@ -69,7 +71,7 @@ export function createRootsProvider(spec: RootsProviderSpec): FindingProvider {
             title: root.title,
             evidence: root.evidence,
             paths: [underHome(environment, ...root.segments)],
-            actions: root.actions ?? (root.active === true ? [] : ["trash"]),
+            actions: root.actions ?? ["trash"],
             regenerationCost: root.regenerationCost,
             active: root.active ?? false,
           }),
