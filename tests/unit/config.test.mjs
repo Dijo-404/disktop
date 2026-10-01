@@ -76,3 +76,39 @@ test("integer settings have an upper bound, so a typo cannot disable plan expiry
 test("an empty unknown table is still an unknown table", () => {
   assert.throws(() => parseConfigDocument("[bogus]\n"), /bogus/);
 });
+
+test("the providers table carries the bounds the detectors run under", () => {
+  assert.deepEqual(DEFAULT_CONFIG.providers.appImageRoots, []);
+  assert.equal(DEFAULT_CONFIG.providers.largeLogBytes, 128 * 1024 * 1024);
+  assert.equal(DEFAULT_CONFIG.providers.maxFindingsPerProvider, 50);
+  assert.ok(DEFAULT_CONFIG.providers.artifactDirectories.includes("node_modules"));
+});
+
+test("an AppImage root is a discovery root, so a system directory is allowed but a relative path is not", () => {
+  // These roots are read, never cleaned: AppImages commonly live under /opt,
+  // and what may be acted on is decided by the finding, not by this list.
+  const config = parseConfigDocument('[providers]\napp_image_roots = ["/opt/appimages"]\n');
+  assert.deepEqual(config.providers.appImageRoots, ["/opt/appimages"]);
+
+  assert.throws(() => parseConfigDocument('[providers]\napp_image_roots = ["Applications"]\n'), /absolute/);
+  assert.throws(() => parseConfigDocument('[providers]\napp_image_roots = ["/opt/../etc"]\n'), /normalized/);
+});
+
+test("the log threshold and the finding cap are bounded so a typo cannot disable them", () => {
+  assert.equal(parseConfigDocument("[providers]\nlarge_log_bytes = 1048576\n").providers.largeLogBytes, 1_048_576);
+  assert.throws(() => parseConfigDocument("[providers]\nlarge_log_bytes = 0\n"), /between/);
+  assert.throws(() => parseConfigDocument("[providers]\nmax_findings_per_provider = 0\n"), /between/);
+  assert.throws(() => parseConfigDocument("[providers]\nmax_findings_per_provider = 100000\n"), /between/);
+});
+
+test("an artifact directory name cannot be a path, so a detector cannot be pointed anywhere", () => {
+  const config = parseConfigDocument('[providers]\nartifact_directories = ["node_modules", ".turbo"]\n');
+  assert.deepEqual(config.providers.artifactDirectories, ["node_modules", ".turbo"]);
+
+  assert.throws(() => parseConfigDocument('[providers]\nartifact_directories = ["/etc"]\n'), /name/);
+  assert.throws(() => parseConfigDocument('[providers]\nartifact_directories = ["../etc"]\n'), /name/);
+});
+
+test("an unknown key in the providers table is still refused", () => {
+  assert.throws(() => parseConfigDocument("[providers]\nmax_finding = 1\n"), /providers\.max_finding/);
+});

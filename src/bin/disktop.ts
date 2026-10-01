@@ -37,6 +37,7 @@ async function buildContext(): Promise<CliContext> {
       snapshots: services.snapshots,
       defaults: services.scanDefaults,
     },
+    footprint: services.footprint,
     // Ctrl+C asks a running command to stop at a safe boundary; it does not
     // tear the process down and leave the work unreported.
     signals: {

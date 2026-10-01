@@ -1,0 +1,56 @@
+{
+  "schemaVersion": "1",
+  "command": "clean",
+  "generatedAt": "2026-10-01T08:41:19.004Z",
+  "status": "complete",
+  "exitCode": 0,
+  "data": {
+    "capability": {
+      "status": "available",
+      "explanation": "One detector ran."
+    },
+    "measured": false,
+    "findings": [
+      {
+        "id": "cache.ai:ollama",
+        "providerId": "cache.ai",
+        "providerVersion": 1,
+        "category": "ai-cache",
+        "title": "Ollama model store",
+        "evidence": [],
+        "paths": [
+          {
+            "bytesBase64": "L2hvbWUvZXhhbXBsZS8ub2xsYW1hL21vZGVscw==",
+            "display": "/home/example/.ollama/models"
+          }
+        ],
+        "size": {
+          "bytes": "0",
+          "basis": "unknown",
+          "explanation": "Nothing measured it, so it cannot also be zero bytes."
+        },
+        "confidence": "observed",
+        "capability": {
+          "status": "available",
+          "explanation": "The directory was read."
+        },
+        "availableActionIds": [],
+        "active": true
+      }
+    ],
+    "providers": [
+      {
+        "providerId": "cache.ai",
+        "version": 1,
+        "capability": {
+          "status": "available",
+          "explanation": "One model root exists."
+        },
+        "findings": 1,
+        "complete": true,
+        "ran": true
+      }
+    ],
+    "categoryTotals": []
+  }
+}

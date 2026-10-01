@@ -8,6 +8,7 @@ import type {
   ScanEvent,
   ScanPort,
   ScanRequest,
+  OwnerTotal,
   TypeTotal,
 } from "../../../ports/scan.js";
 import type { HelperEvent, HelperStart, NativeHelperClient } from "../../../native/client.js";
@@ -80,6 +81,7 @@ export function createNativeScanner(options: NativeScannerOptions): ScanPort & F
           limit: String(Math.max(1, Math.trunc(query.limit))),
           ...(query.cursor === undefined ? {} : { cursor: query.cursor }),
           ...(query.includeTypeTotals === undefined ? {} : { includeTypeTotals: query.includeTypeTotals }),
+          ...(query.includeOwnerTotals === undefined ? {} : { includeOwnerTotals: query.includeOwnerTotals }),
         });
         refuseError(event, client);
         const page = parseIndexPage(event.result);
@@ -87,6 +89,7 @@ export function createNativeScanner(options: NativeScannerOptions): ScanPort & F
           entries: page.entries.map(toIndexedEntry),
           ...(page.nextCursor === undefined ? {} : { nextCursor: page.nextCursor }),
           ...(page.typeTotals === undefined ? {} : { typeTotals: page.typeTotals.map(toTypeTotal) }),
+          ...(page.ownerTotals === undefined ? {} : { ownerTotals: page.ownerTotals.map(toOwnerTotal) }),
         };
       } finally {
         await client.close();
@@ -208,6 +211,15 @@ function toIndexedEntry(entry: NativeIndexEntry): IndexedEntry {
     modifiedNanoseconds: entry.modifiedNanoseconds,
     shared: entry.shared,
   };
+}
+
+function toOwnerTotal(total: {
+  ownerId: bigint;
+  entries: bigint;
+  allocatedBytes: bigint;
+  apparentBytes: bigint;
+}): OwnerTotal {
+  return total;
 }
 
 function toTypeTotal(total: { extension: string; entries: bigint; allocatedBytes: bigint; apparentBytes: bigint }): TypeTotal {

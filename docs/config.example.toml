@@ -48,3 +48,21 @@ plan_expiry_minutes = 60
 # other account. A root listed here is the scope of cleanup, never a target
 # itself. There is no setting that widens cleanup past this.
 additional_allowed_roots = []
+
+[providers]
+# Directories holding AppImages, which no package manager knows about. These
+# are read, never cleaned: an AppImage is only offered for the Trash when it
+# belongs to you and sits inside your home directory, so listing /opt here is
+# a place to look rather than a place to act. Absolute, normalized paths.
+app_image_roots = []
+# Directory names that mark regenerable build output. Names, never paths: a
+# value with a slash in it would read as a path and invite pointing a detector
+# at a system directory.
+artifact_directories = ["node_modules", "target", "__pycache__", ".next", ".nuxt", "build", "dist"]
+# The size above which a log file is reported on its own. 1024 to 1 TiB.
+# Reporting is all that happens: no log is ever offered for truncation.
+large_log_bytes = 134217728
+# The cap that keeps one noisy detector from flooding the finding list. A
+# detector that finds more says so in a warning rather than silently listing
+# fewer. 1 to 1000.
+max_findings_per_provider = 50

@@ -1,11 +1,17 @@
 import { homedir } from "node:os";
 import { createDashboardService, type DashboardService, type DashboardSettings } from "../application/dashboard.js";
 import { createExploreService, type ExploreService } from "../application/explore.js";
+import { createFootprintService, type FootprintService } from "../application/footprint.js";
 import { createScanService, type ScanService } from "../application/scan.js";
 import { createSnapshotService, type SnapshotService } from "../application/snapshots.js";
 import type { RawPath, Warning } from "../domain/models.js";
 import { rawPathFromUtf8 } from "../domain/paths.js";
 import { createLinuxInventory } from "../platform/linux/inventory/index.js";
+import { createIndexFootprint } from "../platform/linux/footprint.js";
+import { createPathProbe } from "../platform/linux/probe.js";
+import { createToolPort } from "../platform/linux/tools.js";
+import { createPackageInventory } from "../platform/linux/packages/index.js";
+import { createBuiltInProviders } from "../providers/index.js";
 import { createNativeScanner } from "../platform/linux/scan/index.js";
 import { NativeHelperClient } from "../native/client.js";
 import type { Accounting } from "../ports/scan.js";
@@ -26,6 +32,7 @@ export interface Services {
   readonly scan: ScanService;
   readonly explore: ExploreService;
   readonly snapshots: SnapshotService;
+  readonly footprint: FootprintService;
   readonly scanDefaults: {
     readonly accounting: Accounting;
     readonly crossFilesystems: boolean;
@@ -76,7 +83,34 @@ export async function createServices(options: CompositionOptions = {}): Promise<
     start: () => NativeHelperClient.start(),
   });
 
-  const snapshots = createSnapshotService(createSnapshotStore(locations.dataDirectory), scanner);
+  const snapshotStore = createSnapshotStore(locations.dataDirectory);
+  const snapshots = createSnapshotService(snapshotStore, scanner);
+
+  const home = rawPathFromUtf8(options.homeDirectory ?? homedir());
+  const footprints = createIndexFootprint({
+    scanner,
+    index: scanner,
+    snapshots: snapshotStore,
+    home,
+    accounting: config.scan.accounting,
+    crossFilesystems: config.scan.crossFilesystems,
+    excludes,
+  });
+  const tools = createToolPort();
+  const discovery = {
+    home,
+    variables: environment,
+    userId: BigInt(process.getuid?.() ?? 0),
+    now: new Date(),
+    staleAfterDays: config.find.staleAfterDays,
+    appImageRoots: config.providers.appImageRoots.map(rawPathFromUtf8),
+    artifactDirectories: config.providers.artifactDirectories,
+    largeLogBytes: BigInt(config.providers.largeLogBytes),
+    maxFindingsPerProvider: config.providers.maxFindingsPerProvider,
+    paths: createPathProbe(),
+    tools: tools,
+    index: footprints,
+  };
 
   return {
     dashboard,
@@ -87,6 +121,7 @@ export async function createServices(options: CompositionOptions = {}): Promise<
     }),
     explore: createExploreService(scanner),
     snapshots,
+    footprint: createFootprintService(createBuiltInProviders({ packages: createPackageInventory(tools) }), discovery, footprints),
     scanDefaults: {
       accounting: config.scan.accounting,
       crossFilesystems: config.scan.crossFilesystems,

@@ -76,6 +76,7 @@ export interface EntryQuery {
   readonly limit: number;
   readonly cursor?: string;
   readonly includeTypeTotals?: boolean;
+  readonly includeOwnerTotals?: boolean;
 }
 
 export interface TypeTotal {
@@ -85,10 +86,19 @@ export interface TypeTotal {
   readonly apparentBytes: Bytes;
 }
 
+/** Bytes per owning user id, over regular files only. */
+export interface OwnerTotal {
+  readonly ownerId: bigint;
+  readonly entries: bigint;
+  readonly allocatedBytes: Bytes;
+  readonly apparentBytes: Bytes;
+}
+
 export interface EntryPage {
   readonly entries: readonly IndexedEntry[];
   readonly nextCursor?: string;
   readonly typeTotals?: readonly TypeTotal[];
+  readonly ownerTotals?: readonly OwnerTotal[];
 }
 
 export interface FileIndexPort {

@@ -51,10 +51,11 @@ Containers cannot prove hardware health, real mount behavior, privilege prompts,
 | Dependency | Feature area | If absent or denied |
 | --- | --- | --- |
 | `lsblk`, mountinfo, `statfs` | Device, mount, capacity and inode inventory | Report what source is unavailable and mark inventory incomplete. |
-| `lsof` | Deleted-but-open files | Show `missing-tool` or `permission-denied`; do not report zero open files. |
-| `smartctl` | SMART health | Show unavailable or permission state. |
+| `lsof` | Deleted-but-open files | Show `missing-tool` or `permission-denied`; do not report zero open files. memfds, shared memory and anonymous inodes are excluded from the total, because those bytes were never on a disk. |
+| `smartctl` | SMART health | Show unavailable or permission state. smartctl exits non-zero with an empty stderr when it cannot open a device, so the denial is read from its own JSON. |
 | apt/dnf/pacman, Snap, Flatpak | Package counts, sizes, managed cleanup | Disable only the affected adapter and show why. |
 | Docker/Podman | Container footprint and cleanup | Disable the affected manager action; never delete its storage directly. |
+| `btrfs`, `zfs` | Subvolume and snapshot listing | A machine without them is a machine without them, not an incomplete reading; a denial is reported and makes the result incomplete. |
 | `notify-send`, systemd user instance | Opt-in desktop alert timer | CLI alert check remains usable; notification/timer capability is separate. |
 | `sudo` or `pkexec` | Reviewed privileged manager action | Refuse that action when scoped elevation cannot run. Never elevate the whole npm process. |
 
