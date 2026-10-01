@@ -2,6 +2,7 @@ import type { CliContext } from "./context.js";
 import { parseArguments, renderHelp, type CommandSpec, type ParsedCommand } from "./parser.js";
 import { EXIT, buildEnvelope, writeEnvelope } from "./output.js";
 import { runAlertsCheck, parseThreshold } from "./commands/alerts.js";
+import { runApply, runFind, runHistory, runPlan, runUndo } from "./commands/actions.js";
 import { runClean } from "./commands/clean.js";
 import { runDashboard } from "./commands/dashboard.js";
 import { runDevices } from "./commands/devices.js";
@@ -72,6 +73,40 @@ export async function runCli(args: readonly string[], context: CliContext): Prom
       ...(optional(parsed, "category")),
       ...(optional(parsed, "limit")),
       measureSizes: !parsed.flags.has("no-sizes"),
+    });
+  }
+  if (name === "clean plan") {
+    return runPlan(withUnits, {
+      asJson,
+      ...(parsed.operand === undefined ? {} : { findingId: parsed.operand }),
+      ...(optional(parsed, "path")),
+      ...(optional(parsed, "operation")),
+    });
+  }
+  if (name === "clean apply") {
+    return runApply(withUnits, {
+      asJson,
+      planId: parsed.operand ?? "",
+      confirmed: parsed.flags.has("yes"),
+      acknowledgePermanent: parsed.flags.has("permanent"),
+    });
+  }
+  if (name === "history") {
+    return runHistory(withUnits, asJson);
+  }
+  if (name === "undo") {
+    return runUndo(withUnits, {
+      asJson,
+      actionId: parsed.operand ?? "",
+      confirmed: parsed.flags.has("yes"),
+    });
+  }
+  if (name === "find") {
+    return runFind(withUnits, {
+      asJson,
+      kind: parsed.operand ?? "",
+      ...(optional(parsed, "path")),
+      ...(optional(parsed, "limit")),
     });
   }
   if (name === "snapshots") {

@@ -151,3 +151,23 @@ colour the output or split a row in two.
 | Installed applications | dpkg, rpm, pacman, Snap, Flatpak, global npm/pip, configured AppImage roots. | Report counts and manager-provided installed sizes separately from measured app data and cache. |
 
 Provider fixtures should include missing tools, denied paths, overlapping results, active files, hardlinks, invalid-byte names, and manager output changes. A detector is complete only when its preview and capability behavior are understandable in both TUI and JSON.
+
+## Which actions a finding may offer
+
+A finding names the operations a reviewed plan could later fix for it, and nothing
+more: `availableActionIds` is a suggestion a surface may show, never a capability a
+detector holds. Two rules are applied in `buildFinding` rather than left to each
+detector to remember, so a new detector gets them for free:
+
+- Data that is in use offers no generic action. A browser profile, a model store, an
+  SDK and an emulator image are worth reporting and are not things to move to Trash
+  behind somebody's back. Mark such a finding `active` and every path-based operation
+  is dropped from it.
+- A finding that names no path offers nothing generic, because there is nothing for a
+  generic action to act on. Only `manager` can reach a manager's own state, and the
+  manager adapters are Phase 6.
+
+`clean plan` re-checks the path against the protected-path policy afterwards, and the
+helper checks it again from the other side of the process boundary. The rules here are
+the floor, not the guarantee. `tests/unit/provider-actions.test.mjs` holds every
+built-in detector to them against three fixture homes.

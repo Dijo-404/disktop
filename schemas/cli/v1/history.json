@@ -1,0 +1,43 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/Dijo-404/disktop/schemas/cli/v1/history.json",
+  "title": "disktop history --json",
+  "description": "A page of the durable action journal, after every record an interrupted run left behind has been resolved.",
+  "type": "object",
+  "allOf": [
+    {
+      "$ref": "envelope.json"
+    }
+  ],
+  "properties": {
+    "command": {
+      "const": "history"
+    },
+    "data": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "records",
+        "reconciled"
+      ],
+      "properties": {
+        "records": {
+          "type": "array",
+          "maxItems": 200,
+          "items": {
+            "$ref": "common.json#/$defs/journalRecord"
+          }
+        },
+        "reconciled": {
+          "description": "How many interrupted records this reading resolved. Zero on a clean history.",
+          "$ref": "common.json#/$defs/decimalInteger"
+        },
+        "nextCursor": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 512
+        }
+      }
+    }
+  }
+}

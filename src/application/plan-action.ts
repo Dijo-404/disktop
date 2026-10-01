@@ -1,0 +1,341 @@
+import {
+  buildPlan,
+  type ActionOperation,
+  type ActionPlan,
+  type PlannedEntry,
+} from "../domain/actions.js";
+import type { OperationFailure } from "../domain/errors.js";
+import type { Finding } from "../domain/findings.js";
+import type { RawPath } from "../domain/models.js";
+import { classifyGenericTarget, type ProtectedPathContext } from "../domain/protected-paths.js";
+import type { InventoryPort } from "../ports/inventory.js";
+import type { FootprintPort, PathFacts, PathProbe } from "../ports/providers.js";
+import type { PlanStore } from "../ports/actions.js";
+import type { FootprintService } from "./footprint.js";
+
+export interface PlanRequest {
+  readonly operation: ActionOperation;
+  /** Plan a finding a detector proposed, or an explicitly selected path. */
+  readonly findingId?: string;
+  readonly path?: RawPath;
+}
+
+export interface PlanSettings {
+  readonly home: RawPath;
+  /** The user-owned roots generic cleanup may act inside. */
+  readonly allowedRoots: readonly RawPath[];
+  /** Trash, Disktop's own state, and anything else named as off limits. */
+  readonly excludedRoots: readonly RawPath[];
+  /** This user's own Trash, which only `empty-trash` may name as a target. */
+  readonly trashDirectory: RawPath;
+  readonly expiryMinutes: number;
+}
+
+export type PlanOutcome =
+  | { readonly kind: "planned"; readonly plan: ActionPlan }
+  | { readonly kind: "refused"; readonly failure: OperationFailure };
+
+export interface PlanService {
+  plan(request: PlanRequest, signal: AbortSignal): Promise<PlanOutcome>;
+}
+
+export interface PlanDependencies {
+  readonly footprint: Pick<FootprintService, "discover">;
+  readonly inventory: InventoryPort;
+  readonly paths: Pick<PathProbe, "facts">;
+  /** Measures a directory's whole subtree, which one stat cannot. */
+  readonly footprints: FootprintPort;
+  readonly store: Pick<PlanStore, "save">;
+  readonly settings: PlanSettings;
+  readonly now: () => Date;
+}
+
+/** The operations a generic plan may fix. Everything else belongs to a later phase. */
+const GENERIC_OPERATIONS: readonly ActionOperation[] = ["trash", "permanent", "empty-trash"];
+
+/**
+ * Turn a finding or a selected path into a reviewed, immutable plan.
+ *
+ * Three things happen here and all three happen before anything is stored. The
+ * target is classified against the protected-path policy, so a plan for `/etc`
+ * never exists to be applied. Every path is fingerprinted live, so the plan
+ * describes the entries that are there now rather than the ones a detector saw
+ * earlier. And the operation is fixed, because the whole point of a plan is
+ * that apply time cannot change what was agreed to.
+ */
+export function createPlanService(dependencies: PlanDependencies): PlanService {
+  return {
+    async plan(request, signal) {
+      if (!GENERIC_OPERATIONS.includes(request.operation)) {
+        return refuse("not-implemented", `Disktop cannot plan a '${request.operation}' action yet.`);
+      }
+
+      const context = await protectedPathContext(dependencies);
+      if (context === undefined) {
+        return refuse(
+          "invalid-plan",
+          "The mount table could not be read, so no target can be cleared. Nothing was planned.",
+        );
+      }
+
+      const subject = await resolveSubject(dependencies, request, signal);
+      if ("failure" in subject) {
+        return { kind: "refused", failure: subject.failure };
+      }
+
+      // Emptying Trash is the one operation whose target is a directory the
+      // generic policy excludes, so it is judged by a rule of its own: it may
+      // name this user's Trash and nothing else. Every other operation goes
+      // through the policy that refuses Trash along with everything else.
+      if (request.operation === "empty-trash") {
+        const trash = dependencies.settings.trashDirectory;
+        if (subject.paths.some((path) => path.bytesBase64 !== trash.bytesBase64)) {
+          return refuse(
+            "protected-path",
+            `Only ${trash.display} can be emptied. 'empty-trash' is not a way to remove an ordinary directory.`,
+          );
+        }
+      } else {
+        for (const path of subject.paths) {
+          const verdict = classifyGenericTarget(path, context);
+          if (!verdict.allowed) {
+            return refuse(verdict.code, `${path.display} cannot be cleaned up: ${verdict.reason}.`);
+          }
+        }
+      }
+
+      // One measurement for every path at once. A directory's own stat gives
+      // the bytes of its inode and nothing about what it holds, so a plan built
+      // from stats alone would tell somebody they were reclaiming four
+      // kilobytes while moving a twenty-gigabyte tree.
+      const measured = await measure(dependencies, subject.paths, signal);
+
+      const entries: PlannedEntry[] = [];
+      for (const path of subject.paths) {
+        const facts = await dependencies.paths.facts(path);
+        if (facts === undefined) {
+          return refuse(
+            "changed-target",
+            `${path.display} is no longer there, so there is nothing to review.`,
+          );
+        }
+        if (facts.kind === "other") {
+          return refuse(
+            "invalid-plan",
+            `${path.display} is not a file, directory, or symlink, so Disktop will not act on it.`,
+          );
+        }
+        entries.push(toEntry(path, facts, measured.get(path.bytesBase64)));
+      }
+
+      const warnings = [...subject.warnings];
+      if (entries.some((entry) => entry.expected.kind === "directory" && !measured.has(entry.path.bytesBase64))) {
+        warnings.push(
+          "A directory's footprint could not be measured, so the totals here cover the entries themselves and not everything inside them.",
+        );
+      }
+
+      const plan = buildPlan({
+        operation: request.operation,
+        providerId: subject.providerId,
+        ...(subject.findingId === undefined ? {} : { findingId: subject.findingId }),
+        scopeSummary: scopeSummary(entries),
+        createdAt: dependencies.now(),
+        expiryMinutes: dependencies.settings.expiryMinutes,
+        entries,
+        ...(subject.regenerationCost === undefined
+          ? {}
+          : { regenerationCost: subject.regenerationCost }),
+        warnings,
+      });
+
+      await dependencies.store.save(plan);
+      return { kind: "planned", plan };
+    },
+  };
+}
+
+interface Subject {
+  readonly paths: readonly RawPath[];
+  readonly providerId: string;
+  readonly findingId?: string;
+  readonly regenerationCost?: string;
+  readonly warnings: readonly string[];
+}
+
+/** What the request is about: a detector's finding, or a path somebody named. */
+async function resolveSubject(
+  dependencies: PlanDependencies,
+  request: PlanRequest,
+  signal: AbortSignal,
+): Promise<Subject | { readonly failure: OperationFailure }> {
+  if (request.operation === "empty-trash") {
+    const trash = request.path ?? dependencies.settings.trashDirectory;
+    return {
+      paths: [trash],
+      providerId: "trash",
+      warnings: [
+        "Everything in Trash goes. Anything Disktop moved there is no longer recoverable with 'disktop undo'.",
+      ],
+    };
+  }
+
+  if (request.path !== undefined) {
+    return {
+      paths: [request.path],
+      providerId: "explicit-path",
+      // A path somebody typed carries no detector's judgement about what it is
+      // for, so the plan says so rather than implying one.
+      warnings: ["This path was selected directly, so no detector vouched for what it holds."],
+    };
+  }
+
+  if (request.findingId === undefined) {
+    return { failure: failure("invalid-input", "Planning needs a finding ID or a --path.") };
+  }
+
+  const summary = await dependencies.footprint.discover({ measureSizes: true }, signal);
+  const found = summary.findings.find((finding) => finding.id === request.findingId);
+  if (found === undefined) {
+    return {
+      failure: failure(
+        "invalid-input",
+        `No finding called '${request.findingId}' was discovered. Run 'disktop clean' to see what is there now.`,
+      ),
+    };
+  }
+  return fromFinding(found);
+}
+
+function fromFinding(finding: Finding): Subject | { readonly failure: OperationFailure } {
+  if (finding.paths.length === 0) {
+    return {
+      failure: failure(
+        "invalid-plan",
+        `${finding.id} names a manager's own state rather than paths, and manager cleanup is not implemented yet.`,
+      ),
+    };
+  }
+  if (finding.availableActionIds.length === 0) {
+    return {
+      failure: failure(
+        "invalid-plan",
+        `${finding.id} is reported for information; the detector offers no action on it.`,
+      ),
+    };
+  }
+
+  const warnings = [...finding.evidence];
+  if (finding.active) {
+    warnings.push(
+      "This data is in use. Removing it may interrupt the program holding it or lose work in progress.",
+    );
+  }
+  if (finding.confidence !== "observed") {
+    warnings.push(`The detector is ${finding.confidence} rather than certain about this finding.`);
+  }
+
+  return {
+    paths: finding.paths,
+    providerId: finding.providerId,
+    findingId: finding.id,
+    ...(finding.regenerationCost === undefined
+      ? {}
+      : { regenerationCost: finding.regenerationCost }),
+    warnings,
+  };
+}
+
+/**
+ * The context the protected-path policy judges against.
+ *
+ * It fails closed by construction: `classifyGenericTarget` refuses everything
+ * when the mount list is empty, so an inventory nobody could read refuses every
+ * plan rather than skipping the mount-root rule.
+ */
+async function protectedPathContext(
+  dependencies: PlanDependencies,
+): Promise<ProtectedPathContext | undefined> {
+  const inventory = await dependencies.inventory.list();
+  const mountRoots = inventory.filesystems.flatMap((filesystem) => [...filesystem.mounts]);
+  if (mountRoots.length === 0) {
+    return undefined;
+  }
+  return {
+    homeDirectory: dependencies.settings.home,
+    allowedRoots: dependencies.settings.allowedRoots,
+    mountRoots,
+    excludedRoots: dependencies.settings.excludedRoots,
+  };
+}
+
+/**
+ * Measured bytes per path, leaving out anything nothing could measure.
+ *
+ * A measurement that comes back unknown is absent from the map rather than
+ * zero, so the caller can say so instead of reporting an empty directory.
+ */
+async function measure(
+  dependencies: PlanDependencies,
+  paths: readonly RawPath[],
+  signal: AbortSignal,
+): Promise<ReadonlyMap<string, bigint>> {
+  const measured = new Map<string, bigint>();
+  try {
+    const reading = await dependencies.footprints.measure(paths, signal);
+    for (const measurement of reading.measurements) {
+      if (measurement.bytes !== undefined) {
+        measured.set(measurement.path.bytesBase64, measurement.bytes);
+      }
+    }
+  } catch {
+    // A measurement that could not run leaves every footprint unknown. The
+    // plan still describes exactly which entries it covers.
+  }
+  return measured;
+}
+
+function toEntry(path: RawPath, facts: PathFacts, measuredBytes: bigint | undefined): PlannedEntry {
+  return {
+    path,
+    expected: {
+      device: facts.device,
+      inode: facts.inode,
+      mountId: facts.mountId,
+      kind: facts.kind as "file" | "directory" | "symlink",
+      apparentBytes: facts.apparentBytes,
+      // A restored archive or a network filesystem can hand back a timestamp
+      // before the epoch. The helper clamps those to zero, and a plan that
+      // carried a negative one would compare against a number the other side
+      // cannot hold, after failing to serialise on the way out.
+      modifiedNanoseconds:
+        facts.modifiedNanoseconds < 0n ? 0n : facts.modifiedNanoseconds,
+    },
+    // What a person is told they are reclaiming is what was measured on disk,
+    // not what the files claim to be. For a directory that means its whole
+    // subtree; one stat would only describe its own inode.
+    reviewedBytes: measuredBytes ?? facts.allocatedBytes,
+  };
+}
+
+function scopeSummary(entries: readonly PlannedEntry[]): string {
+  const directories = entries.filter((entry) => entry.expected.kind === "directory").length;
+  const others = entries.length - directories;
+  const parts: string[] = [];
+  if (directories > 0) {
+    parts.push(`${directories} ${directories === 1 ? "directory" : "directories"}`);
+  }
+  if (others > 0) {
+    parts.push(`${others} ${others === 1 ? "entry" : "entries"}`);
+  }
+  const first = entries[0];
+  return `${parts.join(" and ")}, starting at ${first === undefined ? "nothing" : first.path.display}`;
+}
+
+function refuse(code: OperationFailure["code"], message: string): PlanOutcome {
+  return { kind: "refused", failure: failure(code, message) };
+}
+
+function failure(code: OperationFailure["code"], message: string): OperationFailure {
+  return { code, message };
+}

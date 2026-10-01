@@ -8,6 +8,15 @@ export interface PathFacts {
   readonly allocatedBytes: Bytes;
   readonly ownerId: bigint;
   readonly modifiedNanoseconds: bigint;
+  /**
+   * The identity a reviewed plan records, so that what is applied later is the
+   * same entry and not merely the same name. `mountId` is the device number
+   * here: Node has no cheap way to read `stx_mnt_id`, and the helper compares
+   * what it was given rather than deriving one of its own.
+   */
+  readonly device: bigint;
+  readonly inode: bigint;
+  readonly mountId: string;
 }
 
 /**

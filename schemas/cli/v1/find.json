@@ -1,0 +1,52 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/Dijo-404/disktop/schemas/cli/v1/find.json",
+  "title": "disktop find --json",
+  "description": "Entries of one kind, read out of a stored scan's index. `find` never scans.",
+  "type": "object",
+  "allOf": [
+    {
+      "$ref": "envelope.json"
+    }
+  ],
+  "properties": {
+    "command": {
+      "const": "find"
+    },
+    "data": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "kind",
+        "scanId",
+        "entries"
+      ],
+      "properties": {
+        "kind": {
+          "type": "string",
+          "enum": [
+            "duplicates",
+            "stale",
+            "empty",
+            "broken"
+          ]
+        },
+        "scanId": {
+          "$ref": "common.json#/$defs/identifier"
+        },
+        "entries": {
+          "type": "array",
+          "maxItems": 1000,
+          "items": {
+            "$ref": "common.json#/$defs/indexedEntry"
+          }
+        },
+        "nextCursor": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 512
+        }
+      }
+    }
+  }
+}

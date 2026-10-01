@@ -1,0 +1,29 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/Dijo-404/disktop/schemas/cli/v1/plan.json",
+  "title": "disktop clean plan --json",
+  "description": "One reviewed action, stored and not yet applied. Nothing has changed on disk when this is written.",
+  "type": "object",
+  "allOf": [
+    {
+      "$ref": "envelope.json"
+    }
+  ],
+  "properties": {
+    "command": {
+      "const": "clean plan"
+    },
+    "data": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "plan"
+      ],
+      "properties": {
+        "plan": {
+          "$ref": "common.json#/$defs/actionPlan"
+        }
+      }
+    }
+  }
+}

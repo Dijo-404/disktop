@@ -1,7 +1,12 @@
 import { homedir } from "node:os";
+import { join } from "node:path";
 import { createDashboardService, type DashboardService, type DashboardSettings } from "../application/dashboard.js";
 import { createExploreService, type ExploreService } from "../application/explore.js";
+import { createApplyService, type ApplyService } from "../application/apply-action.js";
+import { createFindService, type FindService } from "../application/find.js";
 import { createFootprintService, type FootprintService } from "../application/footprint.js";
+import { createPlanService, type PlanService } from "../application/plan-action.js";
+import { createUndoService, type UndoService } from "../application/undo.js";
 import { createScanService, type ScanService } from "../application/scan.js";
 import { createSnapshotService, type SnapshotService } from "../application/snapshots.js";
 import type { RawPath, Warning } from "../domain/models.js";
@@ -12,11 +17,13 @@ import { createPathProbe } from "../platform/linux/probe.js";
 import { createToolPort } from "../platform/linux/tools.js";
 import { createPackageInventory } from "../platform/linux/packages/index.js";
 import { createBuiltInProviders } from "../providers/index.js";
+import { createNativeActions } from "../platform/linux/actions/index.js";
 import { createNativeScanner } from "../platform/linux/scan/index.js";
 import { NativeHelperClient } from "../native/client.js";
 import type { Accounting } from "../ports/scan.js";
 import type { RetentionLimits } from "../ports/snapshots.js";
 import { loadConfigFile } from "../storage/config.js";
+import { createPlanStore } from "../storage/plans.js";
 import { createSnapshotStore } from "../storage/snapshots.js";
 import { resolveLocations } from "../storage/xdg.js";
 
@@ -33,6 +40,10 @@ export interface Services {
   readonly explore: ExploreService;
   readonly snapshots: SnapshotService;
   readonly footprint: FootprintService;
+  readonly plan: PlanService;
+  readonly apply: ApplyService;
+  readonly undo: UndoService;
+  readonly find: FindService;
   readonly scanDefaults: {
     readonly accounting: Accounting;
     readonly crossFilesystems: boolean;
@@ -112,16 +123,63 @@ export async function createServices(options: CompositionOptions = {}): Promise<
     index: footprints,
   };
 
+  // Disktop's own directories are never cleanup targets: an action that could
+  // remove the journal could erase the record of what it did.
+  const homeTrashDirectory = join(
+    environment.XDG_DATA_HOME !== undefined && environment.XDG_DATA_HOME.startsWith("/")
+      ? environment.XDG_DATA_HOME
+      : join(options.homeDirectory ?? homedir(), ".local/share"),
+    "Trash",
+  );
+  const planStore = createPlanStore(locations.stateDirectory);
+  const actions = createNativeActions({
+    journalDirectory: locations.stateDirectory,
+    homeTrashDirectory,
+    start: () => NativeHelperClient.start(),
+  });
+  const explore = createExploreService(scanner);
+  const footprint = createFootprintService(
+    createBuiltInProviders({ packages: createPackageInventory(tools) }),
+    discovery,
+    footprints,
+  );
+
   return {
     dashboard,
+    plan: createPlanService({
+      footprint,
+      inventory,
+      paths: discovery.paths,
+      footprints,
+      store: planStore,
+      settings: {
+        home,
+        // Home is the scope cleanup acts inside; it is never a target itself,
+        // which `classifyGenericTarget` enforces separately.
+        allowedRoots: [home, ...config.cleanup.additionalAllowedRoots.map(rawPathFromUtf8)],
+        excludedRoots: [
+          rawPathFromUtf8(locations.stateDirectory),
+          rawPathFromUtf8(locations.dataDirectory),
+          rawPathFromUtf8(locations.cacheDirectory),
+          rawPathFromUtf8(locations.configDirectory),
+          rawPathFromUtf8(homeTrashDirectory),
+        ],
+        trashDirectory: rawPathFromUtf8(homeTrashDirectory),
+        expiryMinutes: config.cleanup.planExpiryMinutes,
+      },
+      now: () => new Date(),
+    }),
+    apply: createApplyService({ store: planStore, actions, now: () => new Date() }),
+    undo: createUndoService({ journal: actions, actions }),
+    find: createFindService(explore),
     scan: createScanService(scanner, {
       crossFilesystems: config.scan.crossFilesystems,
       accounting: config.scan.accounting,
       excludes,
     }),
-    explore: createExploreService(scanner),
+    explore,
     snapshots,
-    footprint: createFootprintService(createBuiltInProviders({ packages: createPackageInventory(tools) }), discovery, footprints),
+    footprint,
     scanDefaults: {
       accounting: config.scan.accounting,
       crossFilesystems: config.scan.crossFilesystems,

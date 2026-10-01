@@ -37,7 +37,7 @@
       "pattern": "^[A-Za-z0-9._-]+$"
     },
     "entryFingerprint": {
-      "description": "What the reviewed plan observed. The helper refuses an item whose live identity differs.",
+      "description": "What the reviewed plan observed. The helper refuses an item whose live identity differs. Identity is the device, inode, kind, size, and modification time; `mountId` travels with them as context and is not compared, because the client cannot read the kernel's mount id and would be sending a number it invented.",
       "type": "object",
       "additionalProperties": false,
       "required": [
@@ -87,6 +87,10 @@
         },
         "expected": {
           "$ref": "#/$defs/entryFingerprint"
+        },
+        "reviewedBytes": {
+          "description": "What the reviewed plan measured for this entry. The helper renames a subtree in one syscall rather than re-measuring it, so it reports this number back partitioned by what actually happened; it is the plan's figure, not a fresh reading.",
+          "$ref": "#/$defs/decimalInteger"
         }
       }
     },
@@ -96,11 +100,16 @@
       "additionalProperties": false,
       "required": [
         "planId",
+        "journalDirectory",
         "targets"
       ],
       "properties": {
         "planId": {
           "$ref": "#/$defs/planId"
+        },
+        "journalDirectory": {
+          "description": "Where Disktop keeps its durable action journal. Node owns the location for the same reason it owns the index directory: the XDG rules live in one place.",
+          "$ref": "#/$defs/pathBytes"
         },
         "targets": {
           "type": "array",
@@ -246,6 +255,14 @@
         },
         "shared": {
           "type": "boolean"
+        },
+        "childEntries": {
+          "description": "Names directly inside a directory the scan entered, excluding `.` and `..`. Absent for anything else, including a directory that could not be opened: nobody looking is not the same answer as nothing being there.",
+          "$ref": "#/$defs/decimalInteger"
+        },
+        "broken": {
+          "description": "True only for a symlink whose target does not resolve. Removing one frees the link, not what it pointed at.",
+          "type": "boolean"
         }
       }
     },
@@ -315,6 +332,14 @@
         "underPath": {
           "description": "Restrict the page to this path and everything below it. A path the scan never saw is refused rather than answered with an empty page.",
           "$ref": "#/$defs/pathBytes"
+        },
+        "maxChildEntries": {
+          "description": "Keep only rows with at most this many direct children. A row with no count is left out, so an unreadable directory never answers a search for empty ones.",
+          "$ref": "#/$defs/decimalInteger"
+        },
+        "broken": {
+          "description": "Keep only broken symlinks, or only unbroken entries.",
+          "type": "boolean"
         }
       }
     },
@@ -512,10 +537,12 @@
         "unknown-request",
         "protected-path",
         "changed-target",
+        "unsafe-parent",
         "permission-denied",
         "unsupported-kernel",
         "unsupported-filesystem",
         "no-safe-trash",
+        "expired-plan",
         "journal-write-failed",
         "cancelled",
         "internal-error"
@@ -545,6 +572,269 @@
           "$ref": "#/$defs/decimalInteger"
         }
       }
+    },
+    "actionState": {
+      "description": "`uncertain` is what an interrupted action reads as until reconciliation can tell whether its last item happened. It is never promoted to `complete`.",
+      "type": "string",
+      "enum": [
+        "in-progress",
+        "complete",
+        "partial",
+        "uncertain"
+      ]
+    },
+    "itemOutcome": {
+      "type": "string",
+      "enum": [
+        "in-progress",
+        "completed",
+        "skipped",
+        "failed",
+        "uncertain"
+      ]
+    },
+    "journalItem": {
+      "description": "One reviewed item as the journal holds it. `destination` is where a move put it, which is what an undo reads to find the file again.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "position",
+        "path",
+        "outcome",
+        "bytes"
+      ],
+      "properties": {
+        "position": {
+          "$ref": "#/$defs/decimalInteger"
+        },
+        "path": {
+          "$ref": "#/$defs/pathBytes"
+        },
+        "destination": {
+          "$ref": "#/$defs/pathBytes"
+        },
+        "outcome": {
+          "$ref": "#/$defs/itemOutcome"
+        },
+        "message": {
+          "type": "string"
+        },
+        "bytes": {
+          "$ref": "#/$defs/decimalInteger"
+        },
+        "movedDevice": {
+          "description": "The device of what was moved. A destination is a name, and a name is free again as soon as the file leaves Trash, so an undo compares this before it moves anything back.",
+          "$ref": "#/$defs/decimalInteger"
+        },
+        "movedInode": {
+          "$ref": "#/$defs/decimalInteger"
+        }
+      }
+    },
+    "journalRecord": {
+      "description": "One action the helper performed. Times are unix milliseconds as decimal strings, like every other number here; the helper has no calendar and Node formats the public timestamp.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "planId",
+        "operation",
+        "startedAtMilliseconds",
+        "state",
+        "completed",
+        "skipped",
+        "failed",
+        "selectedBytes",
+        "bytesMovedToTrash",
+        "items"
+      ],
+      "properties": {
+        "id": {
+          "$ref": "#/$defs/planId"
+        },
+        "planId": {
+          "$ref": "#/$defs/planId"
+        },
+        "operation": {
+          "type": "string"
+        },
+        "startedAtMilliseconds": {
+          "$ref": "#/$defs/decimalInteger"
+        },
+        "finishedAtMilliseconds": {
+          "$ref": "#/$defs/decimalInteger"
+        },
+        "state": {
+          "$ref": "#/$defs/actionState"
+        },
+        "completed": {
+          "$ref": "#/$defs/decimalInteger"
+        },
+        "skipped": {
+          "$ref": "#/$defs/decimalInteger"
+        },
+        "failed": {
+          "$ref": "#/$defs/decimalInteger"
+        },
+        "selectedBytes": {
+          "$ref": "#/$defs/decimalInteger"
+        },
+        "bytesMovedToTrash": {
+          "description": "Bytes this action moved into Trash. On one filesystem that is usually not space anybody got back, which is why it is reported apart from the free-space readings.",
+          "$ref": "#/$defs/decimalInteger"
+        },
+        "freeBytesBefore": {
+          "$ref": "#/$defs/decimalInteger"
+        },
+        "freeBytesAfter": {
+          "$ref": "#/$defs/decimalInteger"
+        },
+        "items": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/journalItem"
+          }
+        }
+      },
+      "allOf": [
+        {
+          "if": {
+            "type": "object",
+            "properties": {
+              "state": {
+                "enum": [
+                  "complete",
+                  "partial",
+                  "uncertain"
+                ]
+              }
+            },
+            "required": [
+              "state"
+            ]
+          },
+          "then": {
+            "description": "A record that has been judged holds no item still claiming to be running.",
+            "properties": {
+              "items": {
+                "type": "array",
+                "items": {
+                  "type": "object",
+                  "properties": {
+                    "outcome": {
+                      "not": {
+                        "const": "in-progress"
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      ]
+    },
+    "journalResult": {
+      "description": "A page of action history, after every record an interrupted run left behind has been resolved.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "reconciled",
+        "records"
+      ],
+      "properties": {
+        "reconciled": {
+          "description": "How many interrupted records this call resolved. Zero on a clean history.",
+          "$ref": "#/$defs/decimalInteger"
+        },
+        "records": {
+          "type": "array",
+          "maxItems": 200,
+          "items": {
+            "$ref": "#/$defs/journalRecord"
+          }
+        },
+        "nextCursor": {
+          "$ref": "#/$defs/cursor"
+        }
+      }
+    },
+    "actionResult": {
+      "description": "What one reviewed action did. Selected bytes, bytes moved to Trash, and the two free-space readings are separate values on purpose: a Trash move on one filesystem is a large number of bytes moved and no space reclaimed, and other processes change free space at the same time, so neither number may be presented as the other.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "journalId",
+        "state",
+        "completed",
+        "skipped",
+        "failed",
+        "selectedBytes",
+        "bytesMovedToTrash",
+        "undoAvailable"
+      ],
+      "properties": {
+        "journalId": {
+          "description": "The durable record this action wrote. A result without one is a protocol violation.",
+          "$ref": "#/$defs/planId"
+        },
+        "state": {
+          "$ref": "#/$defs/actionState"
+        },
+        "completed": {
+          "$ref": "#/$defs/decimalInteger"
+        },
+        "skipped": {
+          "$ref": "#/$defs/decimalInteger"
+        },
+        "failed": {
+          "$ref": "#/$defs/decimalInteger"
+        },
+        "selectedBytes": {
+          "description": "What the plan reviewed, over every target it named, whatever became of them.",
+          "$ref": "#/$defs/decimalInteger"
+        },
+        "bytesMovedToTrash": {
+          "description": "The reviewed size of the items that actually moved. Usually not space anybody got back until Trash is emptied.",
+          "$ref": "#/$defs/decimalInteger"
+        },
+        "freeBytesBefore": {
+          "description": "Space available on the filesystem holding the first target, read before the first item.",
+          "$ref": "#/$defs/decimalInteger"
+        },
+        "freeBytesAfter": {
+          "$ref": "#/$defs/decimalInteger"
+        },
+        "undoAvailable": {
+          "type": "boolean"
+        }
+      },
+      "allOf": [
+        {
+          "if": {
+            "type": "object",
+            "properties": {
+              "state": {
+                "const": "complete"
+              }
+            },
+            "required": [
+              "state"
+            ]
+          },
+          "then": {
+            "description": "A complete action skipped nothing and failed nothing; anything else is partial.",
+            "properties": {
+              "skipped": {
+                "const": "0"
+              },
+              "failed": {
+                "const": "0"
+              }
+            }
+          }
+        }
+      ]
     }
   }
 }

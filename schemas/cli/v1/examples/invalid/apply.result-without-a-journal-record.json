@@ -1,0 +1,19 @@
+{
+  "schemaVersion": "1",
+  "command": "clean apply",
+  "generatedAt": "2026-10-01T08:42:03.551Z",
+  "status": "complete",
+  "exitCode": 0,
+  "data": {
+    "result": {
+      "planId": "plan-20261001T084119004Z-9f2c1ab0",
+      "state": "complete",
+      "completed": "1",
+      "skipped": "0",
+      "failed": "0",
+      "selectedBytes": "7314112512",
+      "bytesMovedToTrash": "7314112512",
+      "undoAvailable": true
+    }
+  }
+}

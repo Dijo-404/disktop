@@ -1,6 +1,6 @@
 # CLI contract
 
-Status: planned `1.0.0` command surface. `devices`, the `--json` dashboard, `alerts check`, `scan`, `explore`, `snapshots list|diff`, and `clean` (listing only) are implemented; every other command is declared in the parser and refuses with `not-implemented`. The JSON output contract in [`schemas/cli/v1/`](../schemas/cli/v1/) is normative and is validated by `tests/contract/cli-schema.test.mjs` against examples and by `tests/integration/cli-output.test.mjs` against what the CLI actually writes on a running host. The parser and generated help are normative now; completions become normative when they are implemented. See [PLAN.md](../PLAN.md#cli-and-outputs).
+Status: planned `1.0.0` command surface. `devices`, the `--json` dashboard, `alerts check`, `scan`, `explore`, `snapshots list|diff`, `clean`, `clean plan`, `clean apply`, `history`, `undo`, and `find empty|broken` are implemented; `report`, `timer`, `completion`, and `find duplicates|stale` are declared in the parser and refuse with `not-implemented`. The JSON output contract in [`schemas/cli/v1/`](../schemas/cli/v1/) is normative and is validated by `tests/contract/cli-schema.test.mjs` against examples and by `tests/integration/cli-output.test.mjs` against what the CLI actually writes on a running host. The parser and generated help are normative now; completions become normative when they are implemented. See [PLAN.md](../PLAN.md#cli-and-outputs).
 
 ## What works today
 
@@ -14,6 +14,11 @@ Status: planned `1.0.0` command surface. `devices`, the `--json` dashboard, `ale
 | `disktop explore [PATH] [--json]` | One page of `PATH` and everything below it, from the most recent scan covering it. `--sort`, `--order`, `--kind`, `--min-size`, `--max-size`, `--ext`, `--name`, `--older-than DAYS`, `--limit`, `--cursor`, `--type-totals`. |
 | `disktop snapshots list\|diff [--json]` | Lists saved snapshots, or compares two of them (`--from`, `--to`; the two most recent by default). |
 | `disktop clean [--json]` | Lists what every detector found, and changes nothing. `--dry-run` is accepted and redundant. `--category CATEGORY` narrows the list, `--limit COUNT` shortens it, and `--no-sizes` skips measurement so every size stays unknown. |
+| `disktop clean plan [FINDING_ID] [--path PATH] [--operation trash\|permanent\|empty-trash] [--json]` | Reviews one finding or path into a stored, expiring plan. Changes nothing. `--operation empty-trash` needs no subject and can name only this user's own Trash. |
+| `disktop clean apply PLAN_ID --yes [--permanent] [--json]` | Applies an already-reviewed plan, revalidating every item against the identity the plan recorded. |
+| `disktop history [--json]` | The durable action journal, with interrupted records resolved as it is read. |
+| `disktop undo ACTION_ID --yes [--json]` | Puts back what one Trash action moved. |
+| `disktop find empty\|broken [--path PATH] [--limit COUNT] [--json]` | Empty directories and dangling symlinks, read out of the most recent scan covering the path. |
 | `disktop --units iec\|si` | Switches human-readable units. Byte values in JSON never change. |
 | `disktop --help`, `disktop --version` | Generated from the one command table in `src/cli/parser.ts`. |
 
@@ -94,9 +99,38 @@ progress while it runs; that is Phase 7's work.
 
 ## Reviewed actions
 
-`clean --dry-run` lists eligible findings and actions. `clean plan` creates an expiring immutable plan for a finding or explicitly selected path. The plan contains its operation, scope, exact or estimated totals, warnings, reversibility, and required permission. Move and compression plans also fix the destination and whether the original source goes to Trash or is permanently removed. Large manifests remain disk-backed.
+`clean --dry-run` lists eligible findings and actions. `clean plan` creates an expiring immutable plan for a finding or explicitly selected path. The plan contains its operation, scope, exact or estimated totals, warnings, reversibility, and required permission. Move and compression plans will also fix the destination and whether the original source goes to Trash or is permanently removed. Large manifests remain disk-backed.
 
-`clean apply PLAN_ID --yes` applies the already-reviewed operation after live revalidation. `--yes` does not skip planning. `--permanent` only acknowledges a plan that already contains irreversible removal; it does not alter a Trash plan. CLI cleanup defaults to dry-run. `undo` uses the action journal and refuses destination collisions or changed outputs. Manager actions expose estimated or unknown scope honestly when a manager cannot preview exact counts.
+`clean apply PLAN_ID --yes` applies the already-reviewed operation after live revalidation. `--yes` does not skip planning. `--permanent` only acknowledges a plan that already contains irreversible removal; applying it to a Trash plan is refused rather than taken as an upgrade. CLI cleanup defaults to dry-run. `undo` uses the action journal and refuses destination collisions or changed outputs. Manager actions will expose estimated or unknown scope honestly when a manager cannot preview exact counts.
+
+A plan expires: past `expiresAt` it describes a filesystem that may have moved on, and
+applying it is refused rather than retried against whatever is there now. The expiry
+is `cleanup.plan_expiry_minutes` in `config.toml`, sixty minutes by default.
+
+An apply reports three numbers and never folds them into one. **Selected bytes** is
+what the plan reviewed. **Bytes moved to Trash** is the reviewed size of what actually
+moved, which on one filesystem is not space anybody got back until Trash is emptied.
+**Observed free-space change** is `statfs` before and after; it is absent rather than
+zero when either reading failed, and other processes write to the same filesystem, so
+it is never presented as this action's doing alone.
+
+An action that skipped or failed anything exits `3`, so a script that never reads the
+JSON still learns that what was reviewed is not what happened.
+
+Planning by `FINDING_ID` rediscovers first, so it takes as long as `disktop clean`
+does. Planning `--path` does not. A path whose bytes are not valid UTF-8 cannot be
+given as `--path`, because process arguments are UTF-8; such a path is still
+discovered, planned from its finding, moved, and restored byte for byte.
+
+## Finding empty directories and broken links
+
+`find empty` and `find broken` read the index a previous `scan` wrote; neither scans.
+The walk counted each directory's entries as it read them and asked once per symlink
+whether its target resolved, so both answers are already in the index. A directory the
+scan could not open carries no child count at all and therefore never answers a search
+for empty ones — "nobody looked" and "nothing is there" are different answers.
+`find duplicates` and `find stale` are declared and refuse; they need the hashing and
+timestamp-confidence work that is not built yet.
 
 ## Machine output
 
