@@ -131,6 +131,8 @@ export interface NativeIndexEntry {
   readonly ownerId: bigint;
   readonly modifiedNanoseconds: bigint;
   readonly shared: boolean;
+  readonly childEntries?: bigint;
+  readonly broken?: boolean;
 }
 
 export interface NativeTypeTotal {
@@ -249,6 +251,8 @@ function parseIndexEntry(value: unknown): NativeIndexEntry {
     ownerId: decimal(value.ownerId, "ownerId"),
     modifiedNanoseconds: decimal(value.modifiedNanoseconds, "modifiedNanoseconds"),
     shared: value.shared,
+    ...(value.childEntries === undefined ? {} : { childEntries: decimal(value.childEntries, "childEntries") }),
+    ...(typeof value.broken === "boolean" ? { broken: value.broken } : {}),
   };
 }
 

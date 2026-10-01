@@ -192,6 +192,8 @@ function encodeFilter(query: EntryQuery): Record<string, unknown> {
       : { modifiedBeforeNanoseconds: filter.modifiedBeforeNanoseconds.toString(10) }),
     ...(filter.ownerId === undefined ? {} : { ownerId: filter.ownerId.toString(10) }),
     ...(filter.kinds === undefined ? {} : { kinds: [...filter.kinds] }),
+    ...(filter.maxChildEntries === undefined ? {} : { maxChildEntries: filter.maxChildEntries.toString(10) }),
+    ...(filter.broken === undefined ? {} : { broken: filter.broken }),
   };
 }
 
@@ -210,6 +212,8 @@ function toIndexedEntry(entry: NativeIndexEntry): IndexedEntry {
     ownerId: entry.ownerId,
     modifiedNanoseconds: entry.modifiedNanoseconds,
     shared: entry.shared,
+    ...(entry.childEntries === undefined ? {} : { childEntries: entry.childEntries }),
+    ...(entry.broken === undefined ? {} : { broken: entry.broken }),
   };
 }
 
