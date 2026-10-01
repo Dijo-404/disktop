@@ -33,13 +33,13 @@ function exchange(requests) {
 test("native hello reports only the implemented operations", async () => {
   const [response] = await exchange([handshakeRequest("hello-1")]);
   const result = parseHandshakeResponse(JSON.stringify(response), "hello-1");
-  assert.deepEqual(result.supportedOperations, ["hello", "probe", "cancel", "scan", "query-index", "trash", "erase", "empty-trash", "journal-reconcile"]);
+  assert.deepEqual(result.supportedOperations, ["hello", "probe", "cancel", "scan", "query-index", "trash", "erase", "empty-trash", "restore", "journal-reconcile"]);
   // Trash is implemented; the operations whose phase has not arrived are not
   // listed, so a client cannot discover one by name and assume it works.
-  for (const implemented of ["trash", "erase", "empty-trash"]) {
+  for (const implemented of ["trash", "erase", "empty-trash", "restore"]) {
     assert.equal(result.supportedOperations.includes(implemented), true);
   }
-  for (const mutation of ["copy-move", "compress", "restore", "dedup-hardlink"]) {
+  for (const mutation of ["copy-move", "compress", "dedup-hardlink", "hash-candidates"]) {
     assert.equal(result.supportedOperations.includes(mutation), false);
   }
   assert.equal(typeof result.kernelCapabilities.openat2.available, "boolean");

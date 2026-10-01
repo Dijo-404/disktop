@@ -32,7 +32,7 @@ use std::thread::JoinHandle;
 
 const PROTOCOL_VERSION: u16 = 1;
 const MAX_REQUEST_BYTES: usize = 1024 * 1024;
-const SUPPORTED_OPERATIONS: [&str; 9] = [
+const SUPPORTED_OPERATIONS: [&str; 10] = [
     "hello",
     "probe",
     "cancel",
@@ -41,12 +41,12 @@ const SUPPORTED_OPERATIONS: [&str; 9] = [
     "trash",
     "erase",
     "empty-trash",
+    "restore",
     "journal-reconcile",
 ];
-const PLANNED_OPERATIONS: [&str; 9] = [
+const PLANNED_OPERATIONS: [&str; 8] = [
     "hash-candidates",
     "inspect",
-    "restore",
     "copy-move",
     "compress",
     "dedup-hardlink",
@@ -105,6 +105,13 @@ struct EraseArguments {
     plan_id: String,
     journal_directory: String,
     targets: Vec<TargetArguments>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct RestoreArguments {
+    journal_directory: String,
+    journal_id: String,
 }
 
 #[derive(Deserialize)]
@@ -383,6 +390,7 @@ fn handle_request(server: &Arc<Server>, line: &[u8]) {
         "trash" => trash(server, responder, request.arguments),
         "erase" => erase(server, responder, request.arguments),
         "empty-trash" => empty_trash(server, responder, request.arguments),
+        "restore" => restore(server, responder, request.arguments),
         "journal-reconcile" => journal_reconcile(&responder, request.arguments),
         "hello" | "probe" if request.arguments.is_empty() => {
             responder.emit("complete", json!({ "result": hello_result() }));
@@ -886,6 +894,39 @@ fn empty_trash(server: &Arc<Server>, responder: Responder, arguments: Map<String
             );
         },
     );
+}
+
+/// Put back what a Trash move moved.
+fn restore(server: &Arc<Server>, responder: Responder, arguments: Map<String, Value>) {
+    let arguments: RestoreArguments = match decode(arguments) {
+        Ok(arguments) => arguments,
+        Err(message) => return fail(&responder, "invalid-arguments", &message),
+    };
+    let journal_directory = match decoded_directory(&arguments.journal_directory) {
+        Ok(directory) => directory,
+        Err(message) => return fail(&responder, "invalid-arguments", &message),
+    };
+    if !valid_request_id(&arguments.journal_id) {
+        return fail(
+            &responder,
+            "invalid-arguments",
+            "journalId must be an ID this journal issued",
+        );
+    }
+    if let Err(message) = require_containment() {
+        return fail(&responder, "unsupported-kernel", &message);
+    }
+
+    let request = actions::RestoreRequest {
+        journal_directory,
+        journal_id: arguments.journal_id,
+    };
+    spawn_mutation(server, responder, "restore", move |responder, cancelled| {
+        report_action(
+            responder,
+            actions::run_restore(&request, &mut reporter(responder), cancelled),
+        );
+    });
 }
 
 fn require_containment() -> Result<(), String> {
@@ -1551,6 +1592,7 @@ mod tests {
                 "trash",
                 "erase",
                 "empty-trash",
+                "restore",
                 "journal-reconcile"
             ])
         );
@@ -2246,6 +2288,158 @@ mod tests {
 
         let item = item_results(&events, "empty-2")[0];
         assert_eq!(item["itemResult"]["reason"], "protected-path");
+    }
+
+    // --- Restore -------------------------------------------------------------
+
+    fn restore_request(id: &str, sandbox: &Sandbox, journal_id: &str) -> String {
+        let mut state = sandbox.bytes();
+        state.extend_from_slice(b"/state");
+        format!(
+            "{{\"protocolVersion\":1,\"requestId\":\"{id}\",\"operation\":\"restore\",\
+               \"arguments\":{{\"journalDirectory\":\"{}\",\"journalId\":\"{journal_id}\"}}}}\n",
+            crate::base64::encode(&state),
+        )
+    }
+
+    fn run_restore(id: &str, sandbox: &Sandbox, journal_id: &str) -> Vec<Value> {
+        session(&[restore_request(id, sandbox, journal_id)], |events| {
+            terminal(events, id)
+        })
+    }
+
+    fn journal_id_of(events: &[Value], request_id: &str) -> String {
+        completion(events, request_id)["result"]["journalId"]
+            .as_str()
+            .expect("a completed action names its journal record")
+            .to_owned()
+    }
+
+    #[test]
+    fn restoring_puts_every_trashed_file_back_where_it_came_from() {
+        let sandbox = Sandbox::new("restore-roundtrip");
+        sandbox.directory(b"work");
+        sandbox.file(b"work/one.bin", 64);
+        sandbox.directory(b"work/cache");
+        sandbox.file(b"work/cache/blob", 32);
+
+        let mut file = sandbox.bytes();
+        file.extend_from_slice(b"/work/one.bin");
+        let mut directory = sandbox.bytes();
+        directory.extend_from_slice(b"/work/cache");
+
+        let trashed = run_trash(
+            "trash-30",
+            &sandbox,
+            &[target(&file, 64), target(&directory, 4096)],
+        );
+        let journal_id = journal_id_of(&trashed, "trash-30");
+        assert!(!sandbox.path().join("work/one.bin").exists());
+
+        let events = run_restore("restore-1", &sandbox, &journal_id);
+        let result = &completion(&events, "restore-1")["result"];
+
+        assert_eq!(result["completed"], "2");
+        assert_eq!(result["state"], "complete");
+        assert_eq!(
+            result["undoAvailable"], false,
+            "an undo is not itself undoable"
+        );
+        assert!(sandbox.path().join("work/one.bin").exists());
+        assert!(sandbox.path().join("work/cache/blob").exists());
+        assert!(
+            !sandbox.path().join("trash-home/files/one.bin").exists(),
+            "what came back is no longer in Trash"
+        );
+        assert!(
+            !sandbox
+                .path()
+                .join("trash-home/info/one.bin.trashinfo")
+                .exists(),
+            "its metadata goes with it"
+        );
+    }
+
+    #[test]
+    fn restoring_a_name_something_else_now_occupies_leaves_the_new_file_alone() {
+        let sandbox = Sandbox::new("restore-collision");
+        sandbox.directory(b"work");
+        sandbox.file(b"work/notes.txt", 16);
+        let mut file = sandbox.bytes();
+        file.extend_from_slice(b"/work/notes.txt");
+
+        let trashed = run_trash("trash-31", &sandbox, &[target(&file, 16)]);
+        let journal_id = journal_id_of(&trashed, "trash-31");
+
+        // Somebody writes a new file at the original path before the undo.
+        sandbox.file(b"work/notes.txt", 999);
+
+        let events = run_restore("restore-2", &sandbox, &journal_id);
+        let result = &completion(&events, "restore-2")["result"];
+        assert_eq!(result["skipped"], "1");
+        assert_eq!(result["completed"], "0");
+        assert_eq!(result["state"], "partial");
+        assert_eq!(
+            std::fs::metadata(sandbox.path().join("work/notes.txt"))
+                .unwrap()
+                .len(),
+            999,
+            "the newer file is never overwritten"
+        );
+        assert!(sandbox.path().join("trash-home/files/notes.txt").exists());
+
+        let item = item_results(&events, "restore-2")[0];
+        assert_eq!(item["itemResult"]["reason"], "changed-target");
+    }
+
+    #[test]
+    fn restoring_the_same_record_twice_finds_nothing_left_to_put_back() {
+        let sandbox = Sandbox::new("restore-twice");
+        sandbox.directory(b"work");
+        sandbox.file(b"work/one.bin", 16);
+        let mut file = sandbox.bytes();
+        file.extend_from_slice(b"/work/one.bin");
+
+        let trashed = run_trash("trash-32", &sandbox, &[target(&file, 16)]);
+        let journal_id = journal_id_of(&trashed, "trash-32");
+
+        run_restore("restore-3", &sandbox, &journal_id);
+        let events = run_restore("restore-4", &sandbox, &journal_id);
+        let result = &completion(&events, "restore-4")["result"];
+        assert_eq!(result["completed"], "0");
+        assert_eq!(result["skipped"], "1");
+        assert!(sandbox.path().join("work/one.bin").exists());
+    }
+
+    #[test]
+    fn a_record_that_removed_things_permanently_has_nothing_to_restore() {
+        let sandbox = Sandbox::new("restore-erase");
+        sandbox.directory(b"work");
+        sandbox.file(b"work/gone.bin", 16);
+        let mut file = sandbox.bytes();
+        file.extend_from_slice(b"/work/gone.bin");
+
+        let erased = run_erase("erase-30", &sandbox, &[target(&file, 16)]);
+        let journal_id = journal_id_of(&erased, "erase-30");
+
+        let events = run_restore("restore-5", &sandbox, &journal_id);
+        let event = &events
+            .iter()
+            .find(|event| event["requestId"] == "restore-5" && event["event"] == "error")
+            .expect("restoring a permanent removal is refused");
+        assert_eq!(event["error"]["code"], "invalid-arguments");
+    }
+
+    #[test]
+    fn an_unknown_journal_record_is_refused_by_name() {
+        let sandbox = Sandbox::new("restore-unknown");
+        sandbox.directory(b"state");
+        let events = run_restore("restore-6", &sandbox, "act-0-deadbeefdeadbeef");
+        let event = &events
+            .iter()
+            .find(|event| event["requestId"] == "restore-6" && event["event"] == "error")
+            .expect("an unknown record is refused");
+        assert_eq!(event["error"]["code"], "unknown-request");
     }
 
     /// Feeds `serve` one queued chunk at a time and reports end-of-stream only

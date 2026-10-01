@@ -1,0 +1,9 @@
+{
+  "protocolVersion": 1,
+  "requestId": "restore-02",
+  "operation": "restore",
+  "arguments": {
+    "journalDirectory": "L2hvbWUvZXhhbXBsZS8ubG9jYWwvc3RhdGUvZGlza3RvcA==",
+    "path": "L2hvbWUvZXhhbXBsZS8uY2FjaGUvcGlw"
+  }
+}
