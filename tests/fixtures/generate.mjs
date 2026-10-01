@@ -331,3 +331,77 @@ export async function createCacheFixture() {
   fixture.cleanup = sandboxCleanup(fixture);
   return fixture;
 }
+
+/**
+ * A home directory holding game libraries, Wine prefixes, disk images, and the
+ * readings the storage detectors parse.
+ *
+ * One Steam manifest is deliberately malformed: a detector that trusted every
+ * manifest would report a zero-byte game, which reads as a game that can go.
+ */
+export async function createStorageFixture() {
+  const root = await sandbox();
+  const home = join(root, "home");
+
+  const steamApps = join(home, ".local", "share", "Steam", "steamapps");
+  await mkdir(join(steamApps, "common", "Half-Life"), { recursive: true });
+  await writeFile(join(steamApps, "common", "Half-Life", "hl.bin"), "g".repeat(4096));
+  await writeFile(
+    join(steamApps, "appmanifest_70.acf"),
+    '"AppState"\n{\n\t"appid"\t\t"70"\n\t"name"\t\t"Half-Life"\n\t"installdir"\t\t"Half-Life"\n\t"SizeOnDisk"\t\t"4294967296"\n}\n',
+  );
+  await writeFile(
+    join(steamApps, "appmanifest_999.acf"),
+    '"AppState"\n{\n\t"appid"\t\t"999"\n\t"name"\t\t"Broken Game"\n\t"installdir"\t\t"Broken"\n\t"SizeOnDisk"\t\t"not a number"\n}\n',
+  );
+  await writeFile(
+    join(steamApps, "libraryfolders.vdf"),
+    `"libraryfolders"\n{\n\t"0"\n\t{\n\t\t"path"\t\t"${join(home, ".local", "share", "Steam")}"\n\t}\n}\n`,
+  );
+  const compatdata = join(steamApps, "compatdata", "70", "pfx");
+  await mkdir(join(compatdata, "drive_c"), { recursive: true });
+
+  const wine = join(home, ".wine");
+  await mkdir(join(wine, "drive_c", "windows"), { recursive: true });
+  await writeFile(join(wine, "system.reg"), "WINE REGISTRY Version 2\n");
+
+  const images = join(home, ".local", "share", "gnome-boxes", "images");
+  await mkdir(images, { recursive: true });
+  const sparse = join(images, "fedora.qcow2");
+  const handle = await open(sparse, "w");
+  await handle.truncate(64 * 1024 * 1024);
+  await handle.close();
+  await writeFile(join(images, "notes.txt"), "not an image");
+
+  const virtualbox = join(home, "VirtualBox VMs", "build");
+  await mkdir(virtualbox, { recursive: true });
+  await writeFile(join(virtualbox, "build.vdi"), "v".repeat(8192));
+
+  const swaps = join(root, "proc-swaps");
+  await writeFile(
+    swaps,
+    "Filename\t\t\t\tType\t\tSize\t\tUsed\t\tPriority\n/swapfile                               file\t\t8388604\t\t262144\t\t-2\n",
+  );
+
+  const timeshift = join(root, "timeshift");
+  await mkdir(join(timeshift, "snapshots", "2026-09-01_00-00-01"), { recursive: true });
+
+  const fixture = {
+    root,
+    home,
+    paths: {
+      steamApps,
+      steamGame: join(steamApps, "common", "Half-Life"),
+      steamBroken: join(steamApps, "common", "Broken"),
+      protonPrefix: join(steamApps, "compatdata", "70"),
+      wine,
+      boxesImage: sparse,
+      boxesNotes: join(images, "notes.txt"),
+      virtualboxImage: join(virtualbox, "build.vdi"),
+      swaps,
+      timeshift,
+    },
+  };
+  fixture.cleanup = sandboxCleanup(fixture);
+  return fixture;
+}
