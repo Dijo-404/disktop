@@ -23,6 +23,13 @@ import {
   createVirtualMachineProvider,
   createWineProvider,
 } from "./storage/index.js";
+import {
+  createCrashProvider,
+  createLogProvider,
+  createOpenDeletedProvider,
+  createSmartProvider,
+  createWindowsSubsystemProvider,
+} from "./diagnostics/index.js";
 
 /**
  * Every detector Disktop ships, in one list.
@@ -54,5 +61,10 @@ export function createBuiltInProviders(ports: BuiltInProviderPorts): readonly Fi
     createSystemSnapshotsProvider(),
     createSwapProvider(),
     createInstalledAppsProvider(ports.packages),
+    createLogProvider(),
+    createCrashProvider(),
+    createOpenDeletedProvider(),
+    createSmartProvider(),
+    createWindowsSubsystemProvider(),
   ];
 }
