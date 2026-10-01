@@ -261,3 +261,72 @@ export async function createDeveloperFixture() {
   fixture.cleanup = sandboxCleanup(fixture);
   return fixture;
 }
+
+/** One file of known size, creating the directories above it. */
+async function sizedFile(path, bytes) {
+  await mkdir(dirname(path), { recursive: true });
+  await writeFile(path, "c".repeat(bytes));
+}
+
+/**
+ * A home directory holding the cache and model roots the Phase 3 detectors
+ * look for. Each root holds one file, so a detector that reports it has
+ * reported something real.
+ */
+export async function createCacheFixture() {
+  const root = await sandbox();
+  const home = join(root, "home");
+
+  const roots = {
+    npm: join(home, ".npm", "_cacache"),
+    yarn: join(home, ".cache", "yarn"),
+    pip: join(home, ".cache", "pip"),
+    cargoRegistry: join(home, ".cargo", "registry"),
+    goBuild: join(home, ".cache", "go-build"),
+    gradle: join(home, ".gradle", "caches"),
+    huggingface: join(home, ".cache", "huggingface"),
+    ollama: join(home, ".ollama", "models"),
+    jetbrainsCache: join(home, ".cache", "JetBrains"),
+    vscodeCache: join(home, ".config", "Code", "Cache"),
+    vscodeExtensions: join(home, ".vscode", "extensions"),
+    androidSdk: join(home, "Android", "Sdk"),
+    androidAvd: join(home, ".android", "avd"),
+  };
+  for (const path of Object.values(roots)) {
+    await sizedFile(join(path, "stored.bin"), 1024);
+  }
+
+  // A Chrome profile beside its cache, and two Electron applications.
+  const chromeProfile = join(home, ".config", "google-chrome", "Default");
+  await sizedFile(join(chromeProfile, "History"), 2048);
+  await sizedFile(join(chromeProfile, "Cache", "data_0"), 4096);
+  const chromeCache = join(home, ".cache", "google-chrome", "Default", "Cache");
+  await sizedFile(join(chromeCache, "data_0"), 4096);
+
+  const firefoxProfile = join(home, ".mozilla", "firefox", "abc123.default-release");
+  await sizedFile(join(firefoxProfile, "places.sqlite"), 2048);
+  const firefoxCache = join(home, ".cache", "mozilla", "firefox", "abc123.default-release", "cache2");
+  await sizedFile(join(firefoxCache, "entries"), 4096);
+
+  const slack = join(home, ".config", "Slack");
+  await sizedFile(join(slack, "Cache", "data_0"), 4096);
+  await sizedFile(join(slack, "GPUCache", "data_0"), 1024);
+  const quiet = join(home, ".config", "quiet-app");
+  await sizedFile(join(quiet, "settings.json"), 64);
+
+  // An application directory whose name is not valid UTF-8.
+  const oddApp = bytePath(join(home, ".config"), Buffer.from([0x61, 0x70, 0x70, 0xff]));
+  await mkdir(oddApp, { recursive: true });
+  await mkdir(Buffer.concat([oddApp, Buffer.from("/Cache")]), { recursive: true });
+  await writeFile(Buffer.concat([oddApp, Buffer.from("/Cache/data_0")]), "o".repeat(2048));
+
+  const fixture = {
+    root,
+    home,
+    roots,
+    browsers: { chromeProfile, chromeCache, firefoxProfile, firefoxCache },
+    electron: { slack, quiet, oddApp: oddApp.toString("latin1") },
+  };
+  fixture.cleanup = sandboxCleanup(fixture);
+  return fixture;
+}
