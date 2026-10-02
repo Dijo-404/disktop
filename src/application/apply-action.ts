@@ -52,6 +52,8 @@ export interface ApplyDependencies {
    * surface with nothing to contradict the plan, and the plan stands.
    */
   readonly currentRuleHashes?: () => ReadonlySet<string>;
+  /** 0 means Disktop runs as root, where only a manager plan may be applied. */
+  readonly effectiveUserId?: number;
 }
 
 const CONCURRENCY_NOTE =
@@ -87,6 +89,12 @@ export function createApplyService(dependencies: ApplyDependencies): ApplyServic
         return refuse(
           "invalid-input",
           `Applying ${plan.id} needs --yes. It would ${describe(plan)}.`,
+        );
+      }
+      if (dependencies.effectiveUserId === 0 && plan.operation !== "manager") {
+        return refuse(
+          "permission-denied",
+          `${plan.id} changes files directly, and Disktop running as root changes no file itself. Apply it as the user who owns them.`,
         );
       }
       if (isExpired(plan, dependencies.now())) {

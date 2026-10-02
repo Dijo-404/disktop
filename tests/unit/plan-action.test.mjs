@@ -119,6 +119,7 @@ function service(overrides = {}) {
         excludedRoots: [rawPathFromUtf8("/home/example/.local/state/disktop")],
         trashDirectory: rawPathFromUtf8("/home/example/.local/share/Trash"),
         expiryMinutes: 60,
+        ...(overrides.effectiveUserId === undefined ? {} : { effectiveUserId: overrides.effectiveUserId }),
       },
       now: () => NOW,
       ...(overrides.ruleHashes === undefined
@@ -753,4 +754,13 @@ test("a manager the preview cannot reach now is refused with its reason", async 
   const outcome = await planner.plan({ operation: "manager", findingId: "managers:docker.remove-stopped-containers" }, SIGNAL);
   assert.equal(outcome.kind, "refused");
   assert.match(outcome.failure.message, /not installed/);
+});
+
+test("as root, a generic action is refused before anything is reviewed", async () => {
+  const { service: planner, saved } = service({ effectiveUserId: 0 });
+  const outcome = await planner.plan({ operation: "trash", findingId: "cache.language:pip" }, SIGNAL);
+  assert.equal(outcome.kind, "refused");
+  assert.equal(outcome.failure.code, "permission-denied");
+  assert.match(outcome.failure.message, /root/);
+  assert.equal(saved.length, 0);
 });

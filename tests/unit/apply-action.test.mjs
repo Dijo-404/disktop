@@ -69,6 +69,7 @@ function service(stored, overrides = {}) {
         },
       },
       now: () => overrides.now ?? NOW,
+      ...(overrides.effectiveUserId === undefined ? {} : { effectiveUserId: overrides.effectiveUserId }),
       ...(overrides.currentRuleHashes === undefined
         ? {}
         : { currentRuleHashes: overrides.currentRuleHashes }),
@@ -482,4 +483,18 @@ test("a manager result whose command failed is not complete", async () => {
   const { service: apply } = service(reviewed, { result: failed });
   const outcome = await apply.apply({ planId: reviewed.id, confirmed: true, acknowledgePermanent: true }, SIGNAL);
   assert.equal(outcome.result.state, "partial");
+});
+
+test("as root, a stored Trash plan is refused and a manager plan still runs", async () => {
+  const trash = plan();
+  const asRoot = service(trash, { effectiveUserId: 0 });
+  const refused = await asRoot.service.apply({ planId: trash.id, confirmed: true }, SIGNAL);
+  assert.equal(refused.kind, "refused");
+  assert.equal(refused.failure.code, "permission-denied");
+  assert.equal(asRoot.applied.length, 0);
+
+  const manager = await managerPlan();
+  const managed = service(manager, { effectiveUserId: 0, result: MANAGER_RESULT });
+  const applied = await managed.service.apply({ planId: manager.id, confirmed: true, acknowledgePermanent: true }, SIGNAL);
+  assert.equal(applied.kind, "applied");
 });
