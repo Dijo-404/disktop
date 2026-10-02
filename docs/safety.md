@@ -1,10 +1,10 @@
 # Cleanup safety contract
 
-Status: the generic actions are implemented. `disktop clean plan`, `clean apply`,
-`history`, and `undo` carry out Trash, permanent erase, emptying Trash, and restore
-through the pipeline below, and the Rust helper holds the durable journal. Move,
-compression, hardlink replacement, declarative rules, and every manager-backed
-action are still design contract, as marked in [PLAN.md](../PLAN.md#action-and-safety-architecture).
+Status: every action in [PLAN.md](../PLAN.md#action-and-safety-architecture) is
+implemented. `disktop clean plan`, `clean apply`, `history`, and `undo` carry out Trash,
+permanent erase, emptying Trash, restore, hardlink replacement, cross-disk move,
+compression, declarative rules, and manager-backed cleanup through the pipeline below,
+and the Rust helper holds the durable journal.
 [threat-model.md](threat-model.md) states the attackers and residual risks these rules
 answer to; [adr/0004](adr/0004-reviewed-action-pipeline.md) records why there is one
 pipeline and one journal.
@@ -97,6 +97,48 @@ Permanent erase, hardlink replacement after release of the old inode, permanent-
 Where a move or compress publishes is judged by `classifyDestination`, which is deliberately a different question from `classifyGenericTarget`. A target is something Disktop removes, so it has to be inside a root the user said Disktop may clean. A destination is somewhere Disktop writes, and a cross-disk move means writing outside those roots by definition — `/mnt/archive` is a correct destination and an incorrect target. The allowlist and the mount-root rule therefore do not apply to a destination; the protected system roots, the shared container roots themselves, and Trash and Disktop's own state still do. Cross-disk move and compression stage and verify an output before removing or trashing the source. For a move, the verification is a digest taken over the bytes as they are read compared against a digest of the same bytes read back after an `fsync`. For a compression it is a decompression: the archive is read back the way anybody recovering from it would read it, and the tar stream that comes out is digested and compared against the one that went in — content, not an entry count, because a member rewritten to the same length keeps a count identical. The source is then revalidated once more immediately before it is disposed of, so anything written to it during a copy that ran for a long time stops the disposal rather than being released unreviewed. Either way, "it arrived whole" is a statement rather than a hope. On failure, they preserve the source and remove what they staged. A source that cannot be disposed of after a successful publish is recorded as uncertain, not failed: the action half happened, and calling it a failure would invite a second run into a destination the first one has already filled. Hardlink replacement requires same-mount identical content and compatible ownership and metadata; it warns that later writes are shared. The plan names the copy it keeps rather than leaving it to entry order, because the operation is irreversible and "the first one" is the kind of implicit rule that puts the wrong file's inode on the releasing end of it. The helper proves the content identical by reading both files in full immediately before it links; a digest groups candidates and never authorises the replacement. See [adr/0006](adr/0006-content-identity-and-archive-dependencies.md).
 
 Manager-owned state is changed only through scoped, fixed-argument manager adapters with probe, preview where supported, live preflight, apply, verification, permission mapping, and journal records. A manager may not provide exact item counts or byte savings; the UI must say so. An adapter never substitutes `rm -rf` for a missing manager.
+
+## What a manager action does
+
+A manager plan holds an action, its items, and its parameters. Its commands are derived
+from those by the fixed templates in `src/domain/managers.ts` whenever the plan is read,
+so editing a plan file can change which reviewed items are named and cannot change which
+program runs or with which options; an item whose id could read as an option is refused.
+Docker and Podman removals are never forced, so the engine refuses anything still in
+use, and only volumes the engine marked anonymous are ever offered: a named volume no
+container uses can still hold the only copy of a database. An old-kernel purge keeps the
+running and the newest kernel, is offered only when a simulated removal takes exactly
+the reviewed packages, and runs as `dpkg --purge` or `rpm -e`, which never remove
+anything else. Crash and temporary files go only where systemd-tmpfiles' own age rules
+send them.
+
+Apply preflights live: an item that is gone or in use again is skipped, and the whole
+action is refused when the running kernel has joined the set or a simulation no longer
+matches. The executor journals through one helper session — the action and its items
+before anything runs, each command's start before it is spawned and its exit after —
+and asks the manager again afterwards what really went. A command that started and never
+reported back is `uncertain` after reconciliation, and so is its action.
+
+Only a root-privilege command is escalated, as `sudo -- /usr/bin/TOOL ARGS` (with `-n`
+when nobody can answer a prompt) or, interactively without sudo, `pkexec`. A refused
+password skips the rest of the action, is journalled, and makes the result partial; it
+is never a reason to try another way.
+
+## Running as root
+
+Under EUID 0, Disktop plans and applies no change to a file itself, and the helper
+refuses every user-file mutation from its side as well. Scans and listings work, which is
+what an administrator's read-only per-user scan needs, and a reviewed manager action
+still runs.
+
+## What a crash leaves staged
+
+The helper journals the device and inode of everything it stages — a partial copy, an
+archive being written, the link a hardlink replacement exchanges — the moment the name
+is created. When reconciliation finds an item a crash left uncertain, it removes that
+staged name only if it still holds exactly that inode, the same thing a failed copy does
+to its own output at runtime; anything else at that name is left in place and named in
+the item's record.
 
 ## What an action checked afterwards
 

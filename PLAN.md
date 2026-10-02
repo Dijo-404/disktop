@@ -10,7 +10,7 @@ The user journey is: open a fast dashboard → identify a full filesystem → in
 
 ### Current implementation boundary
 
-The development package remains private at `0.0.0`. **Phases 0, 1, 2, 3, 4, and 5 are complete**; Phase 6 is the next gate.
+The development package remains private at `0.0.0`. **Phases 0 through 6 are complete**; Phase 7 is the next gate.
 
 Phase 0 delivered the contracts, not features: normative JSON Schemas for CLI output (`schemas/cli/v1/`) and the helper protocol (`schemas/native/v1/`) with valid and invalid examples under contract test; byte-exact path handling and the protected-path refusal policy in `src/domain`; XDG locations, configuration defaults, and a strict TOML subset reader in `src/storage`; the source dependency rule enforced by `eslint.config.mjs` and proven by `tests/unit/dependency-rules.test.mjs`; the filesystem fixture generator in `tests/fixtures/generate.mjs`; the fixed kernel and architecture minimums in `docs/support-matrix.md`; the action threat model in `docs/threat-model.md`; and ADRs 0001 to 0005.
 
@@ -53,8 +53,23 @@ an apply refuses a plan whose rule has been edited since it was reviewed. Every 
 now carries what the apply checked after the fact, and a failed check keeps it off
 `complete`.
 
-`report`, `timer`, and `completion` are declared in the parser and refuse with
-`not-implemented`; the helper still refuses `inspect` and every manager operation.
+Phase 6 delivered manager cleanup and alerts, and closed the gaps earlier phases left.
+Adapters for apt, dnf, pacman, journald, Snap, Flatpak, Docker and Podman (images,
+stopped containers, build cache, anonymous volumes), old kernels, and systemd-tmpfiles
+(temporary and crash/core files) discover and preview through the read-only `ToolPort`,
+preflight live, and verify by asking the manager again; a manager plan's commands are
+derived from its items by fixed templates and never stored. The helper journals manager
+actions with `manager-begin`, `manager-append`, and `manager-finish`, and only a
+root-privilege command is escalated, through `sudo` or `pkexec`; under EUID 0 Disktop
+changes no file itself. `explore --owners` gives the per-user breakdown for any scanned
+path, `alerts check --notify` uses `notify-send`, and `timer install|uninstall` manages an
+hourly user timer that runs only the alert check. Plans now carry a digest of every
+reviewed directory's subtree, taken by `inspect` and checked before the directory is
+touched; a target with a mount below it is refused; staged output a crash leaves behind is
+released on reconciliation; and stored plans, tool output, and the `ToolPort` allowlist
+fail closed where they did not.
+
+`report` and `completion` are declared in the parser and refuse with `not-implemented`.
 Explore, Clean, Dev, Apps, and History appear as TUI tabs and say they have
 nothing to show yet; the work so far is reachable from the CLI, and wiring it into
 those tabs is Phase 7.
@@ -367,7 +382,7 @@ Each phase ends with a testable gate. No phase publishes to npm.
 | 3. Findings and application inventory **(complete)** | Implement every dev, language, AI, browser, Electron, game, VM, package, and per-user detector plus SMART, open-deleted, snapshot, log, crash, swap, and WSL diagnostics. | Each provider passes fixtures; optional tools and permissions show capability states; no duplicate findings or unlabelled size estimates. |
 | 4. Safe action engine **(complete)** | Implement immutable plans, native journal, Trash, undo, permanent erase, empty folders, broken symlinks, user caches/temp cleanup, Trash emptying, action history, interruption and restart recovery. | All mutations pass sandbox, symlink/bind-mount, collision, protected-root, invalid-byte, crash, and undo tests. Moved-to-Trash and observed free-space values are distinct. |
 | 5. Advanced analysis and actions **(complete)** | Implement staged duplicate hashes, stale evidence, keep rules, hardlink replacement, cross-disk move, compression, custom rules, and action verification. | Final byte compare, metadata compatibility, copy/hash/fsync, partial-failure recovery, rule limits, and explicit irreversible-action tests pass. |
-| 6. Managed Linux cleanup and alerts | Implement apt/dnf/pacman, journald, Snap, Flatpak, Docker/Podman including volumes, old kernels, `/var/crash`/core policy, system tmpfiles, scoped privilege requests, per-user breakdown, `notify-send` and systemd timer. | Distro-specific adapter tests and host/VM checks pass; every manager action has bounded scope, live preflight, apply, verify, permission, and unsupported cases, with preview where the manager supports it. Timer install/uninstall changes only user units and never cleans automatically. |
+| 6. Managed Linux cleanup and alerts **(complete)** | Implement apt/dnf/pacman, journald, Snap, Flatpak, Docker/Podman including volumes, old kernels, `/var/crash`/core policy, system tmpfiles, scoped privilege requests, per-user breakdown, `notify-send` and systemd timer. | Distro-specific adapter tests and host/VM checks pass; every manager action has bounded scope, live preflight, apply, verify, permission, and unsupported cases, with preview where the manager supports it. Timer install/uninstall changes only user units and never cleans automatically. |
 | 7. Complete surfaces | Finish all TUI views, themes, vim/mouse/help, search, config, JSON/CSV/HTML exports, all CLI commands, completions, readable help, README, demo GIF, and no-telemetry statement. | A user can complete every core journey at 80×24; all commands work with no TTY and valid stdout; exports survive malicious filenames. |
 | 8. Whole-product validation and sole release | Run Linux distro CI, native builds, PTY and recovery suites, package smoke tests, benchmarks, docs review, support-matrix checks, and guarded publish workflow. | All rows in the feature matrix below pass; no unresolved critical deletion or data-loss bug; packed tarball and `npx` work on clean accounts. Publish `1.0.0` once, then verify provenance and install from the registry. |
 

@@ -2,7 +2,7 @@
 
 Disktop is a Linux terminal storage manager and analyzer. Its goal is to help you see where disk space went, investigate files and application data, and review cleanup actions before anything changes. The planned interface combines a terminal UI for exploration with a non-interactive CLI for scripts.
 
-> **Project status:** This repository is an implementation in progress, not a usable storage cleaner. Phases 0 (contracts and threat model) and 1 (vertical slice and inventory) are complete; Phase 2 is the next gate. Device, mount, and capacity inventory works, along with space and inode alerts and a read-only dashboard; scanning, reports, and every form of cleanup are still planned, and Disktop cannot yet change anything on disk. There is no published npm package. The first public release will be **`1.0.0`**, after every Linux capability in [PLAN.md](PLAN.md#feature-acceptance-matrix) passes its acceptance checks. Internal phases and CI artifacts are not public releases.
+> **Project status:** This repository is an implementation in progress. Phases 0 through 6 of [PLAN.md](PLAN.md#internal-implementation-phases) are complete and Phase 7 (complete surfaces) is the next gate. The CLI inventories devices, scans and explores trees, finds duplicate, stale, empty, and broken entries, lists what can be cleaned, and reviews and applies Trash, permanent removal, move, compression, hardlink, rule, and package or container manager actions, with history and undo; the TUI still shows only the dashboard, and reports and shell completions are still planned. There is no published npm package. The first public release will be **`1.0.0`**, after every Linux capability in [PLAN.md](PLAN.md#feature-acceptance-matrix) passes its acceptance checks. Internal phases and CI artifacts are not public releases.
 
 `disktop` is the working package and command name. Registry availability and naming rights must be checked again before publication.
 
@@ -37,7 +37,7 @@ The full feature list and the acceptance check for each feature are in [PLAN.md]
 
 The planned TUI opens at a disk dashboard. Its main views are **Disks**, **Explore**, **Clean**, **Dev**, **Apps**, and **History**. Explore shows a sorted directory tree and filters. Clean shows the action scope, estimate, reversibility, permission requirement, and confirmation before applying a plan. The interface will support vim keys, mouse input, a `?` help view, themes, `NO_COLOR`, an ASCII fallback, SI/IEC units, and an 80×24 terminal.
 
-The CLI shares the same application services as the TUI. `devices`, `--json`, and `alerts check` work today; every other command below is declared in the parser and returns a clear `not-implemented` error:
+The CLI shares the same application services as the TUI. Every command below works today except `report`, which is declared in the parser and returns a clear `not-implemented` error:
 
 ```text
 disktop --json
