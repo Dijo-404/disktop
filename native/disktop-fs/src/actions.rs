@@ -19,6 +19,7 @@ use crate::content;
 use crate::guard::{self, Fingerprint, Guard, GuardContext};
 use crate::journal::{Counts, Identity, Journal, Outcome, State};
 use crate::sys::{self, EntryKind};
+use crate::transfer;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 
@@ -74,6 +75,39 @@ pub struct DedupHardlinkRequest {
     pub plan_id: String,
     pub journal_directory: PathBuf,
     pub keep: Target,
+    pub targets: Vec<Target>,
+}
+
+/// What becomes of a source once its copy has been verified and published.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum SourceDisposition {
+    Trash,
+    Permanent,
+}
+
+impl SourceDisposition {
+    pub fn parse(value: &str) -> Option<SourceDisposition> {
+        match value {
+            "trash" => Some(SourceDisposition::Trash),
+            "permanent" => Some(SourceDisposition::Permanent),
+            _ => None,
+        }
+    }
+}
+
+/// Copying every reviewed target onto another filesystem.
+///
+/// The destination is validated once, before any item: it is where everything
+/// lands, so a destination that is not a directory this user can write into
+/// makes the whole request wrong rather than one item of it.
+pub struct CopyMoveRequest {
+    pub plan_id: String,
+    pub journal_directory: PathBuf,
+    /// Needed only for the `trash` disposition, but carried either way so the
+    /// helper never has to ask for it halfway through.
+    pub home_trash_directory: Vec<u8>,
+    pub destination_directory: Vec<u8>,
+    pub source_disposition: SourceDisposition,
     pub targets: Vec<Target>,
 }
 
@@ -481,6 +515,358 @@ fn stage_link(
     ))
 }
 
+/// Copy every reviewed target onto another filesystem, then dispose of the
+/// source as the plan said.
+///
+/// The sequence per item is fixed and every step can stop it: refuse a
+/// destination inside the source, stage an exclusive name, stream the copy
+/// while digesting it, read the written bytes back and compare, carry the
+/// metadata, publish without overwriting, and only then touch the source. A
+/// failure at any point removes what was staged and leaves the source exactly
+/// where it was.
+pub fn run_copy_move(
+    request: &CopyMoveRequest,
+    report: &mut dyn FnMut(ItemReport),
+    cancelled: &AtomicBool,
+) -> Result<ActionSummary, ActionRefusal> {
+    // The destination is validated once. It is where everything lands, so a
+    // destination that is not a directory makes the request wrong, not an item.
+    let destination_parent = guard::resolve_parent(&request.destination_directory)
+        .map_err(|refusal| ActionRefusal::new(refusal.code, refusal.message))?;
+    let destination =
+        sys::open_directory_no_symlinks(destination_parent.descriptor(), &destination_parent.name)
+            .map_err(|error| {
+                ActionRefusal::new(
+                    "invalid-arguments",
+                    format!(
+                        "{} is not a directory this user can open: {error}",
+                        String::from_utf8_lossy(&request.destination_directory),
+                    ),
+                )
+            })?;
+
+    let home_trash = request.home_trash_directory.clone();
+    let destination_path = request.destination_directory.clone();
+    let disposition = request.source_disposition;
+
+    let outcome = run_action(
+        Operation::CopyMove(disposition),
+        &request.plan_id,
+        &request.journal_directory,
+        &request.targets,
+        report,
+        cancelled,
+        |guard, journal, journal_id, position, target| {
+            move_one(
+                guard,
+                &MoveContext {
+                    destination,
+                    destination_path: &destination_path,
+                    home_trash: &home_trash,
+                    disposition,
+                },
+                journal,
+                journal_id,
+                position,
+                target,
+            )
+        },
+    );
+    sys::close(destination);
+    outcome
+}
+
+struct MoveContext<'a> {
+    destination: libc::c_int,
+    destination_path: &'a [u8],
+    home_trash: &'a [u8],
+    disposition: SourceDisposition,
+}
+
+fn move_one(
+    guard: &Guard,
+    context: &MoveContext<'_>,
+    journal: &Journal,
+    journal_id: &str,
+    position: u64,
+    target: &Target,
+) -> ItemReport {
+    let refuse = |code: &'static str, message: String, outcome: Outcome| ItemReport {
+        path: target.path.clone(),
+        outcome,
+        reason: Some(code),
+        message: Some(message),
+        bytes: 0,
+    };
+
+    if let Err(refusal) = guard.classify(&target.path) {
+        return refuse(refusal.code, refusal.message, Outcome::Failed);
+    }
+    // A destination under the source would be copied into itself. The planner
+    // refuses this too; the helper does not take its word for it.
+    if guard::is_within(&target.path, context.destination_path) {
+        return refuse(
+            "invalid-arguments",
+            "The destination is inside the source, so copying there would write the copy into \
+             what it is copying."
+                .to_owned(),
+            Outcome::Failed,
+        );
+    }
+
+    let parent = match guard::resolve_parent(&target.path) {
+        Ok(parent) => parent,
+        Err(refusal) => {
+            let outcome = outcome_for(refusal.code);
+            return refuse(refusal.code, refusal.message, outcome);
+        }
+    };
+    let live = match guard::revalidate(&parent, &target.expected) {
+        Ok(live) => live,
+        Err(refusal) => {
+            let outcome = outcome_for(refusal.code);
+            return refuse(refusal.code, refusal.message, outcome);
+        }
+    };
+    if live.kind != EntryKind::File && live.kind != EntryKind::Directory {
+        return refuse(
+            "invalid-arguments",
+            "Only a file or a directory can be moved to another disk.".to_owned(),
+            Outcome::Failed,
+        );
+    }
+
+    // The published name is checked before a byte is copied, so a collision
+    // costs nothing. It is checked again by the publish itself, which is what
+    // actually decides: a name that appears in between fails there.
+    if sys::target_exists(context.destination, &parent.name) {
+        return refuse(
+            "destination-exists",
+            format!(
+                "{} already holds something called '{}', and Disktop never publishes over \
+                 anything.",
+                String::from_utf8_lossy(context.destination_path),
+                String::from_utf8_lossy(&parent.name),
+            ),
+            Outcome::Failed,
+        );
+    }
+
+    let mut published = context.destination_path.to_vec();
+    published.push(b'/');
+    published.extend_from_slice(&parent.name);
+
+    // The intent names where this is going, so an interrupted item is legible
+    // and an undo knows what to retire.
+    if let Err(error) = journal.record_intent(journal_id, position, &target.path, Some(&published))
+    {
+        return refuse(
+            "journal-write-failed",
+            format!("This item's intent could not be recorded, so it was not copied: {error}"),
+            Outcome::Failed,
+        );
+    }
+
+    let staged = match stage_copy(&parent, context.destination, &live) {
+        Ok(staged) => staged,
+        Err((code, message)) => {
+            return settle(
+                journal,
+                journal_id,
+                position,
+                target,
+                refuse(code, message, Outcome::Failed),
+            );
+        }
+    };
+
+    // Publishing is a rename that refuses to overwrite. Between the check
+    // above and this, somebody could have created the name; this is what
+    // actually decides, and it decides without destroying what they made.
+    if let Err(error) = sys::renameat_no_replace(
+        context.destination,
+        &staged,
+        context.destination,
+        &parent.name,
+    ) {
+        discard_staged(context.destination, &staged, live.kind);
+        let (code, message) = match error.raw_os_error() {
+            Some(libc::EEXIST) | Some(libc::ENOTEMPTY) => (
+                "destination-exists",
+                "Something was created at the destination while the copy was running, so the \
+                 copy was discarded and the source left alone."
+                    .to_owned(),
+            ),
+            Some(libc::EACCES) | Some(libc::EPERM) => (
+                "permission-denied",
+                format!("This user may not publish into the destination: {error}"),
+            ),
+            _ => (
+                "internal-error",
+                format!("The copy could not be published: {error}"),
+            ),
+        };
+        return settle(
+            journal,
+            journal_id,
+            position,
+            target,
+            refuse(code, message, Outcome::Failed),
+        );
+    }
+
+    // Only now is the source touched. Everything above this line leaves it
+    // exactly where it was, whatever went wrong.
+    dispose_of_source(guard, context, journal, journal_id, position, target, &live)
+}
+
+/// Copy one reviewed target under a staging name, returning that name.
+fn stage_copy(
+    parent: &guard::ResolvedParent,
+    destination: libc::c_int,
+    live: &sys::Metadata,
+) -> Result<Vec<u8>, (&'static str, String)> {
+    for attempt in 0..64u32 {
+        let mut staging = parent.name.clone();
+        staging.extend_from_slice(
+            format!(".disktop-partial-{}-{attempt}", std::process::id()).as_bytes(),
+        );
+        if sys::target_exists(destination, &staging) {
+            continue;
+        }
+
+        let outcome = if live.kind == EntryKind::Directory {
+            let source = sys::open_directory_no_symlinks(parent.descriptor(), &parent.name)
+                .map_err(describe_copy)?;
+            let result =
+                transfer::copy_tree(source, destination, &staging, live.permissions).map(|_| ());
+            sys::close(source);
+            result
+        } else {
+            let source = sys::openat_read_no_symlinks(parent.descriptor(), &parent.name)
+                .map_err(describe_copy)?;
+            let result = transfer::copy_file(source, destination, &staging, live.permissions)
+                .and_then(|_| {
+                    // The modification time comes across so the copy is the
+                    // same file rather than a new one made today.
+                    let written = sys::openat_read_no_symlinks(destination, &staging)?;
+                    let result = sys::set_modified(written, live.modified_nanoseconds);
+                    sys::close(written);
+                    result
+                });
+            sys::close(source);
+            result
+        };
+
+        return match outcome {
+            Ok(()) => Ok(staging),
+            Err(error) => {
+                discard_staged(destination, &staging, live.kind);
+                Err(describe_copy(error))
+            }
+        };
+    }
+    Err((
+        "internal-error",
+        "No staging name was free in the destination directory.".to_owned(),
+    ))
+}
+
+fn describe_copy(error: std::io::Error) -> (&'static str, String) {
+    let code = match error.raw_os_error() {
+        Some(libc::ENOSPC) | Some(libc::EDQUOT) => "no-space",
+        Some(libc::EACCES) | Some(libc::EPERM) => "permission-denied",
+        Some(libc::EXDEV) => "different-filesystem",
+        _ if error.kind() == std::io::ErrorKind::InvalidData => "content-changed",
+        _ => "internal-error",
+    };
+    (
+        code,
+        format!("The copy did not complete, so nothing was published: {error}"),
+    )
+}
+
+fn discard_staged(destination: libc::c_int, name: &[u8], kind: EntryKind) {
+    let _ = remove_entry(destination, name, kind);
+}
+
+/// Trash or erase the source, once its copy is published and verified.
+fn dispose_of_source(
+    guard: &Guard,
+    context: &MoveContext<'_>,
+    journal: &Journal,
+    journal_id: &str,
+    position: u64,
+    target: &Target,
+    live: &sys::Metadata,
+) -> ItemReport {
+    let parent = match guard::resolve_parent(&target.path) {
+        Ok(parent) => parent,
+        Err(refusal) => return published_but_kept(target, &refusal.message),
+    };
+
+    let removed = match context.disposition {
+        SourceDisposition::Trash => {
+            let destination =
+                match choose_trash(guard, context.home_trash, &target.path, live.device) {
+                    Ok(destination) => destination,
+                    Err(refusal) => return published_but_kept(target, &refusal.message),
+                };
+            let reserved = match reserve(&destination, &parent.name, &target.path) {
+                Ok(reserved) => reserved,
+                Err(refusal) => return published_but_kept(target, &refusal.message),
+            };
+            match sys::renameat_no_replace(
+                parent.descriptor(),
+                &parent.name,
+                destination.files_descriptor,
+                &reserved.name,
+            ) {
+                Ok(()) => Ok(()),
+                Err(error) => {
+                    reserved.discard(&destination);
+                    Err(error.to_string())
+                }
+            }
+        }
+        SourceDisposition::Permanent => remove_entry(parent.descriptor(), &parent.name, live.kind)
+            .map_err(|error| error.to_string()),
+    };
+
+    match removed {
+        Ok(()) => settle_move(
+            journal,
+            journal_id,
+            position,
+            target,
+            target.reviewed_bytes,
+            Some(Identity {
+                device: live.device,
+                inode: live.inode,
+            }),
+        ),
+        Err(message) => published_but_kept(target, &message),
+    }
+}
+
+/// The copy arrived and the source did not go.
+///
+/// This is `uncertain` rather than `failed`, and deliberately so: the action
+/// half happened. Saying it failed would invite somebody to run it again, and
+/// the second run would find the destination occupied by the first one's work.
+fn published_but_kept(target: &Target, reason: &str) -> ItemReport {
+    ItemReport {
+        path: target.path.clone(),
+        outcome: Outcome::Uncertain,
+        reason: Some("source-not-disposed"),
+        message: Some(format!(
+            "The copy arrived and was verified, but the original could not be dealt with, so it \
+             is still there: {reason}"
+        )),
+        bytes: 0,
+    }
+}
+
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Operation {
     Trash,
@@ -488,6 +874,9 @@ enum Operation {
     EmptyTrash,
     Restore,
     DedupHardlink,
+    /// Carries its disposition, because whether a move leaves anything to put
+    /// back is decided by what it does to the source and by nothing else.
+    CopyMove(SourceDisposition),
 }
 
 impl Operation {
@@ -498,12 +887,16 @@ impl Operation {
             Operation::EmptyTrash => "empty-trash",
             Operation::Restore => "restore",
             Operation::DedupHardlink => "dedup-hardlink",
+            Operation::CopyMove(_) => "copy-move",
         }
     }
 
-    /// Only a Trash move leaves something to put back.
+    /// Only something that went to Trash leaves anything to put back.
     fn reversible(self) -> bool {
-        self == Operation::Trash
+        matches!(
+            self,
+            Operation::Trash | Operation::CopyMove(SourceDisposition::Trash)
+        )
     }
 }
 
