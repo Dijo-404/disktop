@@ -96,7 +96,11 @@ export async function runCli(args: readonly string[], context: CliContext): Prom
     });
   }
   if (name === "history") {
-    return runHistory(withUnits, asJson);
+    return runHistory(withUnits, {
+      asJson,
+      ...(optional(parsed, "cursor")),
+      ...(optional(parsed, "limit")),
+    });
   }
   if (name === "undo") {
     return runUndo(withUnits, {

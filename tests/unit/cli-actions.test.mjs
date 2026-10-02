@@ -115,7 +115,8 @@ function actionContext(overrides = {}) {
         }
       );
     },
-    async history() {
+    async history(cursor, limit) {
+      recorded.history = { cursor, limit };
       return overrides.history ?? { records: [RECORD], reconciled: 0n };
     },
     async restore(journalId) {
@@ -347,4 +348,41 @@ test("Ctrl+C during 'find duplicates' aborts the signal the search was given", a
   assert.ok(received, "the search was handed a signal");
   assert.equal(received.aborted, true);
   assert.equal(handlers.size, 0, "the interrupt listener is removed afterwards");
+});
+
+test("history reaches the page a cursor names, at the size asked for", async () => {
+  const context = actionContext({ history: { records: [RECORD], reconciled: 0n, nextCursor: "c0ffee" } });
+  const status = await runCli(["history", "--cursor", "abc123", "--limit", "5", "--json"], context);
+  assert.equal(status, 0);
+  assert.deepEqual(context.recordedActions.history, { cursor: "abc123", limit: 5 });
+  assert.equal(envelopeOf(context, "history").data.nextCursor, "c0ffee");
+});
+
+test("history in text says how to reach the next page", async () => {
+  const context = actionContext({ history: { records: [RECORD], reconciled: 0n, nextCursor: "c0ffee" } });
+  await runCli(["history"], context);
+  assert.match(context.captured.stdout, /disktop history --cursor c0ffee/);
+});
+
+for (const limit of ["0", "201", "ten"]) {
+  test(`history --limit ${limit} is an input error`, async () => {
+    const context = actionContext();
+    const status = await runCli(["history", "--limit", limit, "--json"], context);
+    assert.equal(status, 2);
+    assert.equal(envelopeOf(context, "history").error.code, "invalid-input");
+  });
+}
+
+test("a cursor the journal did not issue is an input error from history, not a crash", async () => {
+  const context = actionContext();
+  context.actions.history = async () => {
+    const error = new Error("The journal cursor is not one this journal issued.");
+    error.failure = { code: "invalid-plan", message: "The journal could not be read: The journal cursor is not one this journal issued." };
+    throw error;
+  };
+  const status = await runCli(["history", "--cursor", "zz", "--json"], context);
+  assert.equal(status, 2);
+  const envelope = envelopeOf(context, "history");
+  assert.equal(envelope.command, "history");
+  assert.equal(envelope.error.code, "invalid-input");
 });
