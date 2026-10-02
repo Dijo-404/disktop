@@ -34,6 +34,10 @@ export interface DisktopConfig {
   };
   /** Cleanup somebody wrote down themselves, in `[[rules]]` blocks. */
   readonly rules: readonly CleanupRule[];
+  readonly managers: {
+    /** What a journal vacuum keeps. */
+    readonly journalKeepBytes: number;
+  };
   readonly providers: {
     /** Directories holding AppImages, which no package manager knows about. */
     readonly appImageRoots: readonly string[];
@@ -61,6 +65,7 @@ export const DEFAULT_CONFIG: DisktopConfig = {
   snapshots: { keepLatest: 20 },
   rules: [],
   cleanup: { defaultOperation: "trash", planExpiryMinutes: 60, additionalAllowedRoots: [] },
+  managers: { journalKeepBytes: 512 * 1024 * 1024 },
   providers: {
     appImageRoots: [],
     artifactDirectories: ["node_modules", "target", "__pycache__", ".next", ".nuxt", "build", "dist"],
@@ -69,7 +74,7 @@ export const DEFAULT_CONFIG: DisktopConfig = {
   },
 };
 
-const KNOWN_TABLES = new Set(["alerts", "scan", "find", "snapshots", "cleanup", "providers"]);
+const KNOWN_TABLES = new Set(["alerts", "scan", "find", "snapshots", "cleanup", "managers", "providers"]);
 
 export function parseConfigDocument(source: string): DisktopConfig {
   const document = parseToml(source);
@@ -106,6 +111,15 @@ export function parseConfigDocument(source: string): DisktopConfig {
     // somebody while they are editing the file rather than while a
     // confirmation prompt is already on screen.
     rules: readRules(reader),
+    managers: {
+      journalKeepBytes: reader.integer(
+        "managers",
+        "journal_keep_bytes",
+        DEFAULT_CONFIG.managers.journalKeepBytes,
+        16 * 1024 * 1024,
+        1024 ** 4,
+      ),
+    },
     providers: {
       // Discovery roots, never cleanup roots: what may be acted on is decided
       // by the finding, so a system directory is a legitimate place to look.

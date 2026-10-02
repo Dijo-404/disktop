@@ -211,3 +211,9 @@ maximum_bytes = 1
     /name/i,
   );
 });
+
+test("how much journal a vacuum keeps is configurable, bounded, and 512 MiB by default", () => {
+  assert.equal(parseConfigDocument("").managers.journalKeepBytes, 536_870_912);
+  assert.equal(parseConfigDocument("[managers]\njournal_keep_bytes = 1073741824\n").managers.journalKeepBytes, 1_073_741_824);
+  assert.throws(() => parseConfigDocument("[managers]\njournal_keep_bytes = 1024\n"), /between/);
+});
