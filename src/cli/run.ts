@@ -136,7 +136,11 @@ export async function runCli(args: readonly string[], context: CliContext): Prom
       withUnits.output.stderr("'--threshold' accepts a whole percentage from 0 to 100.\n");
       return EXIT.operationalError;
     }
-    return runAlertsCheck(withUnits, { asJson, ...(threshold === undefined ? {} : { thresholdPercent: threshold }) });
+    return runAlertsCheck(withUnits, {
+      asJson,
+      notify: parsed.flags.has("notify"),
+      ...(threshold === undefined ? {} : { thresholdPercent: threshold }),
+    });
   }
 
   // The root command: JSON or a redirected stdout means no interactive surface.

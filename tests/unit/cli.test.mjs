@@ -214,3 +214,33 @@ test("a detector's capability explanation is printed without its escape sequence
   ]);
   assert.doesNotMatch(line, /[\u001b\u009b]/);
 });
+
+test("alerts check --notify sends one notification and still exits 1", async () => {
+  const sent = [];
+  const context = fakeContext();
+  context.notifications = { enabled: false, async notify(alerts) { sent.push(alerts); return { sent: true, explanation: "Sent through notify-send." }; } };
+  const status = await runCli(["alerts", "check", "--threshold", "10", "--notify", "--json"], context);
+  assert.equal(status, 1);
+  assert.equal(sent.length, 1);
+  const envelope = JSON.parse(context.captured.stdout);
+  assert.deepEqual(envelope.data.notification, { requested: true, sent: true, explanation: "Sent through notify-send." });
+});
+
+test("a notification that could not be sent is a warning, not a different exit", async () => {
+  const context = fakeContext();
+  context.notifications = { enabled: true, async notify() { return { sent: false, explanation: "No desktop session bus is reachable." }; } };
+  const status = await runCli(["alerts", "check", "--threshold", "10", "--json"], context);
+  assert.equal(status, 1);
+  const envelope = JSON.parse(context.captured.stdout);
+  assert.equal(envelope.data.notification.sent, false);
+  assert.ok(envelope.warnings.some((warning) => warning.code === "notification-failed"));
+});
+
+test("without --notify or the setting, alerts check notifies nobody", async () => {
+  let asked = 0;
+  const context = fakeContext();
+  context.notifications = { enabled: false, async notify() { asked += 1; return { sent: true, explanation: "" }; } };
+  await runCli(["alerts", "check", "--threshold", "10", "--json"], context);
+  assert.equal(asked, 0);
+  assert.equal(JSON.parse(context.captured.stdout).data.notification, undefined);
+});
