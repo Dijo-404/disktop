@@ -275,3 +275,8 @@ test("a rule hash that is not a hash is refused rather than stored", () => {
     RangeError,
   );
 });
+
+test("a plan whose expiry is not a date counts as expired", () => {
+  const stored = { ...buildPlan(input()), expiresAt: "never" };
+  assert.equal(isExpired(stored, new Date("2026-10-01T09:00:00.000Z")), true);
+});

@@ -231,3 +231,53 @@ test("a stored file whose disposition is not one Disktop knows is skipped, not g
 
   assert.equal(await store.get(saved.id), undefined);
 });
+
+// --- A stored plan that cannot vouch for itself is not read ---
+
+async function tamper(edit) {
+  const root = await sandbox();
+  const store = createPlanStore(root);
+  const saved = plan();
+  await store.save(saved);
+  const file = join(root, "plans", `${saved.id}.json`);
+  const document = JSON.parse(await readFile(file, "utf8"));
+  edit(document);
+  await writeFile(file, JSON.stringify(document));
+  return store.get(saved.id);
+}
+
+const TAMPERINGS = {
+  "an expiry that is not a date": (document) => {
+    document.expiresAt = "never";
+  },
+  "a creation time that is not a date": (document) => {
+    document.createdAt = "yesterday";
+  },
+  "an expiry before its creation": (document) => {
+    document.expiresAt = "2026-10-01T08:00:00.000Z";
+  },
+  "an expiry further out than any configuration allows": (document) => {
+    document.expiresAt = "2026-10-03T09:00:00.000Z";
+  },
+  "no entries for a trash operation": (document) => {
+    delete document.entries;
+  },
+  "an empty entry list": (document) => {
+    document.entries = [];
+  },
+  "an entry of a kind Disktop never plans": (document) => {
+    document.entries[0].expected.kind = "socket";
+  },
+  "a selected total that is not the sum of its entries": (document) => {
+    document.selectedBytes = "999999999999";
+  },
+  "an item count that is not the number of its entries": (document) => {
+    document.exactItemCount = "7";
+  },
+};
+
+for (const [name, edit] of Object.entries(TAMPERINGS)) {
+  test(`a stored plan is not read when it has ${name}`, async () => {
+    assert.equal(await tamper(edit), undefined);
+  });
+}
