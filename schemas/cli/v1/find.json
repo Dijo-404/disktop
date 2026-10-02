@@ -180,6 +180,36 @@
         "filesHashed": {
           "description": "Files whose content was actually read. Never more than candidatesRead.",
           "$ref": "common.json#/$defs/decimalInteger"
+        },
+        "basis": {
+          "description": "Present for 'stale'. What the dates measure, and what the mount holding them lets Disktop say about access times. The field is always 'modified': no column in the scan index holds an access time, and on a relatime or noatime mount one would not mean what a reader would take it to mean.",
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "field",
+            "confidence",
+            "label"
+          ],
+          "properties": {
+            "field": {
+              "const": "modified"
+            },
+            "confidence": {
+              "description": "What the mount's options say about its access times. 'unknown' means the options could not be read, which is not the same as 'maintained'.",
+              "type": "string",
+              "enum": [
+                "maintained",
+                "coarse",
+                "absent",
+                "unknown"
+              ]
+            },
+            "label": {
+              "description": "The sentence shown to a person. It never claims a file was not opened.",
+              "type": "string",
+              "minLength": 1
+            }
+          }
         }
       },
       "allOf": [
@@ -228,6 +258,34 @@
             "required": [
               "entries"
             ]
+          }
+        },
+        {
+          "description": "A stale listing says what its dates measure. Without that a reader takes 'not modified' for 'not used'.",
+          "if": {
+            "properties": {
+              "kind": {
+                "const": "stale"
+              }
+            },
+            "required": [
+              "kind"
+            ]
+          },
+          "then": {
+            "properties": {
+              "basis": {
+                "type": "object"
+              }
+            },
+            "required": [
+              "basis"
+            ]
+          },
+          "else": {
+            "properties": {
+              "basis": false
+            }
           }
         }
       ]

@@ -87,7 +87,7 @@ export const COMMANDS: readonly CommandSpec[] = [
   },
   {
     path: ["find"],
-    summary: "Find duplicates, empty directories, and broken links",
+    summary: "Find duplicates, stale files, empty dirs, broken links",
     operand: { name: "KIND", required: true },
     options: [
       JSON_OPTION,
@@ -103,6 +103,7 @@ export const COMMANDS: readonly CommandSpec[] = [
       },
       { name: "keep-under", summary: "Duplicates: the directory '--keep in-path' keeps from", kind: "value", placeholder: "PATH" },
       { name: "min-size", summary: "Duplicates: ignore files below this size", kind: "value", placeholder: "SIZE" },
+      { name: "older-than", summary: "Stale: not modified for this many days", kind: "value", placeholder: "DAYS" },
     ],
     implemented: true,
   },

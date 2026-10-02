@@ -1,6 +1,6 @@
 # CLI contract
 
-Status: planned `1.0.0` command surface. `devices`, the `--json` dashboard, `alerts check`, `scan`, `explore`, `snapshots list|diff`, `clean`, `clean plan`, `clean apply`, `history`, `undo`, and `find duplicates|empty|broken` are implemented; `report`, `timer`, `completion`, and `find stale` are declared in the parser and refuse with `not-implemented`. The JSON output contract in [`schemas/cli/v1/`](../schemas/cli/v1/) is normative and is validated by `tests/contract/cli-schema.test.mjs` against examples and by `tests/integration/cli-output.test.mjs` against what the CLI actually writes on a running host. The parser and generated help are normative now; completions become normative when they are implemented. See [PLAN.md](../PLAN.md#cli-and-outputs).
+Status: planned `1.0.0` command surface. `devices`, the `--json` dashboard, `alerts check`, `scan`, `explore`, `snapshots list|diff`, `clean`, `clean plan`, `clean apply`, `history`, `undo`, and `find duplicates|stale|empty|broken` are implemented; `report`, `timer`, and `completion` are declared in the parser and refuse with `not-implemented`. The JSON output contract in [`schemas/cli/v1/`](../schemas/cli/v1/) is normative and is validated by `tests/contract/cli-schema.test.mjs` against examples and by `tests/integration/cli-output.test.mjs` against what the CLI actually writes on a running host. The parser and generated help are normative now; completions become normative when they are implemented. See [PLAN.md](../PLAN.md#cli-and-outputs).
 
 ## What works today
 
@@ -20,6 +20,7 @@ Status: planned `1.0.0` command surface. `devices`, the `--json` dashboard, `ale
 | `disktop undo ACTION_ID --yes [--json]` | Puts back what one Trash action moved. |
 | `disktop find empty\|broken [--path PATH] [--limit COUNT] [--json]` | Empty directories and dangling symlinks, read out of the most recent scan covering the path. |
 | `disktop find duplicates [--path PATH] [--min-size SIZE] [--keep oldest\|newest\|in-path] [--keep-under PATH] [--limit COUNT] [--json]` | Groups of files holding the same bytes, with the copy a keep rule would keep. Reads content; changes nothing. |
+| `disktop find stale [--path PATH] [--older-than DAYS] [--limit COUNT] [--json]` | Files not modified for a threshold, with a statement of what that measures on this mount. |
 | `disktop --units iec\|si` | Switches human-readable units. Byte values in JSON never change. |
 | `disktop --help`, `disktop --version` | Generated from the one command table in `src/cli/parser.ts`. |
 
@@ -130,8 +131,26 @@ The walk counted each directory's entries as it read them and asked once per sym
 whether its target resolved, so both answers are already in the index. A directory the
 scan could not open carries no child count at all and therefore never answers a search
 for empty ones — "nobody looked" and "nothing is there" are different answers.
-`find stale` is declared and refuses; it needs the timestamp-confidence work that is
-not built yet.
+## Finding stale files
+
+The question people ask is "what have I not opened in six months?" and on a normal
+Linux system that question has no answer. Mounts are `relatime` by default, which
+updates a file's access time at most once a day and only when it is already older than
+the modification time; many are `noatime`, which never updates it at all. A listing
+built on that and labelled "not opened since" would be confidently wrong about files
+somebody uses every day.
+
+So `find stale` measures the **modification** time — when the contents last changed —
+and says so. Every answer carries a `basis`, whose `field` is always `modified` and
+whose `confidence` comes from the options of the mount holding the search path:
+`absent` for `noatime`, `coarse` for `relatime`, `maintained` otherwise, and `unknown`
+when the mount table could not be read. `unknown` is deliberately not `maintained`: a
+reading that did not happen is not a reassuring one. The mount's options change the
+sentence, never the measurement, because no column in the scan index holds an access
+time to measure instead.
+
+The threshold is `--older-than DAYS`, defaulting to `find.stale_after_days` in the
+configuration, which is 183 days. The listing covers regular files only.
 
 ## Finding duplicates
 

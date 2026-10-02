@@ -51,6 +51,9 @@ export interface Services {
     readonly excludes: readonly RawPath[];
     readonly retention: RetentionLimits;
   };
+  readonly findDefaults: {
+    readonly staleAfterDays: number;
+  };
   readonly settings: DashboardSettings;
   readonly startupWarnings: readonly Warning[];
 }
@@ -172,7 +175,7 @@ export async function createServices(options: CompositionOptions = {}): Promise<
     }),
     apply: createApplyService({ store: planStore, actions, now: () => new Date() }),
     undo: createUndoService({ journal: actions, actions }),
-    find: createFindService(explore, createDuplicateService(scanner)),
+    find: createFindService(explore, createDuplicateService(scanner), inventory),
     scan: createScanService(scanner, {
       crossFilesystems: config.scan.crossFilesystems,
       accounting: config.scan.accounting,
@@ -187,6 +190,7 @@ export async function createServices(options: CompositionOptions = {}): Promise<
       excludes,
       retention: { keepLatest: config.snapshots.keepLatest },
     },
+    findDefaults: { staleAfterDays: config.find.staleAfterDays },
     settings,
     startupWarnings,
   };

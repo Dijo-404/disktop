@@ -21,7 +21,7 @@ function entry(path, overrides = {}) {
   };
 }
 
-function service(page, duplicates) {
+function service(page, duplicates, inventory) {
   const queries = [];
   return {
     queries,
@@ -33,6 +33,7 @@ function service(page, duplicates) {
         },
       },
       duplicates,
+      inventory,
     ),
   };
 }
@@ -74,12 +75,68 @@ test("the search is narrowed to the path it was given, not the whole scan", asyn
   assert.equal(queries[0].filter.underPath.bytesBase64, wanted.bytesBase64);
 });
 
-test("stale is declared and refused rather than answered with nothing", async () => {
+test("stale filters the index by modification time and carries the mount's basis", async () => {
+  const { service: find, queries } = service(
+    { kind: "page", page: { entries: [entry("/home/example/old.log", { kind: "file" })] } },
+    undefined,
+    { async mountOptionsFor() { return ["rw", "relatime"]; } },
+  );
+
+  const outcome = await find.find({
+    kind: "stale",
+    scanId: "scan-1",
+    path: rawPathFromUtf8("/home/example"),
+    staleBeforeNanoseconds: 1700000000000000000n,
+  });
+
+  assert.equal(outcome.kind, "stale");
+  assert.equal(outcome.entries.length, 1);
+  assert.equal(queries[0].filter.modifiedBeforeNanoseconds, 1700000000000000000n);
+  assert.deepEqual(queries[0].filter.kinds, ["file"]);
+  assert.equal(outcome.basis.field, "modified");
+  assert.equal(outcome.basis.confidence, "coarse");
+  assert.doesNotMatch(outcome.basis.label, /not opened|last opened/i);
+});
+
+test("stale on a mount whose options could not be read says unknown, not maintained", async () => {
+  const { service: find } = service(
+    { kind: "page", page: { entries: [] } },
+    undefined,
+    { async mountOptionsFor() { return undefined; } },
+  );
+
+  const outcome = await find.find({
+    kind: "stale",
+    scanId: "scan-1",
+    path: rawPathFromUtf8("/home/example"),
+    staleBeforeNanoseconds: 1n,
+  });
+
+  assert.equal(outcome.kind, "stale");
+  assert.equal(outcome.basis.confidence, "unknown");
+});
+
+test("stale without an inventory to ask still answers, with an unknown basis", async () => {
+  const { service: find } = service({ kind: "page", page: { entries: [] } });
+
+  const outcome = await find.find({
+    kind: "stale",
+    scanId: "scan-1",
+    path: rawPathFromUtf8("/home/example"),
+    staleBeforeNanoseconds: 1n,
+  });
+
+  assert.equal(outcome.kind, "stale");
+  assert.equal(outcome.basis.confidence, "unknown");
+});
+
+test("stale without a cutoff is a refusal rather than a listing of everything", async () => {
   const { service: find, queries } = service({ kind: "page", page: { entries: [] } });
 
   const outcome = await find.find({ kind: "stale", scanId: "scan-1", path: rawPathFromUtf8("/home/example") });
+
   assert.equal(outcome.kind, "refused");
-  assert.equal(outcome.failure.code, "not-implemented");
+  assert.equal(outcome.failure.code, "invalid-input");
   assert.deepEqual(queries, [], "nothing was asked of the index");
 });
 
