@@ -24,6 +24,9 @@ pub struct Metadata {
     pub apparent_bytes: u64,
     pub allocated_bytes: u64,
     pub owner_id: u32,
+    pub group_id: u32,
+    /// Permission bits only, without the file-type bits `kind` already carries.
+    pub permissions: u32,
     pub modified_nanoseconds: u64,
     /// Group- or world-writable with no sticky bit. Any user can then create,
     /// rename, and unlink entries inside it, whoever owns it, so a reviewed
@@ -133,6 +136,21 @@ pub fn open_directory_no_symlinks(parent: RawFd, name: &[u8]) -> io::Result<RawF
         parent,
         &child,
         (libc::O_RDONLY | libc::O_CLOEXEC | libc::O_DIRECTORY | libc::O_NOFOLLOW) as u64,
+        libc::RESOLVE_BENEATH | libc::RESOLVE_NO_MAGICLINKS | libc::RESOLVE_NO_SYMLINKS,
+    )
+}
+
+/// Open one child file of `parent` for reading, never through a symlink.
+///
+/// This is how content is read: a digest, a byte compare, and a copy all go
+/// through it, so none of them can be pointed at something outside the
+/// directory the walk actually reached.
+pub fn openat_read_no_symlinks(parent: RawFd, name: &[u8]) -> io::Result<RawFd> {
+    let child = cstring(name)?;
+    openat2_raw(
+        parent,
+        &child,
+        (libc::O_RDONLY | libc::O_CLOEXEC | libc::O_NOFOLLOW) as u64,
         libc::RESOLVE_BENEATH | libc::RESOLVE_NO_MAGICLINKS | libc::RESOLVE_NO_SYMLINKS,
     )
 }
@@ -341,6 +359,8 @@ fn metadata_at_flags(parent: RawFd, name: &[u8], flags: libc::c_int) -> io::Resu
         // block size is, so allocated bytes are exact rather than estimated.
         allocated_bytes: stat.stx_blocks.saturating_mul(512),
         owner_id: stat.stx_uid,
+        group_id: stat.stx_gid,
+        permissions: mode & 0o7777,
         modified_nanoseconds: nanoseconds(stat.stx_mtime.tv_sec, stat.stx_mtime.tv_nsec),
         writable_by_anyone_without_sticky: shared_write && !sticky,
     })

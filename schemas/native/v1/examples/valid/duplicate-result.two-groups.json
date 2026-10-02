@@ -1,0 +1,68 @@
+{
+  "protocolVersion": 1,
+  "requestId": "hash-candidates-1",
+  "eventId": "2",
+  "event": "complete",
+  "result": {
+    "groups": [
+      {
+        "apparentBytes": "4194304",
+        "digest": "9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08",
+        "files": [
+          {
+            "path": "L2hvbWUvZXhhbXBsZS9QaWN0dXJlcy90cmlwLmpwZw==",
+            "device": "66306",
+            "inode": "1180429",
+            "apparentBytes": "4194304",
+            "modifiedNanoseconds": "1759190400000000000",
+            "ownerId": "1000",
+            "groupId": "1000",
+            "permissions": 420
+          },
+          {
+            "path": "L2hvbWUvZXhhbXBsZS9QaWN0dXJlcy9jb3BpZXMvdHJpcC5qcGc=",
+            "device": "66306",
+            "inode": "1180512",
+            "apparentBytes": "4194304",
+            "modifiedNanoseconds": "1759276800000000000",
+            "ownerId": "1000",
+            "groupId": "1000",
+            "permissions": 420
+          }
+        ]
+      },
+      {
+        "apparentBytes": "2097152",
+        "digest": "60303ae22b998861bce3b28f33eec1be758a213c86c93c076dbe9f558c11c752",
+        "files": [
+          {
+            "path": "L2hvbWUvZXhhbXBsZS9QaWN0dXJlcy9sb2dvLnBuZw==",
+            "device": "66306",
+            "inode": "1180600",
+            "apparentBytes": "2097152",
+            "modifiedNanoseconds": "1756598400000000000",
+            "ownerId": "1000",
+            "groupId": "1000",
+            "permissions": 420
+          },
+          {
+            "path": "L2hvbWUvZXhhbXBsZS9QaWN0dXJlcy9vbGQvbG9nby5wbmc=",
+            "device": "66306",
+            "inode": "1180601",
+            "apparentBytes": "2097152",
+            "modifiedNanoseconds": "1756598400000000000",
+            "ownerId": "1000",
+            "groupId": "1000",
+            "permissions": 384
+          }
+        ]
+      }
+    ],
+    "complete": false,
+    "warnings": [
+      "/home/example/Pictures/locked.jpg could not be opened, so it was left out: Permission denied (os error 13)"
+    ],
+    "candidatesRead": "4821",
+    "filesHashed": "96"
+  }
+}

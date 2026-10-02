@@ -1,0 +1,13 @@
+{
+  "protocolVersion": 1,
+  "requestId": "hash-candidates-1",
+  "operation": "hash-candidates",
+  "arguments": {
+    "scanId": "scan-20260930-8f2ac1d4",
+    "indexDirectory": "L2hvbWUvZXhhbXBsZS8uY2FjaGUvZGlza3RvcA==",
+    "underPath": "L2hvbWUvZXhhbXBsZS9QaWN0dXJlcw==",
+    "minimumBytes": "1048576",
+    "maximumGroups": 200,
+    "maximumFilesPerGroup": 64
+  }
+}
