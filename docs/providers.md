@@ -102,8 +102,10 @@ No provider traverses a tree, runs a command directly, or deletes anything;
 `npm run lint` refuses all three. A provider names paths and the application
 service measures them through the `FootprintPort`. Commands go through the
 `ToolPort`, whose allowlist in `src/platform/linux/tools.ts` is the whole set
-of programs Disktop can run; a name outside it is refused before anything is
-spawned.
+of questions a detector can ask: each entry is a complete argument vector, so a
+tool on the list asked to do anything else — `journalctl --vacuum-size`, a
+`flatpak uninstall` — is refused before anything is spawned, exactly as a name
+outside the list is.
 
 ### Incomplete is not empty
 
