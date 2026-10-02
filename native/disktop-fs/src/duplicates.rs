@@ -194,7 +194,12 @@ fn partition<T: Candidate>(
 
         match digest {
             Ok(digest) => {
-                report.files_hashed += 1;
+                // Counted at the first stage only. The second stage re-reads a
+                // subset of these files, and counting that would make the
+                // number larger than the candidates it came from.
+                if stage == Stage::Edges {
+                    report.files_hashed += 1;
+                }
                 buckets.entry(digest).or_default().push(candidate);
             }
             Err(error) => {

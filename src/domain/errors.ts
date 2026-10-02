@@ -20,6 +20,24 @@ export interface OperationFailure {
 
 
 /**
+ * Raised when the scan a command was asked about is no longer in the index.
+ *
+ * The index is a bounded cache that prunes whole scans, so this is an ordinary
+ * thing to run into and the answer is to scan again. It is its own type
+ * because the alternative — letting it reach a surface as a generic failure —
+ * tells somebody that Disktop broke when in fact their cache rolled over.
+ */
+export class StaleScanIndex extends Error {
+  readonly scanId: string;
+
+  constructor(scanId: string, message: string) {
+    super(message);
+    this.name = "StaleScanIndex";
+    this.scanId = scanId;
+  }
+}
+
+/**
  * Raised when the thing an operation needs is not there: no helper binary, a
  * kernel without the containment the scanner depends on, a denied permission.
  *

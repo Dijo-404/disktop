@@ -1,6 +1,6 @@
 # CLI contract
 
-Status: planned `1.0.0` command surface. `devices`, the `--json` dashboard, `alerts check`, `scan`, `explore`, `snapshots list|diff`, `clean`, `clean plan`, `clean apply`, `history`, `undo`, and `find empty|broken` are implemented; `report`, `timer`, `completion`, and `find duplicates|stale` are declared in the parser and refuse with `not-implemented`. The JSON output contract in [`schemas/cli/v1/`](../schemas/cli/v1/) is normative and is validated by `tests/contract/cli-schema.test.mjs` against examples and by `tests/integration/cli-output.test.mjs` against what the CLI actually writes on a running host. The parser and generated help are normative now; completions become normative when they are implemented. See [PLAN.md](../PLAN.md#cli-and-outputs).
+Status: planned `1.0.0` command surface. `devices`, the `--json` dashboard, `alerts check`, `scan`, `explore`, `snapshots list|diff`, `clean`, `clean plan`, `clean apply`, `history`, `undo`, and `find duplicates|empty|broken` are implemented; `report`, `timer`, `completion`, and `find stale` are declared in the parser and refuse with `not-implemented`. The JSON output contract in [`schemas/cli/v1/`](../schemas/cli/v1/) is normative and is validated by `tests/contract/cli-schema.test.mjs` against examples and by `tests/integration/cli-output.test.mjs` against what the CLI actually writes on a running host. The parser and generated help are normative now; completions become normative when they are implemented. See [PLAN.md](../PLAN.md#cli-and-outputs).
 
 ## What works today
 
@@ -19,6 +19,7 @@ Status: planned `1.0.0` command surface. `devices`, the `--json` dashboard, `ale
 | `disktop history [--json]` | The durable action journal, with interrupted records resolved as it is read. |
 | `disktop undo ACTION_ID --yes [--json]` | Puts back what one Trash action moved. |
 | `disktop find empty\|broken [--path PATH] [--limit COUNT] [--json]` | Empty directories and dangling symlinks, read out of the most recent scan covering the path. |
+| `disktop find duplicates [--path PATH] [--min-size SIZE] [--keep oldest\|newest\|in-path] [--keep-under PATH] [--limit COUNT] [--json]` | Groups of files holding the same bytes, with the copy a keep rule would keep. Reads content; changes nothing. |
 | `disktop --units iec\|si` | Switches human-readable units. Byte values in JSON never change. |
 | `disktop --help`, `disktop --version` | Generated from the one command table in `src/cli/parser.ts`. |
 
@@ -129,8 +130,47 @@ The walk counted each directory's entries as it read them and asked once per sym
 whether its target resolved, so both answers are already in the index. A directory the
 scan could not open carries no child count at all and therefore never answers a search
 for empty ones — "nobody looked" and "nothing is there" are different answers.
-`find duplicates` and `find stale` are declared and refuse; they need the hashing and
-timestamp-confidence work that is not built yet.
+`find stale` is declared and refuses; it needs the timestamp-confidence work that is
+not built yet.
+
+## Finding duplicates
+
+`find duplicates` reads the same index to decide what is worth opening, then reads
+content, so it costs more than the other three and answers a different kind of
+question. It starts from the sizes more than one regular file shares, narrows those by
+a digest of each file's first and last 64 KiB, and narrows what is left by a digest of
+every byte. A file with no possible twin is never opened.
+
+The answer is a list of groups rather than a page of rows, because which copy pairs
+with which is the only thing anybody reading it is deciding about. Each group carries
+`reclaimableBytes` — the group's size times one fewer than its members, because one
+copy always stays — and the result's own `reclaimableBytes` is the sum over the groups
+that have a keeper.
+
+Two names for one inode are one member of a group, not two: removing the second frees
+nothing. `--min-size` defaults to 1 MiB; without it the listing fills with small files
+whose duplication costs nothing to keep.
+
+`--keep` says which copy survives. `oldest` and `newest` read the **modification**
+time, which is when a file's contents last changed; nothing here reads an access time,
+because no column in the index holds one and on a `relatime` or `noatime` mount it
+would not mean what a reader would take it to mean. When copies share a timestamp the
+first path in byte order is kept and the decision says `arbitrary: true` rather than
+presenting a coin toss as a judgement. `--keep in-path PATH` requires `--keep-under`
+and keeps the single copy under that directory; if no copy is there, or more than one
+is, the group is reported `undecidable` with its reason and contributes nothing to the
+reclaimable total. It never falls back to another rule — somebody who asked to keep
+what is under `~/Pictures` is not asking to keep the oldest instead.
+
+The digests group candidates and authorise nothing. Acting on a group goes through
+`clean plan` and `clean apply` like everything else, and the helper re-opens both files
+and compares them byte for byte before it touches either. See
+[adr/0006](adr/0006-content-identity-and-archive-dependencies.md).
+
+A search that hits a cap, cannot read a file, or is cancelled reports
+`status: incomplete` with a warning saying so, and exits `3`. A scan the index has
+pruned is refused by name with the command that would make a new one; it is never
+answered with no duplicates.
 
 ## Machine output
 

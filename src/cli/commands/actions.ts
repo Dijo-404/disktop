@@ -1,7 +1,10 @@
 import type { ActionOperation } from "../../domain/actions.js";
+import { KEEP_RULES, type KeepRule } from "../../domain/duplicates.js";
 import type { OperationFailure } from "../../domain/errors.js";
-import type { Warning } from "../../domain/models.js";
+import type { ScanCompleteness, Warning } from "../../domain/models.js";
 import { rawPathFromUtf8 } from "../../domain/paths.js";
+import type { DuplicateOutcome } from "../../application/duplicates.js";
+import { parseSize } from "../../application/explore.js";
 import { FIND_KINDS, type FindKind } from "../../application/find.js";
 import type { CliContext } from "../context.js";
 import {
@@ -11,9 +14,17 @@ import {
   encodeActionResult,
   encodeIndexedEntry,
   encodeJournalRecord,
+  encodeRawPath,
   writeEnvelope,
 } from "../output.js";
-import { entryLines, planLines, resultLines, historyLines, warningLines } from "../text.js";
+import {
+  duplicateLines,
+  entryLines,
+  planLines,
+  resultLines,
+  historyLines,
+  warningLines,
+} from "../text.js";
 import { newestCovering } from "./explore.js";
 
 export interface PlanOptions {
@@ -41,6 +52,9 @@ export interface FindOptions {
   readonly kind: string;
   readonly path?: string;
   readonly limit?: string;
+  readonly keep?: string;
+  readonly keepUnder?: string;
+  readonly minSize?: string;
 }
 
 /** The operations `clean plan` can fix today. The rest belong to later phases. */
@@ -328,11 +342,34 @@ export async function runFind(context: CliContext, options: FindOptions): Promis
     });
   }
 
+  const rule = options.keep ?? "oldest";
+  if (!KEEP_RULES.includes(rule as KeepRule)) {
+    return refuse(context, "find", options.asJson, {
+      code: "invalid-input",
+      message: `'--keep' takes one of ${KEEP_RULES.join(", ")}, not '${rule}'.`,
+    });
+  }
+  let minimumBytes: bigint | undefined;
+  if (options.minSize !== undefined) {
+    minimumBytes = parseSize(options.minSize);
+    if (minimumBytes === undefined) {
+      return refuse(context, "find", options.asJson, {
+        code: "invalid-input",
+        message: "'--min-size' accepts a size such as 1MiB or 4096.",
+      });
+    }
+  }
+
   const outcome = await context.actions.find({
     kind: options.kind as FindKind,
     scanId: scan.scanId,
     path: wanted,
     ...(options.limit === undefined ? {} : { limit: Number(options.limit) }),
+    rule: rule as KeepRule,
+    ...(options.keepUnder === undefined
+      ? {}
+      : { keepUnder: rawPathFromUtf8(context.resolvePath(options.keepUnder)) }),
+    ...(minimumBytes === undefined ? {} : { minimumBytes }),
   });
 
   if (outcome.kind === "refused") {
@@ -343,6 +380,9 @@ export async function runFind(context: CliContext, options: FindOptions): Promis
       code: "unsupported",
       message: `Disktop cannot read the index on this machine: ${outcome.capability.explanation}`,
     });
+  }
+  if (outcome.kind === "duplicates") {
+    return renderDuplicates(context, options, scan.scanId, scan.completeness, outcome.result);
   }
 
   // A page of a partial scan is not a picture of the whole tree, and says so.
@@ -371,6 +411,92 @@ export async function runFind(context: CliContext, options: FindOptions): Promis
   }
 
   for (const line of entryLines(outcome.entries, context.settings.units, "allocated")) {
+    context.output.stdout(`${line}\n`);
+  }
+  for (const line of warningLines(warnings)) {
+    context.output.stderr(`${line}\n`);
+  }
+  return exitCode;
+}
+
+/**
+ * A duplicate search's answer.
+ *
+ * It carries groups rather than a page of rows, so it has its own writer: a
+ * flat list would lose which copy pairs with which, which is the only thing a
+ * reader of this is actually deciding about.
+ */
+function renderDuplicates(
+  context: CliContext,
+  options: FindOptions,
+  scanId: string,
+  completeness: ScanCompleteness,
+  result: DuplicateOutcome,
+): number {
+  if (result.kind === "refused") {
+    return refuse(context, "find", options.asJson, result.failure);
+  }
+  if (result.kind === "unavailable") {
+    return refuse(context, "find", options.asJson, {
+      code: "unsupported",
+      message: `Disktop cannot search for duplicates on this machine: ${result.capability.explanation}`,
+    });
+  }
+
+  // Two things can make this answer partial and they are different facts: the
+  // scan it reads from may have missed directories, and the search itself may
+  // have hit a cap or an unreadable file. Either one means the listing is not
+  // the whole picture, so both are reported and both set the exit status.
+  const complete = completeness.complete && result.complete;
+  const exitCode = complete ? EXIT.complete : EXIT.incomplete;
+  const warnings = [...(completeness.complete ? [] : completeness.warnings), ...result.warnings];
+
+  if (options.asJson) {
+    writeEnvelope(
+      context.output.stdout,
+      buildEnvelope({
+        command: "find",
+        generatedAt: context.now(),
+        status: complete ? "complete" : "incomplete",
+        exitCode,
+        warnings,
+        data: {
+          kind: "duplicates",
+          scanId,
+          groups: result.groups.map((decided) => ({
+            apparentBytes: decided.group.apparentBytes.toString(10),
+            digest: decided.group.digest,
+            reclaimableBytes: decided.reclaimableBytes.toString(10),
+            files: decided.group.files.map((file) => ({
+              path: encodeRawPath(file.path),
+              device: file.device.toString(10),
+              inode: file.inode.toString(10),
+              apparentBytes: file.apparentBytes.toString(10),
+              modifiedNanoseconds: file.modifiedNanoseconds.toString(10),
+              ownerId: file.ownerId.toString(10),
+              groupId: file.groupId.toString(10),
+              permissions: file.permissions,
+            })),
+            decision:
+              decided.decision.kind === "decided"
+                ? {
+                    kind: "decided",
+                    keep: encodeRawPath(decided.decision.kept.path),
+                    basis: decided.decision.basis,
+                    arbitrary: decided.decision.arbitrary,
+                  }
+                : { kind: "undecidable", reason: decided.decision.reason },
+          })),
+          reclaimableBytes: result.reclaimableBytes.toString(10),
+          candidatesRead: result.candidatesRead.toString(10),
+          filesHashed: result.filesHashed.toString(10),
+        },
+      }),
+    );
+    return exitCode;
+  }
+
+  for (const line of duplicateLines(result.groups, result.reclaimableBytes, context.settings.units)) {
     context.output.stdout(`${line}\n`);
   }
   for (const line of warningLines(warnings)) {
