@@ -287,7 +287,7 @@ export function findingLines(summary: FootprintSummary, units: Units): string[] 
 export function providerLines(reports: readonly ProviderReport[]): string[] {
   return reports
     .filter((report) => !report.ran)
-    .map((report) => `${report.providerId}: ${report.capability.status}: ${report.capability.explanation}`);
+    .map((report) => `${report.providerId}: ${report.capability.status}: ${safeLine(report.capability.explanation)}`);
 }
 
 /**

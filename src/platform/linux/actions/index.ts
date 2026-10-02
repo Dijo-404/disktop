@@ -2,7 +2,7 @@ import type { ActionPlan, ActionResult, PlannedEntry } from "../../../domain/act
 import { CapabilityUnavailable } from "../../../domain/errors.js";
 import type { OperationFailure, OperationFailureCode } from "../../../domain/errors.js";
 import type { RawPath } from "../../../domain/models.js";
-import { rawPathFromBytes, rawPathFromUtf8 } from "../../../domain/paths.js";
+import { rawPathFromBytes, rawPathFromUtf8, sanitizeText } from "../../../domain/paths.js";
 import type { HelperEvent, HelperStart, NativeHelperClient } from "../../../native/client.js";
 import {
   parseActionResult,
@@ -284,7 +284,7 @@ function toJournalItem(item: NativeJournalItem): JournalItem {
     path: decodePath(item.path),
     ...(item.destination === undefined ? {} : { destination: decodePath(item.destination) }),
     outcome: item.outcome,
-    ...(item.message === undefined ? {} : { message: item.message }),
+    ...(item.message === undefined ? {} : { message: sanitizeText(item.message) }),
     bytes: item.bytes,
   };
 }

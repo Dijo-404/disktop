@@ -256,3 +256,47 @@ test("reading the journal reconciles first and decodes every number losslessly",
   assert.equal(record.items[0].path.display, "/home/example/.cache/pip");
   assert.equal(record.items[0].destination.display, "/home/example/.local/share/Trash/files/pip");
 });
+
+test("a journal item's message reaches Disktop with its control characters made visible", async () => {
+  const helper = fakeHelper([
+    {
+      protocolVersion: 1,
+      requestId: "journal-reconcile-1",
+      eventId: "1",
+      event: "complete",
+      result: {
+        reconciled: "0",
+        records: [
+          {
+            id: "act-1759305679004-9f2c1ab07d4e5610",
+            planId: "plan-01HQ8Z3M4K5N6P7Q",
+            operation: "trash",
+            startedAtMilliseconds: "1759305679004",
+            state: "partial",
+            completed: "0",
+            skipped: "1",
+            failed: "0",
+            selectedBytes: "1",
+            bytesMovedToTrash: "0",
+            items: [
+              {
+                position: "0",
+                path: rawPathFromUtf8("/home/example/a").bytesBase64,
+                outcome: "skipped",
+                message: "changed\u001b[2J\nsecond line",
+                bytes: "1",
+              },
+            ],
+          },
+        ],
+      },
+    },
+  ]);
+  const actions = createNativeActions({
+    journalDirectory: JOURNAL_DIRECTORY,
+    homeTrashDirectory: HOME_TRASH_DIRECTORY,
+    start: helper.start,
+  });
+  const page = await actions.list();
+  assert.doesNotMatch(page.records[0].items[0].message, /[\u001b\n]/);
+});

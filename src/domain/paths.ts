@@ -38,6 +38,10 @@ export function pathBytes(path: RawPath): Uint8Array {
  * sequences can still render the same, so an operation is identified by its
  * bytes and never by what the user reads.
  */
+export function sanitizeText(value: string): string {
+  return sanitizeForDisplay(new Uint8Array(Buffer.from(value, "utf8")));
+}
+
 export function sanitizeForDisplay(bytes: Uint8Array): string {
   let display = "";
   for (const character of Buffer.from(bytes).toString("utf8")) {

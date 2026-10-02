@@ -199,3 +199,18 @@ test("text Disktop did not write cannot command the terminal on its way out", as
     );
   }
 });
+
+test("a detector's capability explanation is printed without its escape sequences", async () => {
+  const { providerLines } = await import("../../dist/cli/text.js");
+  const [line] = providerLines([
+    {
+      providerId: "diagnostic.smart",
+      version: 1,
+      ran: false,
+      complete: true,
+      findings: 0,
+      capability: { status: "missing-tool", explanation: "smartctl failed: \u001b[31mred\u009b2K" },
+    },
+  ]);
+  assert.doesNotMatch(line, /[\u001b\u009b]/);
+});

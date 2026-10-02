@@ -74,3 +74,11 @@ test("a tool that fails keeps its capability and its output", async () => {
   assert.equal(outcome.exitCode, 1);
   assert.match(outcome.stderr, /permission denied/);
 });
+
+test("a tool's stderr cannot command the terminal through a capability explanation", async () => {
+  const { runFixedCommand } = await import("../../dist/platform/linux/process.js");
+  const outcome = await runFixedCommand("sh", ["-c", "printf '\\033[2Jgone\\n' >&2; exit 3"]);
+  assert.notEqual(outcome.capability.status, "available");
+  assert.doesNotMatch(outcome.capability.explanation, /\u001b/);
+  assert.match(outcome.capability.explanation, /gone/);
+});

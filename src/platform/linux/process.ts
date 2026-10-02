@@ -3,6 +3,7 @@ import { constants } from "node:fs";
 import { access } from "node:fs/promises";
 import { posix } from "node:path";
 import type { Capability } from "../../domain/models.js";
+import { sanitizeText } from "../../domain/paths.js";
 
 /** Trusted directories a system tool may be resolved from, in order. */
 const TRUSTED_DIRECTORIES = ["/usr/bin", "/bin", "/usr/sbin", "/sbin"] as const;
@@ -100,7 +101,7 @@ function failureCapability(executable: string, error: ExecFailure, stderr: strin
   if (error.code === "EACCES" || error.code === "EPERM" || /permission denied|not permitted/i.test(stderr)) {
     return { status: "permission-denied", explanation: `${executable} could not be run by this user.` };
   }
-  const detail = stderr.trim().split("\n")[0] ?? error.message;
+  const detail = sanitizeText(stderr.trim().split("\n")[0] ?? error.message);
   return { status: "missing-tool", explanation: `${executable} failed: ${detail}` };
 }
 
