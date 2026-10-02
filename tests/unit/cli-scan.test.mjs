@@ -287,3 +287,57 @@ test("an unexpected failure still writes one envelope and exits 2", async () => 
   assert.equal(envelope.error.code, "internal-error");
   assert.match(envelope.error.message, /unrepeatable/);
 });
+
+const OWNERS = [
+  { ownerId: 1000n, name: "alice", entries: 1200n, allocatedBytes: 9_000_000n, apparentBytes: 8_900_000n },
+  { ownerId: 1001n, entries: 30n, allocatedBytes: 4096n, apparentBytes: 4000n },
+];
+
+function ownersContext({ snapshot = FIXTURE_SNAPSHOT, namesRead = true } = {}) {
+  const asked = [];
+  const context = fakeContext({ snapshots: [snapshot] });
+  context.storage.explore.page = async (query) => {
+    asked.push(query);
+    return { kind: "page", page: { entries: [], owners: OWNERS, namesRead } };
+  };
+  return { context, asked };
+}
+
+test("explore --owners lists who owns the bytes under the path, with names where known", async () => {
+  const { context, asked } = ownersContext();
+  const status = await runCli(["explore", "--owners", "--json"], context);
+  const envelope = envelopeOf(context, "explore");
+  assert.equal(status, 0);
+  assert.equal(asked[0].includeOwnerTotals, true);
+  assert.deepEqual(envelope.data.owners[0], { ownerId: "1000", name: "alice", entries: "1200", allocatedBytes: "9000000", apparentBytes: "8900000" });
+  assert.equal(envelope.data.owners[1].name, undefined);
+});
+
+test("owner totals from a scan that missed directories are floors, and say what would complete them", async () => {
+  const partial = {
+    ...FIXTURE_SNAPSHOT,
+    completeness: { ...FIXTURE_SNAPSHOT.completeness, complete: false, inaccessibleDirectories: 3n, warnings: [{ code: "permission-denied", message: "3 directories could not be opened." }] },
+  };
+  const { context } = ownersContext({ snapshot: partial });
+  const status = await runCli(["explore", "--owners", "--json"], context);
+  const envelope = envelopeOf(context, "explore");
+  assert.equal(status, 3);
+  const floor = envelope.warnings.find((warning) => warning.code === "owners-floor");
+  assert.match(floor.message, /floor/);
+  assert.match(floor.message, /administrator/);
+  assert.doesNotMatch(floor.message, /sudo npx/);
+});
+
+test("owners whose names could not be read are listed by id and the gap is said", async () => {
+  const { context } = ownersContext({ namesRead: false });
+  await runCli(["explore", "--owners", "--json"], context);
+  const envelope = envelopeOf(context, "explore");
+  assert.ok(envelope.warnings.some((warning) => warning.code === "passwd-unreadable"));
+});
+
+test("explore --owners in text names each owner and their share", async () => {
+  const { context } = ownersContext();
+  await runCli(["explore", "--owners"], context);
+  assert.match(context.captured.stdout, /alice \(1000\)/);
+  assert.match(context.captured.stdout, /user 1001/);
+});

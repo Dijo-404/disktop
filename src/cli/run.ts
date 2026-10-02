@@ -65,6 +65,7 @@ export async function runCli(args: readonly string[], context: CliContext): Prom
       ...(optional(parsed, "limit")),
       ...(optional(parsed, "cursor")),
       typeTotals: parsed.flags.has("type-totals"),
+      owners: parsed.flags.has("owners"),
     } as Parameters<typeof runExplore>[1]);
   }
   if (name === "clean") {

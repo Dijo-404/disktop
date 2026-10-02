@@ -13,6 +13,7 @@ import { createSnapshotService, type SnapshotService } from "../application/snap
 import type { RawPath, Warning } from "../domain/models.js";
 import { rawPathFromUtf8 } from "../domain/paths.js";
 import { createLinuxInventory } from "../platform/linux/inventory/index.js";
+import { createAccountNames } from "../platform/linux/accounts.js";
 import { createIndexFootprint } from "../platform/linux/footprint.js";
 import { createPathProbe } from "../platform/linux/probe.js";
 import { createToolPort } from "../platform/linux/tools.js";
@@ -189,7 +190,7 @@ export async function createServices(options: CompositionOptions = {}): Promise<
     restore: (journalId, signal) => actions.restore(journalId, signal),
   };
 
-  const explore = createExploreService(scanner);
+  const explore = createExploreService(scanner, createAccountNames());
   const footprint = createFootprintService(
     createBuiltInProviders({ packages: createPackageInventory(tools), managers }),
     discovery,
