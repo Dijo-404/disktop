@@ -92,6 +92,9 @@ pub fn find(
     )?;
     let mut resolver = index::PathResolver::new(connection);
 
+    let maximum_groups = request.maximum_groups.min(MAX_GROUPS);
+    let maximum_files = request.maximum_files_per_group.min(MAX_FILES_PER_GROUP);
+
     for (apparent_bytes, members) in classes {
         if cancelled.load(Ordering::Relaxed) {
             report.complete = false;
@@ -100,13 +103,8 @@ pub fn find(
                 .push("The search was cancelled; these are the groups found so far.".to_owned());
             return Ok(report);
         }
-        if report.groups.len() as u32 >= request.maximum_groups.min(MAX_GROUPS) {
-            report.complete = false;
-            report.warnings.push(format!(
-                "Stopped after {} groups; there are more size classes left to compare.",
-                report.groups.len()
-            ));
-            return Ok(report);
+        if report.groups.len() as u32 >= maximum_groups {
+            return Ok(truncated(report, maximum_groups));
         }
 
         report.candidates_read += members.len() as u64;
@@ -118,6 +116,10 @@ pub fn find(
         // Each stage narrows the last one's survivors, so a file alone in its
         // size class is never opened and a file alone after the edge digest is
         // never read through.
+        // One size class can hold more groups than the cap allows, so the cap
+        // is checked where a group is added rather than only between classes.
+        // Leaving the loop without saying so would drop groups from an answer
+        // that still called itself whole.
         let edges = partition(&paths, apparent_bytes, Stage::Edges, &mut report);
         for (_, bucket) in edges {
             let full = partition(&bucket, apparent_bytes, Stage::Whole, &mut report);
@@ -126,28 +128,41 @@ pub fn find(
                 if group.len() < 2 {
                     continue;
                 }
-                if group.len() as u32 > request.maximum_files_per_group.min(MAX_FILES_PER_GROUP) {
+                if report.groups.len() as u32 >= maximum_groups {
+                    return Ok(truncated(report, maximum_groups));
+                }
+                if group.len() as u32 > maximum_files {
                     report.complete = false;
                     report.warnings.push(format!(
-                        "A group of {} identical files was truncated to {}.",
+                        "A group of {} identical files was truncated to {maximum_files}.",
                         group.len(),
-                        request.maximum_files_per_group.min(MAX_FILES_PER_GROUP),
                     ));
-                    group.truncate(request.maximum_files_per_group.min(MAX_FILES_PER_GROUP) as usize);
+                    group.truncate(maximum_files as usize);
                 }
                 report.groups.push(Group {
                     apparent_bytes,
                     digest,
                     files: group,
                 });
-                if report.groups.len() as u32 >= request.maximum_groups.min(MAX_GROUPS) {
-                    break;
-                }
             }
         }
     }
 
     Ok(report)
+}
+
+/// Stop, and say that the answer is not everything there is.
+///
+/// Returning the groups found so far while still claiming the answer is whole
+/// would be the one thing a listing of duplicates must not do: a person would
+/// read it as "these are all of them" and act on that.
+fn truncated(mut report: Report, maximum_groups: u32) -> Report {
+    report.complete = false;
+    report.warnings.push(format!(
+        "Stopped after {maximum_groups} group(s); there are more identical files than this \
+         answer lists. Narrow the search with a path or a larger minimum size."
+    ));
+    report
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -473,6 +488,46 @@ mod tests {
         assert!(
             report.files_hashed >= 2,
             "both files had to be read fully to tell them apart",
+        );
+    }
+
+    #[test]
+    fn a_group_cap_bites_within_one_size_class_too() {
+        let sandbox = Sandbox::new("duplicates-cap-one-class");
+        // Three pairs, all the same size, so they are all one size class. The
+        // cap has to stop the answer inside that class, not only between
+        // classes.
+        for pair in 0..3u8 {
+            let bytes: Vec<u8> = (0..200_000u32)
+                .map(|index| (index as u8).wrapping_add(pair))
+                .collect();
+            write(&sandbox, &format!("a{pair}"), &bytes);
+            write(&sandbox, &format!("b{pair}"), &bytes);
+        }
+
+        let (connection, scan_id) = scanned(&sandbox, "cap-one-class");
+        let report = find(
+            &connection,
+            &Request {
+                maximum_groups: 1,
+                ..request(&scan_id)
+            },
+            &AtomicBool::new(false),
+        )
+        .unwrap();
+
+        assert_eq!(report.groups.len(), 1, "the cap stopped the answer");
+        assert!(
+            !report.complete,
+            "an answer that dropped groups is not the whole picture",
+        );
+        assert!(
+            report
+                .warnings
+                .iter()
+                .any(|warning| warning.contains("group")),
+            "a truncated listing says what it dropped: {:?}",
+            report.warnings,
         );
     }
 

@@ -244,6 +244,7 @@ pub fn run_dedup_hardlink(
         })?;
     let keep = KeptFile {
         descriptor: keep_descriptor,
+        path: request.keep.path.clone(),
         parent: keep_parent,
         metadata: keep_live,
     };
@@ -270,6 +271,7 @@ pub fn run_dedup_hardlink(
 /// the kept path happens to name a moment later.
 struct KeptFile {
     descriptor: std::os::unix::io::RawFd,
+    path: Vec<u8>,
     parent: guard::ResolvedParent,
     metadata: sys::Metadata,
 }
@@ -486,8 +488,14 @@ fn hardlink_one(
 }
 
 impl KeptFile {
+    /// The whole path, not the final component.
+    ///
+    /// `ResolvedParent::name` is only the last segment. An intent recording
+    /// `photo.jpg` as the thing a file became a link to is a record nobody can
+    /// act on, and this is the one irreversible operation whose record matters
+    /// most.
     fn path(&self) -> Vec<u8> {
-        self.parent.name.clone()
+        self.path.clone()
     }
 }
 
@@ -545,7 +553,22 @@ pub fn run_copy_move(
     cancelled: &AtomicBool,
 ) -> Result<ActionSummary, ActionRefusal> {
     // The destination is validated once. It is where everything lands, so a
-    // destination that is not a directory makes the request wrong, not an item.
+    // destination Disktop may not write into, or one that is not a directory,
+    // makes the request wrong rather than one item of it.
+    let guard = Guard::new(&GuardContext {
+        journal_directory: Some(
+            request
+                .journal_directory
+                .as_os_str()
+                .as_encoded_bytes()
+                .to_vec(),
+        ),
+    })
+    .map_err(|refusal| ActionRefusal::new(refusal.code, refusal.message))?;
+    guard
+        .classify_destination(&request.destination_directory)
+        .map_err(|refusal| ActionRefusal::new(refusal.code, refusal.message))?;
+
     let destination_parent = guard::resolve_parent(&request.destination_directory)
         .map_err(|refusal| ActionRefusal::new(refusal.code, refusal.message))?;
     let destination =
@@ -609,6 +632,20 @@ pub fn run_compress(
     let named = if request.destination_directory.is_empty() {
         None
     } else {
+        let guard = Guard::new(&GuardContext {
+            journal_directory: Some(
+                request
+                    .journal_directory
+                    .as_os_str()
+                    .as_encoded_bytes()
+                    .to_vec(),
+            ),
+        })
+        .map_err(|refusal| ActionRefusal::new(refusal.code, refusal.message))?;
+        guard
+            .classify_destination(&request.destination_directory)
+            .map_err(|refusal| ActionRefusal::new(refusal.code, refusal.message))?;
+
         let parent = guard::resolve_parent(&request.destination_directory)
             .map_err(|refusal| ActionRefusal::new(refusal.code, refusal.message))?;
         let descriptor = sys::open_directory_no_symlinks(parent.descriptor(), &parent.name)
@@ -738,6 +775,20 @@ fn compress_one(
         );
     }
 
+    // An archive is at most the size of what it holds, so the source's own
+    // measurement is the right thing to ask for. A compression that fills the
+    // filesystem before failing is worse for everything else running than a
+    // refusal is for the person who asked.
+    if let Err((code, message)) = room_for(&destination_path, target.reviewed_bytes) {
+        return settle(
+            journal,
+            journal_id,
+            position,
+            target,
+            refuse(code, message, Outcome::Failed),
+        );
+    }
+
     let staged = match stage_archive(&parent, destination, &live, &archive_name) {
         Ok(staged) => staged,
         Err((code, message)) => {
@@ -810,6 +861,10 @@ fn stage_archive(
             continue;
         }
 
+        // An archive holds everything that was inside the source, including
+        // whatever was private in there, so it takes Disktop's own private mode
+        // rather than the source's. A 0o755 directory holding a 0o600 secret
+        // must not become a 0o755 file holding that secret's bytes.
         let outcome = if live.kind == EntryKind::Directory {
             let source = sys::open_directory_no_symlinks(parent.descriptor(), &parent.name)
                 .map_err(describe_copy)?;
@@ -818,18 +873,23 @@ fn stage_archive(
                 &parent.name,
                 destination,
                 &staging,
-                live.permissions,
+                PRIVATE_FILE_MODE,
             )
             .and_then(|written| {
-                // Read back the way somebody recovering from it would. An
-                // archive that will not decompress is not an archive.
+                // Read back the way somebody recovering from it would, and
+                // compared over the archive's whole content. An archive that
+                // will not decompress to what went into it is not an archive,
+                // however well the write went.
                 let recovered = archive::verify_tree(destination, &staging)?;
                 if recovered != written {
                     return Err(std::io::Error::new(
                         std::io::ErrorKind::InvalidData,
-                        "the archive did not read back with every entry that went into it",
+                        "the archive did not read back as the bytes that went into it",
                     ));
                 }
+                // And it is still a tar anybody can unpack, not only a stream
+                // that happens to decompress.
+                archive::readable_as_tar(destination, &staging)?;
                 Ok(())
             });
             sys::close(source);
@@ -837,7 +897,7 @@ fn stage_archive(
         } else {
             let source = sys::openat_read_no_symlinks(parent.descriptor(), &parent.name)
                 .map_err(describe_copy)?;
-            let result = archive::compress_file(source, destination, &staging, live.permissions)
+            let result = archive::compress_file(source, destination, &staging, PRIVATE_FILE_MODE)
                 .and_then(|written| {
                     let recovered = archive::verify_file(destination, &staging)?;
                     if recovered != written {
@@ -957,6 +1017,19 @@ fn move_one(
         );
     }
 
+    // The size the plan reviewed is what this needs room for. Checking before
+    // the copy starts is the difference between a refusal and a filesystem
+    // that other programs found full for as long as the copy ran.
+    if let Err((code, message)) = room_for(context.destination_path, target.reviewed_bytes) {
+        return settle(
+            journal,
+            journal_id,
+            position,
+            target,
+            refuse(code, message, Outcome::Failed),
+        );
+    }
+
     let staged = match stage_copy(&parent, context.destination, &live) {
         Ok(staged) => staged,
         Err((code, message)) => {
@@ -1010,6 +1083,32 @@ fn move_one(
     dispose_of_source(guard, context, journal, journal_id, position, target, &live)
 }
 
+/// Whether the filesystem holding the destination has room for this source.
+///
+/// Refusing here costs a `statfs`; not refusing costs a partly-written copy,
+/// an `ENOSPC` that unwinds, and a filesystem that was full for every other
+/// process on the machine while it ran. The reading is a moment in time and
+/// something else may take the space anyway — that is why the copy still
+/// cleans up after itself — but starting a copy that cannot fit is a choice
+/// nobody has to make.
+fn room_for(destination_path: &[u8], needed: u64) -> Result<(), (&'static str, String)> {
+    let Some(available) = guard::free_bytes(destination_path) else {
+        // A reading that did not work is not a reason to refuse: the copy
+        // itself still reports ENOSPC and still removes what it staged.
+        return Ok(());
+    };
+    if available >= needed {
+        return Ok(());
+    }
+    Err((
+        "no-space",
+        format!(
+            "{} has {available} bytes free and this needs about {needed}. Nothing was copied.",
+            String::from_utf8_lossy(destination_path),
+        ),
+    ))
+}
+
 /// Copy one reviewed target under a staging name, returning that name.
 fn stage_copy(
     parent: &guard::ResolvedParent,
@@ -1035,15 +1134,14 @@ fn stage_copy(
         } else {
             let source = sys::openat_read_no_symlinks(parent.descriptor(), &parent.name)
                 .map_err(describe_copy)?;
-            let result = transfer::copy_file(source, destination, &staging, live.permissions)
-                .and_then(|_| {
-                    // The modification time comes across so the copy is the
-                    // same file rather than a new one made today.
-                    let written = sys::openat_read_no_symlinks(destination, &staging)?;
-                    let result = sys::set_modified(written, live.modified_nanoseconds);
-                    sys::close(written);
-                    result
-                });
+            let result = transfer::copy_file(
+                source,
+                destination,
+                &staging,
+                live.permissions,
+                Some(live.modified_nanoseconds),
+            )
+            .map(|_| ());
             sys::close(source);
             result
         };
@@ -1094,6 +1192,15 @@ fn dispose_of_source(
         Ok(parent) => parent,
         Err(refusal) => return published_but_kept(target, &refusal.message),
     };
+
+    // The source is checked again, here, immediately before anything happens
+    // to it. The check at the start of the item was made before a copy that
+    // may have run for a long time, and anything written to the source while
+    // it ran is in neither the copy nor the plan. Disposing of it on the
+    // strength of the earlier check would release bytes nobody reviewed.
+    if let Err(refusal) = guard::revalidate(&parent, &target.expected) {
+        return published_but_kept(target, &refusal.message);
+    }
 
     let removed = match context.disposition {
         SourceDisposition::Trash => {
@@ -1173,7 +1280,7 @@ fn published_but_kept(target: &Target, reason: &str) -> ItemReport {
         outcome: Outcome::Uncertain,
         reason: Some("source-not-disposed"),
         message: Some(format!(
-            "The copy arrived and was verified, but the original could not be dealt with, so it \
+            "The output arrived and was verified, but the original could not be dealt with, so it \
              is still there: {reason}"
         )),
         bytes: 0,

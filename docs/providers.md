@@ -186,10 +186,22 @@ that can be made to run anything.
 Roots go through `isRefusedAsAllowedRoot`, the same check that bounds `additional_allowed_roots`,
 so a protected system root or a shared container root such as `/home` is refused as the
 file loads. A pattern that is absolute or that holds a `..` segment is refused for the
-same reason: a rule may not reach outside the roots it declares. Patterns match against
-display text rather than raw bytes, and a name that does not decode cleanly is left
-unmatched — the safe direction, since nobody can type a pattern for bytes that are not
-text.
+same reason: a rule may not reach outside the roots it declares. Patterns match against the path's own text rather than its sanitized rendering, and a
+name that does not decode cleanly is left unmatched — the safe direction, since nobody
+can type a pattern for bytes that are not text.
+
+`*` matches within one path segment, `**` across segments, and `?` one character;
+nothing else is special. A trailing `**` matches the directory it names and everything
+under it, so `excludes = ["private/**"]` protects that whole tree — an exclusion that
+silently matched nothing would be the worst possible failure for a rule that removes
+files. `**` is a whole path segment on its own: `a**` is refused rather than guessed at.
+Matching is a direct walk of the pattern rather than a compiled regular expression,
+because a regular expression built from several `**` segments backtracks, and a pattern
+that takes seconds to fail is one that hangs this program.
+
+A rule's name is printed, so it may not hold control or direction-changing characters,
+and two rules whose names reduce to the same identifier are refused rather than silently
+merged.
 
 `maximum_count` and `maximum_bytes` are enforced during selection rather than checked
 afterwards. A rule that says "at most twenty gigabytes" and produces a plan for two

@@ -177,3 +177,32 @@ test("a plain Trash undo says nothing about a destination it never had", async (
     false,
   );
 });
+
+test("an undo note does not present the restored sources as the output it published", async () => {
+  const moved = { ...TRASHED, id: "act-note", operation: "copy-move" };
+  const { service: undo } = service([moved]);
+
+  const outcome = await undo.restore("act-note", SIGNAL);
+
+  assert.equal(outcome.kind, "restored");
+  const listing = outcome.notes.find((note) => /Restored:|no longer want/i.test(note));
+  if (listing !== undefined) {
+    assert.doesNotMatch(
+      listing,
+      /\/home\/example\/\.cache\/pip/,
+      "the note offers to remove the copy, so it must not name the source it just put back",
+    );
+  }
+});
+
+test("an undo says plainly that Disktop does not know where the output went", async () => {
+  const moved = { ...TRASHED, id: "act-where", operation: "copy-move" };
+  const { service: undo } = service([moved]);
+
+  const outcome = await undo.restore("act-where", SIGNAL);
+
+  assert.ok(
+    outcome.notes.some((note) => /history|where it was published|does not record/i.test(note)),
+    `notes were ${JSON.stringify(outcome.notes)}`,
+  );
+});

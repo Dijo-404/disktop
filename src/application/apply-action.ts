@@ -149,7 +149,10 @@ export function createApplyService(dependencies: ApplyDependencies): ApplyServic
           : result.freeBytesAfter - result.freeBytesBefore;
 
       const notes = [CONCURRENCY_NOTE];
-      if (plan.operation === "trash") {
+      // Anything that puts the originals in Trash has this property, not only
+      // the operation called "trash": a move or a compress that trashed its
+      // source has freed nothing on that filesystem either.
+      if (plan.operation === "trash" || plan.sourceDisposition === "trash") {
         notes.unshift(TRASH_NOTE);
       }
 
@@ -164,14 +167,35 @@ export function createApplyService(dependencies: ApplyDependencies): ApplyServic
   };
 }
 
+/**
+ * What this plan would do, for the prompt somebody confirms.
+ *
+ * Every operation is named, because a prompt that misdescribes the action is
+ * worse than no prompt: somebody who is told a move to another disk would
+ * "remove their files permanently" either refuses something safe or stops
+ * reading these sentences.
+ */
 function describe(plan: ActionPlan): string {
   const scope = plan.scopeSummary;
-  if (plan.operation === "trash") {
-    return `move ${scope} to Trash`;
+  const afterwards =
+    plan.sourceDisposition === "permanent"
+      ? ", then remove the originals permanently"
+      : ", then move the originals to Trash";
+
+  switch (plan.operation) {
+    case "trash":
+      return `move ${scope} to Trash`;
+    case "empty-trash":
+      return `empty ${scope}, which releases everything Disktop has moved there`;
+    case "move":
+      return `copy ${scope} to ${plan.destination?.display ?? "another disk"}${afterwards}`;
+    case "compress":
+      return `compress ${scope} into ${plan.destination?.display ?? "an archive beside it"}${afterwards}`;
+    case "dedup-hardlink":
+      return `replace ${scope} with links to ${plan.keepPath?.display ?? "the copy being kept"}, which cannot be undone`;
+    default:
+      return `remove ${scope} permanently`;
   }
-  return plan.operation === "empty-trash"
-    ? `empty ${scope}, which releases everything Disktop has moved there`
-    : `remove ${scope} permanently`;
 }
 
 function refuse(code: OperationFailure["code"], message: string): ApplyOutcome {

@@ -349,16 +349,25 @@ export function verify(plan: ActionPlan, result: Omit<ActionResult, "verificatio
   const checks: VerificationCheck[] = [];
 
   if (plan.destination !== undefined) {
+    // Node does not stat the destination: the helper published each item with
+    // a rename that refuses to overwrite and reported it, which is a stronger
+    // statement than a stat taken afterwards would be.
+    //
+    // A completed item is one whose output arrived *and* whose source was
+    // dealt with. An item that published and then could not dispose of its
+    // source is neither completed nor skipped, so a count of completions
+    // cannot distinguish "nothing was copied" from "everything was copied and
+    // one original is still there". Saying so is the honest answer; claiming
+    // nothing was published would send somebody looking for a copy that is
+    // sitting right there.
+    const everyItemSettled = result.completed + result.skipped === result.completed + result.skipped + result.failed;
     checks.push({
       check: "destination-present",
-      // Node does not stat the destination: the helper published it with a
-      // rename that refuses to overwrite and reported the item, which is a
-      // stronger statement than a stat taken afterwards would be.
-      outcome: result.completed > 0n ? "passed" : "unavailable",
+      outcome: result.completed > 0n && everyItemSettled ? "passed" : "unavailable",
       detail:
-        result.completed > 0n
+        result.completed > 0n && everyItemSettled
           ? `${result.completed} item(s) were published into ${plan.destination.display} without overwriting anything.`
-          : `Nothing was published into ${plan.destination.display}, so there is nothing there to confirm.`,
+          : `Disktop did not read ${plan.destination.display} back, so it cannot say here what is in it; the per-item results above say what each one did.`,
     });
   }
 

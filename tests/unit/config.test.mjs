@@ -185,3 +185,29 @@ maximum_bytes = 1
 test("an unknown top-level section is still refused now that one array of tables is known", () => {
   assert.throws(() => parseConfigDocument('[[policies]]\nname = "x"\n'), /policies/);
 });
+
+test("two rules whose names reduce to one identifier are refused, not silently merged", () => {
+  assert.throws(
+    () =>
+      parseConfigDocument(`
+[[rules]]
+name = "My rule"
+roots = ["/home/example/Downloads"]
+globs = ["*.a"]
+minimum_age_days = 1
+minimum_bytes = 0
+maximum_count = 1
+maximum_bytes = 1
+
+[[rules]]
+name = "my-rule"
+roots = ["/home/example/Downloads"]
+globs = ["*.b"]
+minimum_age_days = 1
+minimum_bytes = 0
+maximum_count = 1
+maximum_bytes = 1
+`),
+    /name/i,
+  );
+});

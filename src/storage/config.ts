@@ -1,7 +1,7 @@
 import { readFile } from "node:fs/promises";
 import { posix } from "node:path";
 import { isRefusedAsAllowedRoot } from "../domain/protected-paths.js";
-import { validateRule, type CleanupRule } from "../domain/rules.js";
+import { validateRules, type CleanupRule } from "../domain/rules.js";
 import { parseToml, type TomlTable, type TomlValue } from "./toml.js";
 
 export interface DisktopConfig {
@@ -105,14 +105,7 @@ export function parseConfigDocument(source: string): DisktopConfig {
     // A rule is validated as it is read, so a configuration error reaches
     // somebody while they are editing the file rather than while a
     // confirmation prompt is already on screen.
-    rules: reader.tableArray("rules").map((block, index) => {
-      try {
-        return validateRule(block);
-      } catch (error) {
-        const reason = error instanceof Error ? error.message : String(error);
-        throw new RangeError(`config.toml: [[rules]] block ${index + 1}: ${reason}`);
-      }
-    }),
+    rules: readRules(reader),
     providers: {
       // Discovery roots, never cleanup roots: what may be acted on is decided
       // by the finding, so a system directory is a legitimate place to look.
@@ -141,6 +134,15 @@ export function parseConfigDocument(source: string): DisktopConfig {
 
   reader.rejectUnread();
   return config;
+}
+
+function readRules(reader: Reader): readonly CleanupRule[] {
+  try {
+    return validateRules(reader.tableArray("rules"));
+  } catch (error) {
+    const reason = error instanceof Error ? error.message : String(error);
+    throw new RangeError(`config.toml: ${reason}`);
+  }
 }
 
 /** Tracks which keys were consumed so an unknown or misspelled key is an error. */

@@ -109,7 +109,17 @@ anywhere.
 
 `copy-move` validates the destination once, before any item: it is where
 everything lands, so a destination that is not a directory this user can open
-makes the whole request wrong rather than one item of it.
+makes the whole request wrong rather than one item of it. The helper applies its
+own `classify_destination`, the mirror of `classifyDestination` in
+`src/domain/protected-paths.ts` — a protected system root, a shared container root
+itself, or Disktop's own state is refused here as well as in Node, because the
+helper takes nobody's word for a path.
+
+Each item also refuses before it starts when the destination's filesystem has less
+free space than the plan measured for it. The reading is a moment in time and
+something else may take the space anyway, which is why the copy still cleans up
+after itself; what it avoids is a copy that fills a filesystem for every other
+process on the machine before unwinding.
 
 Each item then runs a fixed sequence, and every step before the last leaves the
 source exactly where it was. The destination name is checked, the copy is staged
@@ -125,7 +135,11 @@ the copy starts, which makes a collision cheap, and the publish decides, which
 makes it correct: a name created while the copy was running fails the item and
 leaves what somebody else made alone.
 
-Only after the publish is the source touched. `sourceDisposition` decides how:
+Only after the publish is the source touched, and the source is revalidated once
+more immediately before it is. The check at the start of the item was made before
+a copy that may have run for a long time, and anything written to the source while
+it ran is in neither the copy nor the plan; disposing of it on the strength of the
+earlier check would release bytes nobody reviewed. `sourceDisposition` decides how:
 `trash` reuses the Trash move, so the bytes are reported as moved to Trash and
 undo is available; `permanent` removes it outright and neither is. A source that
 cannot be disposed of after a successful publish is `uncertain` rather than
@@ -147,6 +161,18 @@ A copy is checked by reading the written bytes back off the device. An archive
 is checked by *decompressing* it, the way anybody recovering from it would, and
 comparing what comes out against what went in. An archive that will not read
 back is not an archive, however well the write went.
+
+The digest is taken over the tar stream itself, before compression, so it covers
+every header and every byte of every member. An entry count would not: a file
+rewritten to the same length while the archive was being built keeps the stream
+well-formed and the count identical, and the archive would hold a torn copy that
+verified. The decompressed archive is also walked as a tar, so a malformed member
+is found here rather than by somebody who needed it later.
+
+An archive holds everything that was inside the source, including whatever was
+private in there, so it is published 0600 rather than with the source directory's
+own mode. A 0755 directory holding a 0600 secret must not become a 0755 file
+holding that secret's bytes.
 
 A regular file becomes `<name>.zst` and a directory becomes `<name>.tar.zst`.
 `destinationDirectory` may be the empty string, which means beside the source —

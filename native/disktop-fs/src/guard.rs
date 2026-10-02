@@ -188,6 +188,62 @@ impl Guard {
         Ok(())
     }
 
+    /// Whether a move or a compress may publish into this directory.
+    ///
+    /// This is deliberately a different question from `classify`, and the
+    /// mirror of `classifyDestination` in `src/domain/protected-paths.ts`. A
+    /// target is something Disktop removes, so Node bounds it to roots the
+    /// user allowed. A destination is somewhere Disktop writes, and the whole
+    /// point of a cross-disk move is that the other disk is outside those
+    /// roots — `/mnt/archive` is a correct answer here and an incorrect one
+    /// there, so neither the allowlist nor the mount-root rule applies.
+    ///
+    /// What does apply is everything that says "not yours to write into": the
+    /// protected system roots, the shared container roots themselves, and
+    /// Disktop's own state, where an archive would sit beside the record of
+    /// what Disktop did. Node checks this too; the helper does not take its
+    /// word for it.
+    pub fn classify_destination(&self, destination: &[u8]) -> Result<(), Refusal> {
+        if !is_absolute_normalised(destination) {
+            return Err(Refusal::new(
+                "protected-path",
+                "A destination must be an absolute path with no empty, '.', or '..' segment.",
+            ));
+        }
+        for root in PROTECTED_ROOTS {
+            let hit = if root == b"/" {
+                destination == b"/"
+            } else {
+                is_within(root, destination)
+            };
+            if hit {
+                return Err(Refusal::new(
+                    "protected-path",
+                    "The destination is a protected system root or below one.",
+                ));
+            }
+        }
+        if SHARED_CONTAINER_ROOTS.contains(&destination) {
+            return Err(Refusal::new(
+                "protected-path",
+                "The destination is a shared container root holding other accounts' or programs' \
+                 data; publish into a directory inside it instead.",
+            ));
+        }
+        if self
+            .excluded
+            .iter()
+            .any(|excluded| is_within(excluded, destination))
+        {
+            return Err(Refusal::new(
+                "protected-path",
+                "The destination is inside Disktop's own state, which holds the record of what it \
+                 did.",
+            ));
+        }
+        Ok(())
+    }
+
     /// The longest mount point that holds this path. Trash selection needs it:
     /// a file's Trash lives at the top of the filesystem it is on.
     pub fn mount_point_for(&self, path: &[u8]) -> Option<Vec<u8>> {

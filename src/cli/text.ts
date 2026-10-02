@@ -7,6 +7,7 @@ import type { TypeTotal } from "../ports/scan.js";
 import type { ActionPlan, ActionResult } from "../domain/actions.js";
 import type { JournalRecord } from "../ports/actions.js";
 import type { SnapshotSummary } from "../ports/snapshots.js";
+import { sanitizeForDisplay } from "../domain/paths.js";
 import { formatBytes, usedPercentOfInodes, usedPercentOfSpace } from "../domain/sizes.js";
 
 export type Units = "iec" | "si";
@@ -67,8 +68,23 @@ export function alertLines(alerts: readonly Alert[]): string[] {
 }
 
 /** Warnings go to stderr so a redirected stdout still holds only the answer. */
+/**
+ * Text that did not come from Disktop, made safe to print.
+ *
+ * Most of what reaches this file is already a `RawPath.display`, which is
+ * sanitized where the bytes are decoded. The exceptions are the places a
+ * filename or a line of configuration gets interpolated into a sentence —
+ * a warning the helper wrote about a file it could not open, a finding's title
+ * built from a rule's name. A terminal reading an escape sequence out of one of
+ * those does what the sequence says, which for `ESC[2J` is to erase everything
+ * the person was reading.
+ */
+function safeLine(value: string): string {
+  return sanitizeForDisplay(new Uint8Array(Buffer.from(value, "utf8")));
+}
+
 export function warningLines(warnings: readonly Warning[]): string[] {
-  return warnings.map((warning) => `warning: ${warning.code}: ${warning.message}`);
+  return warnings.map((warning) => `warning: ${warning.code}: ${safeLine(warning.message)}`);
 }
 
 /** What one finished or partial scan measured, at 80 columns. */
@@ -233,7 +249,7 @@ export function findingLines(summary: FootprintSummary, units: Units): string[] 
   const rows = summary.findings.map((finding) => ({
     size: finding.size.bytes === undefined ? "unknown" : formatBytes(finding.size.bytes, units),
     category: finding.category,
-    title: finding.title,
+    title: safeLine(finding.title),
     note: [
       finding.active ? "in use" : undefined,
       finding.confidence === "observed" ? undefined : finding.confidence,
@@ -329,7 +345,7 @@ export function planLines(plan: ActionPlan, units: Units): string[] {
     lines.push(`  If you need it back: ${plan.regenerationCost}`);
   }
   for (const warning of plan.warnings) {
-    lines.push(`  ! ${warning}`);
+    lines.push(`  ! ${safeLine(warning)}`);
   }
   lines.push(
     "",
