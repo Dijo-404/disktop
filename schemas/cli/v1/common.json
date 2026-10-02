@@ -955,6 +955,18 @@
           "items": {
             "type": "string"
           }
+        },
+        "destination": {
+          "description": "Where a move or compress publishes its output. Present for exactly those two operations and absent for every other, because nothing else publishes anything. Fixed here so apply time cannot choose a different disk.",
+          "$ref": "#/$defs/rawPath"
+        },
+        "sourceDisposition": {
+          "description": "What becomes of the source once the output is verified. 'trash' leaves it recoverable; 'permanent' releases its bytes and makes the whole plan irreversible.",
+          "type": "string",
+          "enum": [
+            "trash",
+            "permanent"
+          ]
         }
       },
       "allOf": [
@@ -976,6 +988,64 @@
               "warnings": {
                 "type": "array",
                 "minItems": 1
+              }
+            }
+          }
+        },
+        {
+          "description": "A move or a compress fixes both where it publishes and what becomes of the source; no other operation carries either.",
+          "if": {
+            "type": "object",
+            "properties": {
+              "operation": {
+                "enum": [
+                  "move",
+                  "compress"
+                ]
+              }
+            },
+            "required": [
+              "operation"
+            ]
+          },
+          "then": {
+            "properties": {
+              "destination": {
+                "type": "object"
+              },
+              "sourceDisposition": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "destination",
+              "sourceDisposition"
+            ]
+          },
+          "else": {
+            "properties": {
+              "destination": false,
+              "sourceDisposition": false
+            }
+          }
+        },
+        {
+          "description": "A move or compress that removes its source permanently is irreversible, whatever else it also does.",
+          "if": {
+            "type": "object",
+            "properties": {
+              "sourceDisposition": {
+                "const": "permanent"
+              }
+            },
+            "required": [
+              "sourceDisposition"
+            ]
+          },
+          "then": {
+            "properties": {
+              "reversibility": {
+                "const": "irreversible"
               }
             }
           }

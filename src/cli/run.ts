@@ -81,6 +81,8 @@ export async function runCli(args: readonly string[], context: CliContext): Prom
       ...(parsed.operand === undefined ? {} : { findingId: parsed.operand }),
       ...(optional(parsed, "path")),
       ...(optional(parsed, "operation")),
+      ...(optional(parsed, "destination")),
+      ...(optional(parsed, "source")),
     });
   }
   if (name === "clean apply") {

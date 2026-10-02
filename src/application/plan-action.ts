@@ -1,13 +1,20 @@
 import {
   buildPlan,
+  publishesOutput,
   type ActionOperation,
   type ActionPlan,
   type PlannedEntry,
+  type SourceDisposition,
 } from "../domain/actions.js";
 import type { OperationFailure } from "../domain/errors.js";
 import type { Finding } from "../domain/findings.js";
 import type { RawPath } from "../domain/models.js";
-import { classifyGenericTarget, type ProtectedPathContext } from "../domain/protected-paths.js";
+import { isWithin, pathBytes, rawPathFromBytes } from "../domain/paths.js";
+import {
+  classifyDestination,
+  classifyGenericTarget,
+  type ProtectedPathContext,
+} from "../domain/protected-paths.js";
 import type { InventoryPort } from "../ports/inventory.js";
 import type { FootprintPort, PathFacts, PathProbe } from "../ports/providers.js";
 import type { PlanStore } from "../ports/actions.js";
@@ -18,6 +25,13 @@ export interface PlanRequest {
   /** Plan a finding a detector proposed, or an explicitly selected path. */
   readonly findingId?: string;
   readonly path?: RawPath;
+  /**
+   * Where a move publishes, and where a compress publishes when it is not
+   * beside the source. A move has to name one; there is no default disk.
+   */
+  readonly destination?: RawPath;
+  /** Required for a move or a compress. Nothing else accepts it. */
+  readonly sourceDisposition?: SourceDisposition;
 }
 
 export interface PlanSettings {
@@ -50,8 +64,15 @@ export interface PlanDependencies {
   readonly now: () => Date;
 }
 
-/** The operations a generic plan may fix. Everything else belongs to a later phase. */
-const GENERIC_OPERATIONS: readonly ActionOperation[] = ["trash", "permanent", "empty-trash"];
+/** The operations a generic plan may fix. `manager` belongs to a later phase. */
+const GENERIC_OPERATIONS: readonly ActionOperation[] = [
+  "trash",
+  "permanent",
+  "empty-trash",
+  "move",
+  "compress",
+  "dedup-hardlink",
+];
 
 /**
  * Turn a finding or a selected path into a reviewed, immutable plan.
@@ -104,6 +125,79 @@ export function createPlanService(dependencies: PlanDependencies): PlanService {
         }
       }
 
+      // Where the output goes is decided here and nowhere else. A move has to
+      // name a destination; a compress falls back to the source's own parent,
+      // which is where somebody would put an archive by hand.
+      let destination: RawPath | undefined;
+      if (publishesOutput(request.operation)) {
+        if (request.sourceDisposition === undefined) {
+          return refuse(
+            "invalid-input",
+            `A '${request.operation}' plan has to say what becomes of the source. Pass '--source trash' or '--source permanent'.`,
+          );
+        }
+        const named = request.destination ?? defaultDestination(request.operation, subject.paths);
+        if (named === undefined) {
+          return refuse(
+            "invalid-input",
+            "A move has to name the directory it publishes into. Pass '--destination PATH'.",
+          );
+        }
+        // A destination is judged by its own policy. The allowlist that bounds
+        // what Disktop may remove does not bound where it may write, because a
+        // cross-disk move means writing outside it by definition.
+        const verdict = classifyDestination(named, context);
+        if (!verdict.allowed) {
+          return refuse(
+            verdict.code,
+            `${named.display} cannot be written into: ${verdict.reason}.`,
+          );
+        }
+        const destinationFacts = await dependencies.paths.facts(named);
+        if (destinationFacts === undefined) {
+          return refuse(
+            "invalid-plan",
+            `${named.display} is not there. Disktop publishes into a directory that already exists rather than creating one.`,
+          );
+        }
+        if (destinationFacts.kind !== "directory") {
+          return refuse("invalid-plan", `${named.display} is not a directory.`);
+        }
+
+        for (const path of subject.paths) {
+          if (isWithin(pathBytes(path), pathBytes(named))) {
+            return refuse(
+              "invalid-plan",
+              `${named.display} is inside ${path.display}, so publishing there would write the output into what it is copying.`,
+            );
+          }
+          const sourceFacts = await dependencies.paths.facts(path);
+          if (
+            request.operation === "move" &&
+            sourceFacts !== undefined &&
+            sourceFacts.device === destinationFacts.device
+          ) {
+            return refuse(
+              "invalid-plan",
+              `${named.display} is on the same filesystem as ${path.display}. Moving within one filesystem frees nothing; use 'mv' or plan a different destination.`,
+            );
+          }
+        }
+        destination = named;
+      } else if (request.destination !== undefined || request.sourceDisposition !== undefined) {
+        return refuse(
+          "invalid-input",
+          `A '${request.operation}' plan publishes nothing, so '--destination' and '--source' do not apply to it.`,
+        );
+      }
+
+      if (request.operation === "dedup-hardlink" && subject.paths.length < 2) {
+        return refuse(
+          "invalid-plan",
+          "Replacing a duplicate with a hardlink needs at least two files: the one to keep and the one to replace.",
+        );
+      }
+
       // One measurement for every path at once. A directory's own stat gives
       // the bytes of its inode and nothing about what it holds, so a plan built
       // from stats alone would tell somebody they were reclaiming four
@@ -146,6 +240,10 @@ export function createPlanService(dependencies: PlanDependencies): PlanService {
         ...(subject.regenerationCost === undefined
           ? {}
           : { regenerationCost: subject.regenerationCost }),
+        ...(destination === undefined ? {} : { destination }),
+        ...(request.sourceDisposition === undefined
+          ? {}
+          : { sourceDisposition: request.sourceDisposition }),
         warnings,
       });
 
@@ -153,6 +251,31 @@ export function createPlanService(dependencies: PlanDependencies): PlanService {
       return { kind: "planned", plan };
     },
   };
+}
+
+/**
+ * Where a compress puts its archive when nobody said: beside what it archives.
+ *
+ * A move has no equivalent. "Somewhere else" is the entire point of a move and
+ * there is no disk Disktop may pick on somebody's behalf.
+ */
+function defaultDestination(
+  operation: ActionOperation,
+  paths: readonly RawPath[],
+): RawPath | undefined {
+  if (operation !== "compress") {
+    return undefined;
+  }
+  const first = paths[0];
+  if (first === undefined) {
+    return undefined;
+  }
+  const bytes = pathBytes(first);
+  const slash = bytes.lastIndexOf(0x2f);
+  if (slash <= 0) {
+    return undefined;
+  }
+  return rawPathFromBytes(bytes.slice(0, slash));
 }
 
 interface Subject {

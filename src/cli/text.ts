@@ -281,10 +281,22 @@ export function providerLines(reports: readonly ProviderReport[]): string[] {
  * would carry it out, because somebody skimming this has to be able to stop.
  */
 function operationVerb(operation: ActionPlan["operation"]): string {
-  if (operation === "trash") {
-    return "Move to Trash";
+  switch (operation) {
+    case "trash":
+      return "Move to Trash";
+    case "empty-trash":
+      return "Empty Trash";
+    case "move":
+      return "Copy to another disk";
+    case "compress":
+      return "Compress";
+    case "dedup-hardlink":
+      return "Replace with a hardlink";
+    case "manager":
+      return "Ask the package manager to clean up";
+    default:
+      return "Remove permanently";
   }
-  return operation === "empty-trash" ? "Empty Trash" : "Remove permanently";
 }
 
 export function planLines(plan: ActionPlan, units: Units): string[] {
@@ -297,6 +309,18 @@ export function planLines(plan: ActionPlan, units: Units): string[] {
     `  Reversible: ${plan.reversibility === "undo-from-trash" ? "yes, with 'disktop undo'" : "no"}`,
     `  Expires: ${plan.expiresAt}`,
   ];
+  if (plan.destination !== undefined) {
+    lines.push(`  Publishes into: ${plan.destination.display}`);
+  }
+  if (plan.sourceDisposition !== undefined) {
+    lines.push(
+      `  Then the source: ${
+        plan.sourceDisposition === "trash"
+          ? "goes to Trash, so it can be put back"
+          : "is removed permanently, so it cannot"
+      }`,
+    );
+  }
   if (plan.regenerationCost !== undefined) {
     lines.push(`  If you need it back: ${plan.regenerationCost}`);
   }

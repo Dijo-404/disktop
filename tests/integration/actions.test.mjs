@@ -10,7 +10,7 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
 import { existsSync, readdirSync } from "node:fs";
-import { mkdtemp, readFile, rm, stat, utimes, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm, stat, utimes, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { after, test } from "node:test";
@@ -509,4 +509,103 @@ test("find stale text output leads with what the dates mean", async () => {
 
   assert.match(result.stdout, /not modified since/i);
   assert.doesNotMatch(result.stdout, /not opened|last opened/i);
+});
+
+test("a move plan fixes its destination and disposition, and applying it refuses rather than guessing", async () => {
+  const home = await disktopHome();
+  const tree = await createActionTree(home);
+  const destination = join(home, "archive");
+  await mkdir(destination, { recursive: true });
+
+  // Source and destination are on the same filesystem here, which is exactly
+  // what a move refuses: moving within one filesystem frees nothing.
+  const sameDisk = disktop(home, [
+    "clean",
+    "plan",
+    "--path",
+    tree.artifacts,
+    "--operation",
+    "move",
+    "--destination",
+    destination,
+    "--source",
+    "trash",
+    "--json",
+  ]);
+  assert.equal(sameDisk.status, 2);
+  assert.match(JSON.parse(sameDisk.stdout).error.message, /same filesystem/i);
+});
+
+test("a compress plan publishes beside the source and says what becomes of it", async () => {
+  const home = await disktopHome();
+  const tree = await createActionTree(home);
+
+  const planned = envelope(
+    disktop(home, [
+      "clean",
+      "plan",
+      "--path",
+      tree.artifacts,
+      "--operation",
+      "compress",
+      "--source",
+      "trash",
+      "--json",
+    ]),
+    "plan",
+  );
+
+  assert.equal(planned.data.plan.operation, "compress");
+  assert.equal(planned.data.plan.sourceDisposition, "trash");
+  assert.equal(planned.data.plan.reversibility, "undo-from-trash");
+  assert.ok(planned.data.plan.destination, "a compress plan names where the archive lands");
+
+  // Phase 5 fixes the plan; the helper that carries it out comes next.
+  const applied = disktop(home, ["clean", "apply", planned.data.plan.id, "--yes", "--json"]);
+  assert.equal(applied.status, 2);
+  assert.match(JSON.parse(applied.stdout).error.message, /compress/i);
+  assert.ok(existsSync(tree.artifacts), "a refused apply leaves the source where it is");
+});
+
+test("a compress plan that removes its source permanently says it cannot be undone", async () => {
+  const home = await disktopHome();
+  const tree = await createActionTree(home);
+
+  const planned = envelope(
+    disktop(home, [
+      "clean",
+      "plan",
+      "--path",
+      tree.artifacts,
+      "--operation",
+      "compress",
+      "--source",
+      "permanent",
+      "--json",
+    ]),
+    "plan",
+  );
+
+  assert.equal(planned.data.plan.reversibility, "irreversible");
+  assert.ok(planned.data.plan.warnings.some((warning) => /cannot be undone/i.test(warning)));
+});
+
+test("a trash plan refuses a destination rather than ignoring it", async () => {
+  const home = await disktopHome();
+  const tree = await createActionTree(home);
+
+  const result = disktop(home, [
+    "clean",
+    "plan",
+    "--path",
+    tree.artifacts,
+    "--operation",
+    "trash",
+    "--destination",
+    home,
+    "--json",
+  ]);
+
+  assert.equal(result.status, 2);
+  assert.match(JSON.parse(result.stdout).error.message, /destination/i);
 });

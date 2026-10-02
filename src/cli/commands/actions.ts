@@ -36,6 +36,8 @@ export interface PlanOptions {
   readonly findingId?: string;
   readonly path?: string;
   readonly operation?: string;
+  readonly destination?: string;
+  readonly source?: string;
 }
 
 export interface ApplyOptions {
@@ -62,15 +64,27 @@ export interface FindOptions {
   readonly olderThan?: string;
 }
 
-/** The operations `clean plan` can fix today. The rest belong to later phases. */
-const PLANNABLE: readonly ActionOperation[] = ["trash", "permanent", "empty-trash"];
+/** The operations `clean plan` can fix today. Manager cleanup is Phase 6. */
+const PLANNABLE: readonly ActionOperation[] = [
+  "trash",
+  "permanent",
+  "empty-trash",
+  "move",
+  "compress",
+  "dedup-hardlink",
+];
 
 /**
  * Review one finding or path into a stored plan. Nothing changes on disk here;
  * a plan is a description that `clean apply` may later act on.
  */
 export async function runPlan(context: CliContext, options: PlanOptions): Promise<number> {
-  const operation = (options.operation ?? "trash") as ActionOperation;
+  // The CLI's short name for the operation whose domain name is longer. Both
+  // exist because one reads well on a command line and the other reads well in
+  // a plan file; this is the single place they are translated.
+  const operation = (options.operation === "hardlink"
+    ? "dedup-hardlink"
+    : (options.operation ?? "trash")) as ActionOperation;
   // Emptying Trash needs no subject: Disktop already knows where Trash is.
   if (operation !== "empty-trash" && options.findingId === undefined && options.path === undefined) {
     return refuse(context, "clean plan", options.asJson, {
@@ -92,6 +106,13 @@ export async function runPlan(context: CliContext, options: PlanOptions): Promis
     });
   }
 
+  if (options.source !== undefined && options.source !== "trash" && options.source !== "permanent") {
+    return refuse(context, "clean plan", options.asJson, {
+      code: "invalid-input",
+      message: `'--source' takes 'trash' or 'permanent', not '${options.source}'.`,
+    });
+  }
+
   const controller = new AbortController();
   const interrupt = (): void => controller.abort();
   context.signals.listen(interrupt);
@@ -104,6 +125,10 @@ export async function runPlan(context: CliContext, options: PlanOptions): Promis
         ...(options.path === undefined
           ? {}
           : { path: rawPathFromUtf8(context.resolvePath(options.path)) }),
+        ...(options.destination === undefined
+          ? {}
+          : { destination: rawPathFromUtf8(context.resolvePath(options.destination)) }),
+        ...(options.source === undefined ? {} : { sourceDisposition: options.source }),
       },
       controller.signal,
     );
