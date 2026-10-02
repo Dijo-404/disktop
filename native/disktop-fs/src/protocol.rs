@@ -33,7 +33,7 @@ use std::thread::JoinHandle;
 
 const PROTOCOL_VERSION: u16 = 1;
 const MAX_REQUEST_BYTES: usize = 1024 * 1024;
-const SUPPORTED_OPERATIONS: [&str; 12] = [
+const SUPPORTED_OPERATIONS: [&str; 13] = [
     "hello",
     "probe",
     "cancel",
@@ -45,11 +45,11 @@ const SUPPORTED_OPERATIONS: [&str; 12] = [
     "empty-trash",
     "restore",
     "dedup-hardlink",
+    "copy-move",
     "journal-reconcile",
 ];
-const PLANNED_OPERATIONS: [&str; 6] = [
+const PLANNED_OPERATIONS: [&str; 5] = [
     "inspect",
-    "copy-move",
     "compress",
     "manager-begin",
     "manager-append",
@@ -121,6 +121,17 @@ struct DedupHardlinkArguments {
     plan_id: String,
     journal_directory: String,
     keep: TargetArguments,
+    targets: Vec<TargetArguments>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct CopyMoveArguments {
+    plan_id: String,
+    journal_directory: String,
+    home_trash_directory: String,
+    destination_directory: String,
+    source_disposition: String,
     targets: Vec<TargetArguments>,
 }
 
@@ -417,6 +428,7 @@ fn handle_request(server: &Arc<Server>, line: &[u8]) {
         "erase" => erase(server, responder, request.arguments),
         "empty-trash" => empty_trash(server, responder, request.arguments),
         "dedup-hardlink" => dedup_hardlink(server, responder, request.arguments),
+        "copy-move" => copy_move(server, responder, request.arguments),
         "restore" => restore(server, responder, request.arguments),
         "journal-reconcile" => journal_reconcile(&responder, request.arguments),
         "hello" | "probe" if request.arguments.is_empty() => {
@@ -1075,6 +1087,33 @@ fn dedup_hardlink(server: &Arc<Server>, responder: Responder, arguments: Map<Str
     );
 }
 
+/// Copy every reviewed target onto another filesystem, then dispose of the source.
+fn copy_move(server: &Arc<Server>, responder: Responder, arguments: Map<String, Value>) {
+    let arguments: CopyMoveArguments = match decode(arguments) {
+        Ok(arguments) => arguments,
+        Err(message) => return fail(&responder, "invalid-arguments", &message),
+    };
+    let request = match copy_move_request(&arguments) {
+        Ok(request) => request,
+        Err(message) => return fail(&responder, "invalid-arguments", &message),
+    };
+    if let Err(message) = require_containment() {
+        return fail(&responder, "unsupported-kernel", &message);
+    }
+    spawn_cancellable(
+        server,
+        responder,
+        "copy-move",
+        ACTION_ABANDONED,
+        move |responder, cancelled| {
+            report_action(
+                responder,
+                actions::run_copy_move(&request, &mut reporter(responder), cancelled),
+            );
+        },
+    );
+}
+
 /// Remove every reviewed target permanently.
 fn erase(server: &Arc<Server>, responder: Responder, arguments: Map<String, Value>) {
     let arguments: EraseArguments = match decode(arguments) {
@@ -1340,6 +1379,26 @@ fn dedup_hardlink_request(
         plan_id: arguments.plan_id.clone(),
         journal_directory: decoded_directory(&arguments.journal_directory)?,
         keep,
+        targets: decoded_targets(&arguments.targets)?,
+    })
+}
+
+fn copy_move_request(arguments: &CopyMoveArguments) -> Result<actions::CopyMoveRequest, String> {
+    if arguments.targets.is_empty() {
+        return Err("A mutation needs at least one target".to_owned());
+    }
+    let destination_directory = decode_path(&arguments.destination_directory)?;
+    if destination_directory.first() != Some(&b'/') {
+        return Err("A destination must be an absolute path".to_owned());
+    }
+    let source_disposition = actions::SourceDisposition::parse(&arguments.source_disposition)
+        .ok_or_else(|| "sourceDisposition must be 'trash' or 'permanent'".to_owned())?;
+    Ok(actions::CopyMoveRequest {
+        plan_id: arguments.plan_id.clone(),
+        journal_directory: decoded_directory(&arguments.journal_directory)?,
+        home_trash_directory: decode_path(&arguments.home_trash_directory)?,
+        destination_directory,
+        source_disposition,
         targets: decoded_targets(&arguments.targets)?,
     })
 }
@@ -1873,6 +1932,7 @@ mod tests {
                 "empty-trash",
                 "restore",
                 "dedup-hardlink",
+                "copy-move",
                 "journal-reconcile"
             ])
         );
@@ -2688,6 +2748,366 @@ mod tests {
             leftovers.is_empty(),
             "staging names were left behind: {leftovers:?}"
         );
+    }
+
+    // --- Moving to another disk ---------------------------------------------
+
+    fn move_request(
+        id: &str,
+        sandbox: &Sandbox,
+        destination: &[u8],
+        disposition: &str,
+        targets: &[String],
+    ) -> String {
+        let mut state = sandbox.bytes();
+        state.extend_from_slice(b"/state");
+        let mut trash = sandbox.bytes();
+        trash.extend_from_slice(b"/trash-home");
+        format!(
+            "{{\"protocolVersion\":1,\"requestId\":\"{id}\",\"operation\":\"copy-move\",\
+               \"arguments\":{{\"planId\":\"plan-0123456789abcd\",\
+               \"journalDirectory\":\"{}\",\"homeTrashDirectory\":\"{}\",\
+               \"destinationDirectory\":\"{}\",\"sourceDisposition\":\"{disposition}\",\
+               \"targets\":[{}]}}}}\n",
+            crate::base64::encode(&state),
+            crate::base64::encode(&trash),
+            crate::base64::encode(destination),
+            targets.join(","),
+        )
+    }
+
+    fn run_move(
+        id: &str,
+        sandbox: &Sandbox,
+        destination: &[u8],
+        disposition: &str,
+        targets: &[String],
+    ) -> Vec<Value> {
+        session(
+            &[move_request(id, sandbox, destination, disposition, targets)],
+            |events| terminal(events, id),
+        )
+    }
+
+    fn staging_names(directory: &std::path::Path) -> Vec<String> {
+        std::fs::read_dir(directory)
+            .expect("the directory is readable")
+            .filter_map(|entry| entry.ok())
+            .map(|entry| entry.file_name().to_string_lossy().into_owned())
+            .filter(|name| name.contains(".disktop-partial"))
+            .collect()
+    }
+
+    #[test]
+    fn a_moved_file_arrives_whole_and_its_source_goes_to_trash() {
+        let sandbox = Sandbox::new("move-file");
+        sandbox.directory(b"state");
+        sandbox.directory(b"elsewhere");
+        let content: Vec<u8> = (0..300_000u32).map(|index| index as u8).collect();
+        std::fs::write(sandbox.path().join("big.bin"), &content).unwrap();
+
+        let mut source = sandbox.bytes();
+        source.extend_from_slice(b"/big.bin");
+        let mut destination = sandbox.bytes();
+        destination.extend_from_slice(b"/elsewhere");
+
+        let events = run_move(
+            "move-1",
+            &sandbox,
+            &destination,
+            "trash",
+            &[target(&source, 300_000)],
+        );
+        let result = &completion(&events, "move-1")["result"];
+
+        assert_eq!(
+            result["state"],
+            "complete",
+            "{:?}",
+            item_results(&events, "move-1")
+        );
+        assert_eq!(result["completed"], "1");
+        assert_eq!(
+            std::fs::read(sandbox.path().join("elsewhere/big.bin")).unwrap(),
+            content,
+            "every byte arrived",
+        );
+        assert!(
+            !sandbox.path().join("big.bin").exists(),
+            "the source was disposed of",
+        );
+        assert_eq!(
+            result["bytesMovedToTrash"], "300000",
+            "the source went to Trash, so it can be put back",
+        );
+        assert_eq!(result["undoAvailable"], true);
+        assert!(staging_names(&sandbox.path().join("elsewhere")).is_empty());
+    }
+
+    #[test]
+    fn a_moved_file_whose_name_is_already_taken_fails_and_keeps_both() {
+        let sandbox = Sandbox::new("move-collision");
+        sandbox.directory(b"state");
+        sandbox.directory(b"elsewhere");
+        std::fs::write(sandbox.path().join("big.bin"), vec![1u8; 10_000]).unwrap();
+        std::fs::write(
+            sandbox.path().join("elsewhere/big.bin"),
+            b"do not overwrite me",
+        )
+        .unwrap();
+
+        let mut source = sandbox.bytes();
+        source.extend_from_slice(b"/big.bin");
+        let mut destination = sandbox.bytes();
+        destination.extend_from_slice(b"/elsewhere");
+
+        let events = run_move(
+            "move-2",
+            &sandbox,
+            &destination,
+            "trash",
+            &[target(&source, 10_000)],
+        );
+        let items = item_results(&events, "move-2");
+
+        assert_eq!(items[0]["itemResult"]["outcome"], "failed");
+        assert_eq!(items[0]["itemResult"]["reason"], "destination-exists");
+        assert_eq!(
+            std::fs::read(sandbox.path().join("elsewhere/big.bin")).unwrap(),
+            b"do not overwrite me",
+            "what was already there is untouched",
+        );
+        assert!(
+            sandbox.path().join("big.bin").exists(),
+            "the source is preserved"
+        );
+        assert!(staging_names(&sandbox.path().join("elsewhere")).is_empty());
+    }
+
+    #[test]
+    fn a_moved_directory_arrives_with_its_tree_and_its_links_as_links() {
+        let sandbox = Sandbox::new("move-tree");
+        sandbox.directory(b"state");
+        sandbox.directory(b"elsewhere");
+        sandbox.directory(b"work");
+        sandbox.directory(b"work/deep");
+        std::fs::write(sandbox.path().join("work/top.bin"), vec![2u8; 5000]).unwrap();
+        std::fs::write(sandbox.path().join("work/deep/leaf.bin"), vec![3u8; 7000]).unwrap();
+        sandbox.symlink(b"/nowhere-at-all", b"work/alias");
+
+        let mut source = sandbox.bytes();
+        source.extend_from_slice(b"/work");
+        let mut destination = sandbox.bytes();
+        destination.extend_from_slice(b"/elsewhere");
+
+        let events = run_move(
+            "move-3",
+            &sandbox,
+            &destination,
+            "trash",
+            &[target(&source, 12_000)],
+        );
+        let result = &completion(&events, "move-3")["result"];
+
+        assert_eq!(
+            result["completed"],
+            "1",
+            "{:?}",
+            item_results(&events, "move-3")
+        );
+        let arrived = sandbox.path().join("elsewhere/work");
+        assert_eq!(
+            std::fs::read(arrived.join("top.bin")).unwrap(),
+            vec![2u8; 5000]
+        );
+        assert_eq!(
+            std::fs::read(arrived.join("deep/leaf.bin")).unwrap(),
+            vec![3u8; 7000],
+        );
+        let link = std::fs::symlink_metadata(arrived.join("alias")).unwrap();
+        assert!(
+            link.file_type().is_symlink(),
+            "a link was copied as a link object, not followed",
+        );
+        assert_eq!(
+            std::fs::read_link(arrived.join("alias"))
+                .unwrap()
+                .as_os_str()
+                .as_encoded_bytes(),
+            b"/nowhere-at-all",
+            "the link still points where it pointed",
+        );
+    }
+
+    #[test]
+    fn a_source_removed_permanently_leaves_nothing_to_put_back() {
+        let sandbox = Sandbox::new("move-permanent");
+        sandbox.directory(b"state");
+        sandbox.directory(b"elsewhere");
+        std::fs::write(sandbox.path().join("big.bin"), vec![4u8; 20_000]).unwrap();
+
+        let mut source = sandbox.bytes();
+        source.extend_from_slice(b"/big.bin");
+        let mut destination = sandbox.bytes();
+        destination.extend_from_slice(b"/elsewhere");
+
+        let events = run_move(
+            "move-4",
+            &sandbox,
+            &destination,
+            "permanent",
+            &[target(&source, 20_000)],
+        );
+        let result = &completion(&events, "move-4")["result"];
+
+        assert_eq!(result["completed"], "1");
+        assert_eq!(
+            result["bytesMovedToTrash"], "0",
+            "nothing went to Trash, so nothing can be put back",
+        );
+        assert_eq!(result["undoAvailable"], false);
+        assert!(!sandbox.path().join("big.bin").exists());
+        assert_eq!(
+            std::fs::read(sandbox.path().join("elsewhere/big.bin"))
+                .unwrap()
+                .len(),
+            20_000,
+        );
+    }
+
+    #[test]
+    fn a_changed_source_is_skipped_and_nothing_is_written() {
+        let sandbox = Sandbox::new("move-changed");
+        sandbox.directory(b"state");
+        sandbox.directory(b"elsewhere");
+        std::fs::write(sandbox.path().join("big.bin"), vec![5u8; 8_000]).unwrap();
+
+        let mut source = sandbox.bytes();
+        source.extend_from_slice(b"/big.bin");
+        let mut destination = sandbox.bytes();
+        destination.extend_from_slice(b"/elsewhere");
+        let reviewed = target(&source, 8_000);
+
+        std::fs::write(sandbox.path().join("big.bin"), vec![6u8; 9_000]).unwrap();
+
+        let events = run_move("move-5", &sandbox, &destination, "trash", &[reviewed]);
+        let items = item_results(&events, "move-5");
+
+        assert_eq!(items[0]["itemResult"]["outcome"], "skipped");
+        assert_eq!(items[0]["itemResult"]["reason"], "changed-target");
+        assert!(sandbox.path().join("big.bin").exists());
+        assert!(!sandbox.path().join("elsewhere/big.bin").exists());
+        assert!(staging_names(&sandbox.path().join("elsewhere")).is_empty());
+    }
+
+    #[test]
+    fn a_destination_that_is_not_a_directory_refuses_the_whole_request() {
+        let sandbox = Sandbox::new("move-bad-destination");
+        sandbox.directory(b"state");
+        std::fs::write(sandbox.path().join("not-a-directory"), b"x").unwrap();
+        std::fs::write(sandbox.path().join("big.bin"), vec![7u8; 1000]).unwrap();
+
+        let mut source = sandbox.bytes();
+        source.extend_from_slice(b"/big.bin");
+        let mut destination = sandbox.bytes();
+        destination.extend_from_slice(b"/not-a-directory");
+
+        let events = run_move(
+            "move-6",
+            &sandbox,
+            &destination,
+            "trash",
+            &[target(&source, 1000)],
+        );
+        let error = events
+            .iter()
+            .find(|event| event["event"] == "error")
+            .expect("the request is refused as a whole");
+
+        assert!(sandbox.path().join("big.bin").exists());
+        assert_ne!(error["error"]["code"], serde_json::Value::Null);
+    }
+
+    #[test]
+    fn a_destination_inside_the_source_refuses_rather_than_copying_for_ever() {
+        let sandbox = Sandbox::new("move-nested");
+        sandbox.directory(b"state");
+        sandbox.directory(b"work");
+        sandbox.directory(b"work/inside");
+        std::fs::write(sandbox.path().join("work/file.bin"), vec![8u8; 1000]).unwrap();
+
+        let mut source = sandbox.bytes();
+        source.extend_from_slice(b"/work");
+        let mut destination = sandbox.bytes();
+        destination.extend_from_slice(b"/work/inside");
+
+        let events = run_move(
+            "move-7",
+            &sandbox,
+            &destination,
+            "trash",
+            &[target(&source, 1000)],
+        );
+        let items = item_results(&events, "move-7");
+
+        assert_eq!(items[0]["itemResult"]["outcome"], "failed");
+        assert_eq!(items[0]["itemResult"]["reason"], "invalid-arguments");
+        assert!(sandbox.path().join("work/file.bin").exists());
+    }
+
+    #[test]
+    fn a_moved_file_keeps_permission_bits_the_umask_would_have_masked() {
+        let sandbox = Sandbox::new("move-umask");
+        sandbox.directory(b"state");
+        sandbox.directory(b"elsewhere");
+        std::fs::write(sandbox.path().join("shared.bin"), b"readable by all\n").unwrap();
+        // 0o666 is exactly what a umask of 022 masks down to 0o644. A copy
+        // that only passed the mode to the create would lose the group and
+        // other write bits here.
+        sandbox.chmod(b"shared.bin", 0o666);
+
+        let mut source = sandbox.bytes();
+        source.extend_from_slice(b"/shared.bin");
+        let mut destination = sandbox.bytes();
+        destination.extend_from_slice(b"/elsewhere");
+
+        run_move(
+            "move-9",
+            &sandbox,
+            &destination,
+            "trash",
+            &[target(&source, 16)],
+        );
+
+        use std::os::unix::fs::PermissionsExt;
+        let arrived = std::fs::metadata(sandbox.path().join("elsewhere/shared.bin")).unwrap();
+        assert_eq!(arrived.permissions().mode() & 0o7777, 0o666);
+    }
+
+    #[test]
+    fn a_moved_file_keeps_its_permissions() {
+        let sandbox = Sandbox::new("move-mode");
+        sandbox.directory(b"state");
+        sandbox.directory(b"elsewhere");
+        std::fs::write(sandbox.path().join("script.sh"), b"#!/bin/sh\n").unwrap();
+        sandbox.chmod(b"script.sh", 0o700);
+
+        let mut source = sandbox.bytes();
+        source.extend_from_slice(b"/script.sh");
+        let mut destination = sandbox.bytes();
+        destination.extend_from_slice(b"/elsewhere");
+
+        run_move(
+            "move-8",
+            &sandbox,
+            &destination,
+            "trash",
+            &[target(&source, 10)],
+        );
+
+        use std::os::unix::fs::PermissionsExt;
+        let arrived = std::fs::metadata(sandbox.path().join("elsewhere/script.sh")).unwrap();
+        assert_eq!(arrived.permissions().mode() & 0o7777, 0o700);
     }
 
     // --- Erase and emptying Trash -------------------------------------------

@@ -20,7 +20,7 @@ test("the handshake reports the helper's own version and kernel probe", async ()
   const start = await NativeHelperClient.start();
   assert.equal(start.started, true, `helper did not start: ${JSON.stringify(start.capability ?? {})}`);
   try {
-    assert.deepEqual(start.hello.supportedOperations, ["hello", "probe", "cancel", "scan", "query-index", "hash-candidates", "trash", "erase", "empty-trash", "restore", "dedup-hardlink", "journal-reconcile"]);
+    assert.deepEqual(start.hello.supportedOperations, ["hello", "probe", "cancel", "scan", "query-index", "hash-candidates", "trash", "erase", "empty-trash", "restore", "dedup-hardlink", "copy-move", "journal-reconcile"]);
     assert.equal(typeof start.hello.kernelCapabilities.openat2.available, "boolean");
     assert.equal(start.hello.platform, "linux");
     // A locally built helper reports no checksum rather than inventing one.

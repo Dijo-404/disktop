@@ -316,6 +316,109 @@ pub fn renameat_exchange(
     Ok(())
 }
 
+/// Read where a symlink points, without following it.
+pub fn readlinkat(parent: RawFd, name: &[u8]) -> io::Result<Vec<u8>> {
+    let child = cstring(name)?;
+    // PATH_MAX is a limit on a path, not on a link's contents; a few
+    // filesystems allow longer. The buffer grows until the answer fits.
+    let mut capacity = 1024;
+    loop {
+        let mut buffer = vec![0u8; capacity];
+        let written = unsafe {
+            libc::readlinkat(
+                parent,
+                child.as_ptr(),
+                buffer.as_mut_ptr() as *mut libc::c_char,
+                buffer.len(),
+            )
+        };
+        if written < 0 {
+            return Err(io::Error::last_os_error());
+        }
+        let written = written as usize;
+        if written < buffer.len() {
+            buffer.truncate(written);
+            return Ok(buffer);
+        }
+        if capacity >= 64 * 1024 {
+            return Err(io::Error::other("the symlink's target is implausibly long"));
+        }
+        capacity *= 2;
+    }
+}
+
+/// Create a symlink holding exactly these target bytes. The target is never
+/// resolved, validated, or followed: it is copied as the string it is.
+pub fn symlinkat(target: &[u8], parent: RawFd, name: &[u8]) -> io::Result<()> {
+    let target = cstring(target)?;
+    let child = cstring(name)?;
+    let result = unsafe { libc::symlinkat(target.as_ptr(), parent, child.as_ptr()) };
+    if result < 0 {
+        return Err(io::Error::last_os_error());
+    }
+    Ok(())
+}
+
+/// Set an open file's permission bits.
+///
+/// Creating a file or a directory with a mode is not enough: the process umask
+/// masks it, so a 0o666 file arrives as 0o644 and a copy quietly loses bits the
+/// original had. Setting them afterwards is the only way a copy keeps them.
+pub fn fchmod(descriptor: RawFd, permissions: u32) -> io::Result<()> {
+    let result = unsafe { libc::fchmod(descriptor, permissions as libc::mode_t) };
+    if result < 0 {
+        return Err(io::Error::last_os_error());
+    }
+    Ok(())
+}
+
+/// Copy a file's modification time onto an open descriptor.
+pub fn set_modified(descriptor: RawFd, nanoseconds: u64) -> io::Result<()> {
+    let times = [
+        libc::timespec {
+            tv_sec: 0,
+            tv_nsec: libc::UTIME_OMIT,
+        },
+        libc::timespec {
+            tv_sec: (nanoseconds / 1_000_000_000) as libc::time_t,
+            tv_nsec: (nanoseconds % 1_000_000_000) as i64,
+        },
+    ];
+    let result = unsafe { libc::futimens(descriptor, times.as_ptr()) };
+    if result < 0 {
+        return Err(io::Error::last_os_error());
+    }
+    Ok(())
+}
+
+/// Create a file that must not already exist, open for reading and writing,
+/// with the given permission bits, never through a symlink.
+///
+/// Read-write rather than write-only because a staged copy is read back and
+/// digested before it is published: a descriptor that could only be written
+/// would make that verification impossible.
+pub fn openat_create_exclusive(parent: RawFd, name: &[u8], mode: u32) -> io::Result<RawFd> {
+    let child = cstring(name)?;
+    let mut how: libc::open_how = unsafe { std::mem::zeroed() };
+    how.flags =
+        (libc::O_RDWR | libc::O_CREAT | libc::O_EXCL | libc::O_CLOEXEC | libc::O_NOFOLLOW) as u64;
+    how.mode = u64::from(mode);
+    how.resolve = libc::RESOLVE_BENEATH | libc::RESOLVE_NO_MAGICLINKS | libc::RESOLVE_NO_SYMLINKS;
+    let result = unsafe {
+        libc::syscall(
+            libc::SYS_openat2,
+            parent,
+            child.as_ptr(),
+            &how as *const libc::open_how as *const c_void,
+            size_of::<libc::open_how>(),
+        )
+    };
+    if result < 0 {
+        return Err(io::Error::last_os_error());
+    }
+    Ok(result as RawFd)
+}
+
 /// Space an unprivileged process can still use on the filesystem holding
 /// `path`: what `df` calls available and what a person means by free space.
 /// The blocks reserved for root are left out, because they are not space this

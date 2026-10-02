@@ -146,6 +146,12 @@ one inode has one set of those, and linking would silently change the replaced f
 says so, because publishing a copy and then releasing the original's bytes is a
 permanent removal with an extra step.
 
+A move is carried out as a staged copy, not a rename: the bytes are written under a
+partial name in the destination, read back off the device and compared against what was
+read from the source, and only then published with a rename that refuses to overwrite.
+The source is not touched until that has happened, so a move that fails at any point
+leaves it exactly where it was.
+
 Planning by `FINDING_ID` rediscovers first, so it takes as long as `disktop clean`
 does. Planning `--path` does not. A path whose bytes are not valid UTF-8 cannot be
 given as `--path`, because process arguments are UTF-8; such a path is still

@@ -8,6 +8,7 @@ mod journal;
 mod protocol;
 mod query;
 mod sys;
+mod transfer;
 mod walk;
 
 #[cfg(test)]

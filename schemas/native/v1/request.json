@@ -268,6 +268,26 @@
           }
         }
       }
+    },
+    {
+      "if": {
+        "type": "object",
+        "properties": {
+          "operation": {
+            "const": "copy-move"
+          }
+        },
+        "required": [
+          "operation"
+        ]
+      },
+      "then": {
+        "properties": {
+          "arguments": {
+            "$ref": "#/$defs/copyMoveArguments"
+          }
+        }
+      }
     }
   ],
   "$defs": {
@@ -546,6 +566,50 @@
         "keep": {
           "description": "The copy that survives. It may not also appear in `targets`.",
           "$ref": "common.json#/$defs/mutationTarget"
+        },
+        "targets": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "$ref": "common.json#/$defs/mutationTarget"
+          }
+        }
+      }
+    },
+    "copyMoveArguments": {
+      "description": "Copy every reviewed target onto another filesystem, verify what arrived, publish it without overwriting anything, and only then dispose of the source. A failure at any step before the publish leaves the source where it was and removes what was staged.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "planId",
+        "journalDirectory",
+        "homeTrashDirectory",
+        "destinationDirectory",
+        "sourceDisposition",
+        "targets"
+      ],
+      "properties": {
+        "planId": {
+          "$ref": "common.json#/$defs/planId"
+        },
+        "journalDirectory": {
+          "$ref": "common.json#/$defs/pathBytes"
+        },
+        "homeTrashDirectory": {
+          "description": "Carried whether or not the disposition needs it, so the helper never has to ask for it halfway through an action.",
+          "$ref": "common.json#/$defs/pathBytes"
+        },
+        "destinationDirectory": {
+          "description": "An existing directory. The helper publishes into it and never creates it.",
+          "$ref": "common.json#/$defs/pathBytes"
+        },
+        "sourceDisposition": {
+          "description": "What becomes of the source once the copy is verified and published. Fixed in the plan; apply time cannot choose it.",
+          "type": "string",
+          "enum": [
+            "trash",
+            "permanent"
+          ]
         },
         "targets": {
           "type": "array",

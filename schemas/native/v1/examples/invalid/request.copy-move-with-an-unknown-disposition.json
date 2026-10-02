@@ -1,0 +1,26 @@
+{
+  "protocolVersion": 1,
+  "requestId": "copy-move-1",
+  "operation": "copy-move",
+  "arguments": {
+    "planId": "plan-01HQ8Z3M4K5N6P7Q",
+    "journalDirectory": "L2hvbWUvZXhhbXBsZS8ubG9jYWwvc3RhdGUvZGlza3RvcA==",
+    "homeTrashDirectory": "L2hvbWUvZXhhbXBsZS8ubG9jYWwvc2hhcmUvVHJhc2g=",
+    "destinationDirectory": "L21udC9hcmNoaXZl",
+    "sourceDisposition": "shred",
+    "targets": [
+      {
+        "path": "L2hvbWUvZXhhbXBsZS8uY2FjaGUvcGlwL2h0dHAtdjIvYTE=",
+        "expected": {
+          "device": "66306",
+          "inode": "1179651",
+          "mountId": "29",
+          "kind": "directory",
+          "apparentBytes": "4096",
+          "modifiedNanoseconds": "1758000000123456789"
+        },
+        "reviewedBytes": "7314112512"
+      }
+    ]
+  }
+}

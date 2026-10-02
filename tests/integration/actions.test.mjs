@@ -766,3 +766,110 @@ test("a hardlink plan applied without acknowledging its irreversibility is refus
   const copy = await stat(tree.duplicates.copy);
   assert.notEqual(keep.ino, copy.ino, "nothing was replaced");
 });
+
+/**
+ * A directory on a filesystem other than the sandbox's, or `undefined`.
+ *
+ * A cross-disk move needs two real filesystems and this host may have only
+ * one that Disktop is willing to publish into: `/dev/shm` and `/run/user` are
+ * usually the other writable mounts, and both are below a protected root. Set
+ * `DISKTOP_TEST_DESTINATION_FS` to a writable directory on a second filesystem
+ * to run these, or see them skipped out loud rather than passing silently.
+ */
+async function otherFilesystem(home) {
+  const named = process.env.DISKTOP_TEST_DESTINATION_FS;
+  if (named === undefined) {
+    return undefined;
+  }
+  const here = await stat(home);
+  const there = await stat(named);
+  if (here.dev === there.dev) {
+    return undefined;
+  }
+  const directory = join(named, `disktop-move-${process.pid}-${Date.now()}`);
+  await mkdir(directory, { recursive: true });
+  homes.push(directory);
+  return directory;
+}
+
+test("a move across filesystems copies, verifies, publishes, and trashes the source", async (t) => {
+  const home = await disktopHome();
+  const tree = await createActionTree(home);
+  const destination = await otherFilesystem(home);
+  if (destination === undefined) {
+    t.skip(
+      "no second filesystem is available; set DISKTOP_TEST_DESTINATION_FS to a writable directory on one",
+    );
+    return;
+  }
+
+  const planned = envelope(
+    disktop(home, [
+      "clean",
+      "plan",
+      "--path",
+      tree.artifacts,
+      "--operation",
+      "move",
+      "--destination",
+      destination,
+      "--source",
+      "trash",
+      "--json",
+    ]),
+    "plan",
+  );
+  assert.equal(planned.data.plan.operation, "move");
+
+  const applied = envelope(
+    disktop(home, ["clean", "apply", planned.data.plan.id, "--yes", "--json"]),
+    "apply",
+  );
+
+  assert.equal(applied.data.result.completed, "1");
+  assert.ok(existsSync(join(destination, "node_modules")), "the copy arrived");
+  assert.ok(!existsSync(tree.artifacts), "the source was trashed");
+  assert.equal(applied.data.result.undoAvailable, true);
+  assert.notEqual(
+    applied.data.result.bytesMovedToTrash,
+    "0",
+    "the source went to Trash, so its bytes are reported as moved there",
+  );
+});
+
+test("a move refuses to publish over something already at the destination", async (t) => {
+  const home = await disktopHome();
+  const tree = await createActionTree(home);
+  const destination = await otherFilesystem(home);
+  if (destination === undefined) {
+    t.skip("no second filesystem is available; set DISKTOP_TEST_DESTINATION_FS");
+    return;
+  }
+  await mkdir(join(destination, "node_modules"), { recursive: true });
+  await writeFile(join(destination, "node_modules", "mine.txt"), "do not overwrite me");
+
+  const planned = envelope(
+    disktop(home, [
+      "clean",
+      "plan",
+      "--path",
+      tree.artifacts,
+      "--operation",
+      "move",
+      "--destination",
+      destination,
+      "--source",
+      "trash",
+      "--json",
+    ]),
+    "plan",
+  );
+  const applied = disktop(home, ["clean", "apply", planned.data.plan.id, "--yes", "--json"]);
+
+  assert.equal(applied.status, 3);
+  assert.equal(
+    await readFile(join(destination, "node_modules", "mine.txt"), "utf8"),
+    "do not overwrite me",
+  );
+  assert.ok(existsSync(tree.artifacts), "the source is preserved when the copy cannot publish");
+});

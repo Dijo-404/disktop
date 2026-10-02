@@ -24,8 +24,8 @@ Device and inode IDs, counts, byte sizes, and nanosecond timestamps will cross I
 | Control | `cancel` | Stop a named in-flight request at a safe item boundary; the cancelled request still emits a final event. |
 | Implemented read | `scan`, `query-index`, `hash-candidates` | Bounded `openat2` traversal into a SQLite index, keyset-paginated pages out of it, and the staged duplicate pipeline over it. |
 | Planned read | `inspect` | Live metadata for one path. |
-| Implemented actions | `trash`, `erase`, `empty-trash`, `restore`, `dedup-hardlink` | Recheck plan and target, perform one constrained syscall, journal per-item outcome. |
-| Planned actions | `copy-move`, `compress` | Staged output, verification, and publication without overwrite. |
+| Implemented actions | `trash`, `erase`, `empty-trash`, `restore`, `dedup-hardlink`, `copy-move` | Recheck plan and target, perform one constrained syscall or a staged and verified copy, journal per-item outcome. |
+| Planned actions | `compress` | Staged output, verification, and publication without overwrite. |
 | Manager journal | `manager-begin`, `manager-append`, `manager-finish` | Record intent, progress, command result, and verification for a fixed-argument Linux manager adapter. The helper does not invent or execute manager commands. |
 | Recovery | `journal-reconcile` | Resolve interrupted records into honest completed, partial, or uncertain states, and return a page of history. Reconciling and listing are one operation because a caller that could list without reconciling would read a history still claiming an abandoned action is running. |
 
@@ -106,9 +106,43 @@ another name of its own: only the last name to an inode frees anything. The resu
 bytes-moved-to-Trash is always zero and undo is never available, because nothing moved
 anywhere.
 
+### Moving to another disk
+
+`copy-move` validates the destination once, before any item: it is where
+everything lands, so a destination that is not a directory this user can open
+makes the whole request wrong rather than one item of it.
+
+Each item then runs a fixed sequence, and every step before the last leaves the
+source exactly where it was. The destination name is checked, the copy is staged
+as `<name>.disktop-partial-<pid>-<n>`, the bytes are streamed and digested as
+they are read, the staged file is `fsync`ed and read back and digested again,
+and the two digests are compared. A mismatch — a short write, a dropped block, a
+file that changed under the read — removes what was staged and fails the item.
+Permissions and the modification time come across, so the copy is the same file
+rather than a new one made today.
+
+Publishing is `renameat2` with `RENAME_NOREPLACE`. The name is checked before
+the copy starts, which makes a collision cheap, and the publish decides, which
+makes it correct: a name created while the copy was running fails the item and
+leaves what somebody else made alone.
+
+Only after the publish is the source touched. `sourceDisposition` decides how:
+`trash` reuses the Trash move, so the bytes are reported as moved to Trash and
+undo is available; `permanent` removes it outright and neither is. A source that
+cannot be disposed of after a successful publish is `uncertain` rather than
+`failed`, because the action half happened and calling it a failure would invite
+a second run into a destination the first one has already filled.
+
+A tree is copied with the same descent the scanner uses — `openat2` with
+`RESOLVE_BENEATH | RESOLVE_NO_SYMLINKS | RESOLVE_NO_XDEV` — so a nested mount
+inside the source stops the copy rather than quietly pulling another filesystem
+across, and a symlink is copied as the link object it is, with exactly the bytes
+it held. A socket, device node, or fifo stops the item: making a different
+object with the same name would be worse than saying it was not copied.
+
 ## Contract tests
 
-The Rust tests exercise the `hello` handshake, `probe` argument rejection, protocol mismatch, unknown fields, oversized requests, explicit rejection of an operation this build does not implement, traversal over sandbox trees with hardlinks, symlinks, unreadable directories and names that are not valid UTF-8, index paging and filters, a live cancellation that still produces a queryable index, the duplicate funnel over a tree holding a matched pair, a lone file in its size class, two names for one inode, and two files whose ends match and whose middles do not, and every implemented action: a Trash move with its metadata, a name collision that keeps both files, a changed target that is skipped, a protected root that is refused, a recursive erase that removes a symlink without following it, emptying a directory that is shaped like a Trash and refusing one that is not, a restore that refuses to overwrite whatever now occupies the original path, and a hardlink replacement over files that differ in their last byte, in their permissions, and in their inode.
+The Rust tests exercise the `hello` handshake, `probe` argument rejection, protocol mismatch, unknown fields, oversized requests, explicit rejection of an operation this build does not implement, traversal over sandbox trees with hardlinks, symlinks, unreadable directories and names that are not valid UTF-8, index paging and filters, a live cancellation that still produces a queryable index, the duplicate funnel over a tree holding a matched pair, a lone file in its size class, two names for one inode, and two files whose ends match and whose middles do not, and every implemented action: a Trash move with its metadata, a name collision that keeps both files, a changed target that is skipped, a protected root that is refused, a recursive erase that removes a symlink without following it, emptying a directory that is shaped like a Trash and refusing one that is not, a restore that refuses to overwrite whatever now occupies the original path, a hardlink replacement over files that differ in their last byte, in their permissions, and in their inode, and a move that copies a tree with its links intact, refuses an occupied destination name, and leaves its source alone whenever it cannot publish.
 
 `tests/integration/scan.test.mjs` drives the real binary through the CLI against fixture trees, compares allocated totals against `du -x`, and proves a bind mount is not descended into. `tests/integration/actions.test.mjs` does the same for the action pipeline, including that bytes moved to Trash and observed free-space change are reported as distinct values. `tests/recovery/journal.test.mjs` kills the helper mid-action and reads the journal back.
 

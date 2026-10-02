@@ -73,6 +73,17 @@ export function createNativeActions(options: NativeActionOptions): ActionPort & 
         operation,
         operation === "dedup-hardlink"
           ? hardlinkArguments(plan, journalDirectory)
+          : operation === "copy-move"
+          ? {
+              planId: plan.id,
+              journalDirectory,
+              // Carried whether or not the disposition needs it, so the helper
+              // never has to ask for it halfway through an action.
+              homeTrashDirectory,
+              destinationDirectory: requiredDestination(plan).bytesBase64,
+              sourceDisposition: requiredDisposition(plan),
+              targets: (plan.entries ?? []).map(encodeTarget),
+            }
           : operation === "empty-trash"
           ? {
               planId: plan.id,
@@ -152,6 +163,8 @@ function helperOperation(plan: ActionPlan): string {
       return "empty-trash";
     case "dedup-hardlink":
       return "dedup-hardlink";
+    case "move":
+      return "copy-move";
     default:
       throw new CapabilityUnavailable({
         status: "unsupported-kernel",
@@ -182,6 +195,26 @@ function hardlinkArguments(
     keep: encodeTarget(keep),
     targets: entries.filter((entry) => entry !== keep).map(encodeTarget),
   };
+}
+
+/**
+ * The two things a publishing plan fixes, read back out of it.
+ *
+ * They are required by the domain and by the schema, so an absent one is a
+ * plan that was built wrong rather than a choice to make here.
+ */
+function requiredDestination(plan: ActionPlan): { readonly bytesBase64: string } {
+  if (plan.destination === undefined) {
+    throw new Error(`Plan ${plan.id} reached apply without the destination it publishes into`);
+  }
+  return plan.destination;
+}
+
+function requiredDisposition(plan: ActionPlan): "trash" | "permanent" {
+  if (plan.sourceDisposition === undefined) {
+    throw new Error(`Plan ${plan.id} reached apply without saying what becomes of its source`);
+  }
+  return plan.sourceDisposition;
 }
 
 function encodeTarget(entry: PlannedEntry): Record<string, unknown> {
