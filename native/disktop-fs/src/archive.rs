@@ -97,28 +97,85 @@ pub fn compress_tree(
     destination_parent: RawFd,
     name: &[u8],
     permissions: u32,
-) -> io::Result<u64> {
+) -> io::Result<[u8; 32]> {
     let staged = sys::openat_create_exclusive(destination_parent, name, permissions)?;
-    let outcome = (|| -> io::Result<u64> {
+    let outcome = (|| -> io::Result<[u8; 32]> {
         sys::fchmod(staged, permissions)?;
+        // The digest is taken over the tar stream itself, before compression,
+        // so it covers every header and every byte of every member. Counting
+        // entries would not: a file rewritten to the same length while the
+        // archive was being built keeps the stream well-formed and the count
+        // identical, and the archive would hold a torn copy that verified.
+        // The digest sits between the tar builder and the compressor, so it
+        // covers the archive's content rather than whatever zstd happened to
+        // emit for it. Verification decompresses back to this same stream.
         let encoder = zstd::stream::write::Encoder::new(Sink(staged), COMPRESSION_LEVEL)?;
-        let mut builder = tar::Builder::new(encoder);
+        let mut builder = tar::Builder::new(Digesting {
+            inner: encoder,
+            hasher: Sha256::new(),
+        });
         builder.follow_symlinks(false);
         let mut entries = 0u64;
         append_children(&mut builder, source, root, 0, &mut entries)?;
-        builder.into_inner()?.finish()?.flush()?;
+
+        let digesting = builder.into_inner()?;
+        let digest: [u8; 32] = digesting.hasher.finalize().into();
+        digesting.inner.finish()?.flush()?;
         sys::fsync(staged)?;
-        Ok(entries)
+        Ok(digest)
     })();
     sys::close(staged);
     outcome
 }
 
-/// Read a staged `.tar.zst` back and report how many entries came out.
+/// A writer that digests everything that passes through it.
+struct Digesting<W: Write> {
+    inner: W,
+    hasher: Sha256,
+}
+
+impl<W: Write> Write for Digesting<W> {
+    fn write(&mut self, buffer: &[u8]) -> io::Result<usize> {
+        let written = self.inner.write(buffer)?;
+        self.hasher.update(&buffer[..written]);
+        Ok(written)
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        self.inner.flush()
+    }
+}
+
+/// Read a staged `.tar.zst` back and digest the tar stream that comes out.
 ///
-/// Every entry is read through, so a truncated member or a corrupt frame is
-/// found here rather than by somebody who needed the archive later.
-pub fn verify_tree(destination_parent: RawFd, name: &[u8]) -> io::Result<u64> {
+/// The whole archive is decompressed, the way anybody recovering from it would,
+/// and the bytes are digested as they emerge. Comparing that against the digest
+/// taken while writing is what makes "it can be read back" a statement about
+/// the content rather than about the entry count.
+pub fn verify_tree(destination_parent: RawFd, name: &[u8]) -> io::Result<[u8; 32]> {
+    let staged = sys::openat_read_no_symlinks(destination_parent, name)?;
+    let outcome = (|| -> io::Result<[u8; 32]> {
+        let mut decoder = zstd::stream::read::Decoder::new(Source::new(staged))?;
+        let mut hasher = Sha256::new();
+        let mut buffer = vec![0u8; READ_BYTES];
+        loop {
+            let read = decoder.read(&mut buffer)?;
+            if read == 0 {
+                break;
+            }
+            hasher.update(&buffer[..read]);
+        }
+        Ok(hasher.finalize().into())
+    })();
+    sys::close(staged);
+    outcome
+}
+
+/// Walk a staged `.tar.zst` as an archive, so a malformed member is found.
+///
+/// The digest says the bytes survived the round trip; this says they are still
+/// a tar anybody can unpack.
+pub fn readable_as_tar(destination_parent: RawFd, name: &[u8]) -> io::Result<u64> {
     let staged = sys::openat_read_no_symlinks(destination_parent, name)?;
     let outcome = (|| -> io::Result<u64> {
         let decoder = zstd::stream::read::Decoder::new(Source::new(staged))?;
@@ -292,5 +349,97 @@ fn pread(descriptor: RawFd, buffer: &mut [u8], offset: u64) -> io::Result<usize>
         if error.kind() != io::ErrorKind::Interrupted {
             return Err(error);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::testing::Sandbox;
+    use std::os::unix::io::AsRawFd;
+
+    /// The digest has to be over the archive's content, not over what the
+    /// compressor emitted and not over a count of its members. A member
+    /// rewritten to the same length while the archive is being built keeps the
+    /// stream well-formed and the count identical.
+    #[test]
+    fn an_archive_whose_content_changed_does_not_verify_against_what_went_in() {
+        let sandbox = Sandbox::new("archive-torn");
+        sandbox.directory(b"work");
+        sandbox.directory(b"out");
+        std::fs::write(sandbox.path().join("work/a.bin"), vec![1u8; 40_000]).unwrap();
+
+        let source = std::fs::File::open(sandbox.path().join("work")).unwrap();
+        let destination = std::fs::File::open(sandbox.path().join("out")).unwrap();
+
+        let written = compress_tree(
+            source.as_raw_fd(),
+            b"work",
+            destination.as_raw_fd(),
+            b"first.tar.zst",
+            0o600,
+        )
+        .expect("the archive is written");
+
+        // The same tree, one member's bytes different, same length.
+        std::fs::write(sandbox.path().join("work/a.bin"), vec![2u8; 40_000]).unwrap();
+        let source = std::fs::File::open(sandbox.path().join("work")).unwrap();
+        let second = compress_tree(
+            source.as_raw_fd(),
+            b"work",
+            destination.as_raw_fd(),
+            b"second.tar.zst",
+            0o600,
+        )
+        .expect("the second archive is written");
+
+        assert_ne!(
+            written, second,
+            "two archives of different content must not share a digest",
+        );
+        assert_eq!(
+            verify_tree(destination.as_raw_fd(), b"first.tar.zst").unwrap(),
+            written,
+            "an archive reads back as what went into it",
+        );
+        assert_ne!(
+            verify_tree(destination.as_raw_fd(), b"second.tar.zst").unwrap(),
+            written,
+            "an archive of other bytes does not pass the first one's check",
+        );
+    }
+
+    #[test]
+    fn a_truncated_archive_is_not_readable_as_a_tar() {
+        let sandbox = Sandbox::new("archive-truncated");
+        sandbox.directory(b"work");
+        sandbox.directory(b"out");
+        std::fs::write(sandbox.path().join("work/a.bin"), vec![3u8; 80_000]).unwrap();
+
+        let source = std::fs::File::open(sandbox.path().join("work")).unwrap();
+        let destination = std::fs::File::open(sandbox.path().join("out")).unwrap();
+        compress_tree(
+            source.as_raw_fd(),
+            b"work",
+            destination.as_raw_fd(),
+            b"a.tar.zst",
+            0o600,
+        )
+        .unwrap();
+
+        let path = sandbox.path().join("out/a.tar.zst");
+        let length = std::fs::metadata(&path).unwrap().len();
+        std::fs::File::options()
+            .write(true)
+            .open(&path)
+            .unwrap()
+            .set_len(length / 2)
+            .unwrap();
+
+        assert!(
+            readable_as_tar(destination.as_raw_fd(), b"a.tar.zst").is_err()
+                || verify_tree(destination.as_raw_fd(), b"a.tar.zst").is_err(),
+            "half an archive is not an archive",
+        );
     }
 }

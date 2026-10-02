@@ -32,6 +32,14 @@ export interface CleanupRule {
   readonly maximumBytes: Bytes;
 }
 
+/**
+ * Characters that command a terminal or reorder what follows them. C0, DEL,
+ * C1, the line and paragraph separators, and the bidirectional marks: the same
+ * set `domain/paths.ts` refuses to pass through unaltered, applied to text
+ * somebody wrote in a configuration file rather than to a filename.
+ */
+const CONTROL = /[\u0000-\u001F\u007F-\u009F\u2028\u2029\u200E\u200F\u202A-\u202E\u2066-\u2069]/;
+
 const MAX_RULES_COUNT = 100_000;
 const MAX_RULE_BYTES = 1024n ** 5n;
 const MAX_AGE_DAYS = 3650;
@@ -75,6 +83,14 @@ export function validateRule(input: unknown): CleanupRule {
   const name = block.name;
   if (typeof name !== "string" || name.trim() === "" || name.length > 200) {
     throw new RangeError("Every [[rules]] block needs a short 'name' so it can be reported");
+  }
+  // A rule's name is printed. A terminal reading an escape sequence out of it
+  // does what the sequence says, and refusing is clearer than quietly
+  // rewriting what somebody typed.
+  if (CONTROL.test(name)) {
+    throw new RangeError(
+      `Rule '${name.replace(CONTROL, "?")}': a rule's name may not hold control or direction-changing characters`,
+    );
   }
 
   const roots = textList(block.roots, "roots", `rule '${name}'`);
@@ -125,6 +141,54 @@ export function validateRule(input: unknown): CleanupRule {
     maximumCount,
     maximumBytes,
   };
+}
+
+/**
+ * A stable, readable identifier from a rule's name.
+ *
+ * The finding a rule produces is keyed by this, so two rules whose names
+ * reduce to the same identifier would be one finding. `validateRules` refuses
+ * that rather than letting the second rule quietly replace the first — the
+ * first rule's plans would then be refused at apply time with a message about
+ * a rule that was "changed or removed", which is true and unhelpful.
+ */
+export function ruleSlug(name: string): string {
+  const cleaned = name
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, "-")
+    .replace(/^-+|-+$/g, "")
+    .slice(0, 64);
+  return cleaned === "" ? "unnamed" : cleaned;
+}
+
+/**
+ * Read every `[[rules]]` block, refusing a set that could not be told apart.
+ */
+export function validateRules(blocks: readonly unknown[]): readonly CleanupRule[] {
+  const rules: CleanupRule[] = [];
+  const byIdentifier = new Map<string, string>();
+
+  for (const [index, block] of blocks.entries()) {
+    let rule: CleanupRule;
+    try {
+      rule = validateRule(block);
+    } catch (error) {
+      const reason = error instanceof Error ? error.message : String(error);
+      throw new RangeError(`[[rules]] block ${index + 1}: ${reason}`);
+    }
+
+    const identifier = ruleSlug(rule.name);
+    const existing = byIdentifier.get(identifier);
+    if (existing !== undefined) {
+      throw new RangeError(
+        `[[rules]] block ${index + 1}: the name '${rule.name}' cannot be told apart from '${existing}'. Two rules need names that differ by more than punctuation or capitals.`,
+      );
+    }
+    byIdentifier.set(identifier, rule.name);
+    rules.push(rule);
+  }
+
+  return rules;
 }
 
 /**
@@ -194,14 +258,18 @@ function relativeTo(rule: CleanupRule, path: RawPath): string | undefined {
     if (!isWithin(rootBytes, bytes)) {
       continue;
     }
-    // Matching is over display text, never over the bytes an operation
-    // resolves. A name that does not decode cleanly cannot be matched by a
-    // pattern somebody typed, and leaving it unmatched is the safe direction.
+    // Matching is over the text the path really is, never over `display`.
+    // `display` escapes a control or direction-changing character into seven
+    // characters, so slicing by its length would cut the relative path in the
+    // wrong place and match it against the wrong pattern. A name that does not
+    // decode cleanly cannot be matched by a pattern somebody typed at all, and
+    // leaving it unmatched is the safe direction.
     const whole = path.utf8;
-    if (whole === undefined) {
+    const prefix = root.utf8;
+    if (whole === undefined || prefix === undefined) {
       return undefined;
     }
-    return whole.slice(root.display.length).replace(/^\/+/, "");
+    return whole.slice(prefix.length).replace(/^\/+/, "");
   }
   return undefined;
 }
@@ -211,15 +279,98 @@ function relativeTo(rule: CleanupRule, path: RawPath): string | undefined {
  * character. Nothing else is special, and in particular there is no
  * alternation or character class: a pattern language with more in it is a
  * pattern language somebody can be surprised by.
+ *
+ * This is matched directly rather than compiled to a regular expression, for
+ * two reasons that are both about what happens when somebody writes an awkward
+ * pattern. A regular expression built from `**` backtracks: eight of them in
+ * one pattern took seconds against a deep path, and `config.toml` is a file
+ * other programs can write to, so a pattern that takes seconds to fail is one
+ * that hangs this program. And the obvious rewrite gets a trailing `**` wrong
+ * — somebody who writes `excludes = ["private/**"]` is protecting that tree,
+ * and a pattern that silently matches nothing is an exclusion that silently
+ * protects nothing.
+ *
+ * The algorithm is the standard one for wildcards: walk both sides, and
+ * remember the last place a `**` could have matched less so a dead end costs
+ * one step back rather than an exponential search.
  */
 function globMatches(pattern: string, candidate: string): boolean {
-  const expression = pattern
-    .replace(/[.+^${}()|[\]\\]/g, "\\$&")
-    .replace(/\*\*\/?/g, "\u0000")
-    .replace(/\*/g, "[^/]*")
-    .replace(/\?/g, "[^/]")
-    .replace(/\u0000/g, "(?:.*/)?");
-  return new RegExp(`^${expression}$`).test(candidate);
+  return segmentsMatch(pattern.split("/"), candidate.split("/"));
+}
+
+function segmentsMatch(pattern: readonly string[], candidate: readonly string[]): boolean {
+  let patternIndex = 0;
+  let candidateIndex = 0;
+  let crossing = -1;
+  let resumeAt = 0;
+
+  while (candidateIndex < candidate.length) {
+    const segment = pattern[patternIndex];
+    if (segment === "**") {
+      // Remember that this could have matched fewer segments, and try the
+      // shortest first.
+      crossing = patternIndex;
+      resumeAt = candidateIndex;
+      patternIndex += 1;
+      continue;
+    }
+    if (
+      segment !== undefined &&
+      literalMatches(segment, candidate[candidateIndex] as string)
+    ) {
+      patternIndex += 1;
+      candidateIndex += 1;
+      continue;
+    }
+    if (crossing < 0) {
+      return false;
+    }
+    // Let the last `**` swallow one more segment and carry on from there.
+    patternIndex = crossing + 1;
+    resumeAt += 1;
+    candidateIndex = resumeAt;
+  }
+
+  // A `**` left over at the end matches no segments at all, which is what
+  // makes `build/**` match `build` as well as everything under it.
+  while (pattern[patternIndex] === "**") {
+    patternIndex += 1;
+  }
+  return patternIndex === pattern.length;
+}
+
+/** One segment, where `*` and `?` are the only things that are not literal. */
+function literalMatches(pattern: string, text: string): boolean {
+  let patternIndex = 0;
+  let textIndex = 0;
+  let star = -1;
+  let resumeAt = 0;
+
+  while (textIndex < text.length) {
+    const character = pattern[patternIndex];
+    if (character === "*") {
+      star = patternIndex;
+      resumeAt = textIndex;
+      patternIndex += 1;
+      continue;
+    }
+    if (character === "?" || (character !== undefined && character === text[textIndex])) {
+      patternIndex += 1;
+      textIndex += 1;
+      continue;
+    }
+    if (star < 0) {
+      return false;
+    }
+    patternIndex = star + 1;
+    resumeAt += 1;
+    textIndex = resumeAt;
+  }
+
+  while (pattern[patternIndex] === "*") {
+    patternIndex += 1;
+  }
+  return patternIndex === pattern.length;
 }
 
 function checkPattern(rule: string, pattern: string): void {
@@ -236,8 +387,26 @@ function checkPattern(rule: string, pattern: string): void {
       `Rule '${rule}': '${pattern}' can leave its root, and a rule may not reach outside the roots it declares.`,
     );
   }
-  if (pattern.includes("\0")) {
-    throw new RangeError(`Rule '${rule}': a pattern may not hold a NUL byte`);
+  if (CONTROL.test(pattern)) {
+    throw new RangeError(
+      `Rule '${rule}': a pattern may not hold control or direction-changing characters`,
+    );
+  }
+  // Each `**` is linear on its own, but a pattern needing dozens of them is
+  // not a pattern anybody meant to write, and refusing it keeps the cost of
+  // matching proportional to the path rather than to the pattern.
+  const crossings = pattern.split("/").filter((segment) => segment === "**").length;
+  if (crossings > 8) {
+    throw new RangeError(
+      `Rule '${rule}': '${pattern}' crosses directory levels ${crossings} times; at most 8 '**' segments are allowed in one pattern`,
+    );
+  }
+  for (const segment of pattern.split("/")) {
+    if (segment.includes("**") && segment !== "**") {
+      throw new RangeError(
+        `Rule '${rule}': '${pattern}' writes '**' beside other characters. '**' is a whole path segment on its own; use '*' to match within a name.`,
+      );
+    }
   }
 }
 

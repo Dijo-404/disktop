@@ -47,13 +47,23 @@ pub fn copy_file(
     destination_parent: RawFd,
     name: &[u8],
     permissions: u32,
+    modified_nanoseconds: Option<u64>,
 ) -> io::Result<u64> {
     let staged = sys::openat_create_exclusive(destination_parent, name, permissions)?;
     // The umask masked the mode the create asked for, so the bits are set
     // again here; otherwise a copy of a 0o666 file arrives as 0o644.
-    // The umask masked the mode the create asked for, so the bits are set
-    // again here; otherwise a copy of a 0o666 file arrives as 0o644.
-    let outcome = sys::fchmod(staged, permissions).and_then(|()| stream_and_verify(source, staged));
+    let outcome = sys::fchmod(staged, permissions)
+        .and_then(|()| stream_and_verify(source, staged))
+        .and_then(|bytes| {
+            // The modification time comes across last, after the write that
+            // would otherwise have set it to now. A copy of a file is the same
+            // file, and one dated today is a different answer to the question
+            // "when did this last change?".
+            if let Some(nanoseconds) = modified_nanoseconds {
+                sys::set_modified(staged, nanoseconds)?;
+            }
+            Ok(bytes)
+        });
     sys::close(staged);
     outcome
 }
@@ -154,7 +164,13 @@ fn copy_children(
             }
             EntryKind::File => {
                 let descriptor = sys::openat_read_no_symlinks(source, &name)?;
-                let outcome = copy_file(descriptor, destination, &name, metadata.permissions);
+                let outcome = copy_file(
+                    descriptor,
+                    destination,
+                    &name,
+                    metadata.permissions,
+                    Some(metadata.modified_nanoseconds),
+                );
                 sys::close(descriptor);
                 let bytes = outcome?;
                 copied.files += 1;

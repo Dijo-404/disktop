@@ -1,6 +1,6 @@
 import { findingSize, type Finding } from "../../domain/findings.js";
 import type { IndexedEntry, RawPath, Warning } from "../../domain/models.js";
-import { matchesRule, type CleanupRule } from "../../domain/rules.js";
+import { matchesRule, ruleSlug, type CleanupRule } from "../../domain/rules.js";
 import type { DiscoveryEnvironment, FindingProvider } from "../../ports/providers.js";
 import { buildFinding } from "../support.js";
 
@@ -168,20 +168,5 @@ function describe(patterns: readonly string[]): string {
   return patterns.map((pattern) => `'${pattern}'`).join(", ");
 }
 
-/**
- * A stable, readable identifier from a rule's name.
- *
- * Exported because the composition root needs the same answer to key a rule's
- * hash by the finding id this provider will give it. Two definitions of it
- * would drift, and a drifted one makes every rule plan refuse at apply time.
- */
-export function ruleSlug(name: string): string {
-  const cleaned = name
-    .toLowerCase()
-    .replace(/[^a-z0-9]+/g, "-")
-    .replace(/^-+|-+$/g, "")
-    .slice(0, 64);
-  return cleaned === "" ? "unnamed" : cleaned;
-}
-
 export type { IndexedEntry };
+export { ruleSlug };

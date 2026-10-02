@@ -2628,6 +2628,40 @@ mod tests {
     }
 
     #[test]
+    fn the_journal_says_which_file_a_duplicate_became_a_link_to() {
+        let sandbox = Sandbox::new("hardlink-journal");
+        sandbox.directory(b"state");
+        let content = vec![6u8; 30_000];
+        std::fs::write(sandbox.path().join("keep.bin"), &content).unwrap();
+        std::fs::write(sandbox.path().join("copy.bin"), &content).unwrap();
+
+        let mut keep = sandbox.bytes();
+        keep.extend_from_slice(b"/keep.bin");
+        let mut copy = sandbox.bytes();
+        copy.extend_from_slice(b"/copy.bin");
+
+        run_hardlink("link-journal", &sandbox, &keep, &[target(&copy, 30_000)]);
+
+        let mut state = sandbox.bytes();
+        state.extend_from_slice(b"/state");
+        let page = responses(&format!(
+            "{{\"protocolVersion\":1,\"requestId\":\"journal-link\",\
+               \"operation\":\"journal-reconcile\",\
+               \"arguments\":{{\"journalDirectory\":\"{}\"}}}}\n",
+            crate::base64::encode(&state),
+        ));
+        let record = &page[0]["result"]["records"][0];
+        let destination = record["items"][0]["destination"]
+            .as_str()
+            .expect("the item records what it became a link to");
+        assert_eq!(
+            crate::base64::decode(destination).expect("base64"),
+            keep,
+            "the record names the kept file's whole path, not its last segment",
+        );
+    }
+
+    #[test]
     fn a_file_whose_bytes_differ_is_refused_however_the_sizes_match() {
         let sandbox = Sandbox::new("hardlink-different");
         sandbox.directory(b"state");
@@ -2908,6 +2942,92 @@ mod tests {
         assert!(staging_names(&sandbox.path().join("elsewhere")).is_empty());
     }
 
+    /// The window between the copy starting and the source being disposed of.
+    ///
+    /// A copy of anything large takes time, and the source can change while it
+    /// runs. What the plan reviewed is no longer what is on disk, so disposing
+    /// of it would release bytes nobody reviewed and that are not in the copy.
+    #[test]
+    fn a_source_that_changed_while_it_was_being_copied_is_not_disposed_of() {
+        let sandbox = Sandbox::new("move-changed-during");
+        sandbox.directory(b"state");
+        sandbox.directory(b"elsewhere");
+        // Large enough that the copy is still running when the watcher below
+        // notices the staging file.
+        let path = sandbox.path().join("big.bin");
+        std::fs::write(&path, vec![1u8; 192 * 1024 * 1024]).unwrap();
+
+        let mut source = sandbox.bytes();
+        source.extend_from_slice(b"/big.bin");
+        let mut destination = sandbox.bytes();
+        destination.extend_from_slice(b"/elsewhere");
+        let reviewed = target(&source, 192 * 1024 * 1024);
+
+        let watching = sandbox.path().join("elsewhere");
+        let changing = path.clone();
+        let fired = std::sync::Arc::new(AtomicBool::new(false));
+        let flag = std::sync::Arc::clone(&fired);
+        let watcher = std::thread::spawn(move || {
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+            while std::time::Instant::now() < deadline {
+                let staged = std::fs::read_dir(&watching)
+                    .map(|entries| {
+                        entries.flatten().any(|entry| {
+                            entry
+                                .file_name()
+                                .to_string_lossy()
+                                .contains(".disktop-partial")
+                        })
+                    })
+                    .unwrap_or(false);
+                if staged {
+                    // Somebody wrote to the file while Disktop was copying it.
+                    use std::io::Write;
+                    let mut file = std::fs::OpenOptions::new()
+                        .append(true)
+                        .open(&changing)
+                        .expect("the source is still there");
+                    file.write_all(b"written during the copy").unwrap();
+                    file.sync_all().unwrap();
+                    flag.store(true, Ordering::Relaxed);
+                    return;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(1));
+            }
+        });
+
+        let events = run_move(
+            "move-race",
+            &sandbox,
+            &destination,
+            "permanent",
+            &[reviewed],
+        );
+        watcher.join().expect("the watcher finished");
+
+        assert!(
+            fired.load(Ordering::Relaxed),
+            "the test never managed to change the source while the copy was running",
+        );
+
+        let items = item_results(&events, "move-race");
+        assert_ne!(
+            items[0]["itemResult"]["outcome"], "completed",
+            "a source that changed under the copy was reported as dealt with",
+        );
+        assert!(
+            sandbox.path().join("big.bin").exists(),
+            "the source was removed although it is no longer what the plan reviewed",
+        );
+        assert_eq!(
+            std::fs::metadata(sandbox.path().join("big.bin"))
+                .unwrap()
+                .len(),
+            192 * 1024 * 1024 + 23,
+            "the bytes written during the copy are still there",
+        );
+    }
+
     #[test]
     fn a_moved_file_whose_name_is_already_taken_fails_and_keeps_both() {
         let sandbox = Sandbox::new("move-collision");
@@ -3062,6 +3182,82 @@ mod tests {
         assert!(sandbox.path().join("big.bin").exists());
         assert!(!sandbox.path().join("elsewhere/big.bin").exists());
         assert!(staging_names(&sandbox.path().join("elsewhere")).is_empty());
+    }
+
+    #[test]
+    fn a_destination_disktop_may_not_write_into_refuses_the_whole_request() {
+        let sandbox = Sandbox::new("move-protected-destination");
+        sandbox.directory(b"state");
+        std::fs::write(sandbox.path().join("big.bin"), vec![7u8; 1000]).unwrap();
+
+        let mut source = sandbox.bytes();
+        source.extend_from_slice(b"/big.bin");
+        let reviewed = target(&source, 1000);
+
+        // Disktop's own state holds the record of what it did; a protected
+        // system root and a shared container root are not this user's to fill.
+        let mut state = sandbox.bytes();
+        state.extend_from_slice(b"/state");
+        for destination in [state.as_slice(), b"/etc".as_slice(), b"/mnt".as_slice()] {
+            let events = run_move(
+                "move-protected",
+                &sandbox,
+                destination,
+                "trash",
+                std::slice::from_ref(&reviewed),
+            );
+            let error = events
+                .iter()
+                .find(|event| event["event"] == "error")
+                .unwrap_or_else(|| {
+                    panic!(
+                        "{} was accepted as a destination: {events:?}",
+                        String::from_utf8_lossy(destination),
+                    )
+                });
+            assert_eq!(
+                error["error"]["code"],
+                "protected-path",
+                "{}",
+                String::from_utf8_lossy(destination),
+            );
+            assert!(sandbox.path().join("big.bin").exists());
+        }
+    }
+
+    #[test]
+    fn a_copy_that_cannot_fit_refuses_before_it_writes_anything() {
+        let sandbox = Sandbox::new("move-no-space");
+        sandbox.directory(b"state");
+        sandbox.directory(b"elsewhere");
+        std::fs::write(sandbox.path().join("small.bin"), vec![1u8; 1000]).unwrap();
+
+        let mut source = sandbox.bytes();
+        source.extend_from_slice(b"/small.bin");
+        let mut destination = sandbox.bytes();
+        destination.extend_from_slice(b"/elsewhere");
+
+        // The plan says this needs more room than any filesystem has, so the
+        // item is refused before a byte is staged rather than after a copy
+        // that filled the disk for everything else on the machine.
+        let fingerprinted = target(&source, u64::MAX);
+        let events = run_move(
+            "move-space",
+            &sandbox,
+            &destination,
+            "trash",
+            &[fingerprinted],
+        );
+        let items = item_results(&events, "move-space");
+
+        assert_eq!(items[0]["itemResult"]["outcome"], "failed");
+        assert_eq!(items[0]["itemResult"]["reason"], "no-space");
+        assert!(
+            sandbox.path().join("small.bin").exists(),
+            "the source is untouched"
+        );
+        assert!(staging_names(&sandbox.path().join("elsewhere")).is_empty());
+        assert!(!sandbox.path().join("elsewhere/small.bin").exists());
     }
 
     #[test]
@@ -3322,6 +3518,86 @@ mod tests {
                 .any(|(name, link)| name.ends_with("alias") && *link),
             "a link was archived as a link object: {seen:?}",
         );
+    }
+
+    #[test]
+    fn an_archive_is_private_whatever_the_directory_it_came_from_allowed() {
+        let sandbox = Sandbox::new("compress-mode");
+        sandbox.directory(b"state");
+        sandbox.directory(b"work");
+        std::fs::write(sandbox.path().join("work/secret.env"), b"TOKEN=hunter2\n").unwrap();
+        sandbox.chmod(b"work/secret.env", 0o600);
+        sandbox.chmod(b"work", 0o755);
+
+        let mut source = sandbox.bytes();
+        source.extend_from_slice(b"/work");
+        let destination = sandbox.bytes();
+
+        run_compress(
+            "zst-mode",
+            &sandbox,
+            &destination,
+            "trash",
+            &[target(&source, 1000)],
+        );
+
+        use std::os::unix::fs::PermissionsExt;
+        let archive = std::fs::metadata(sandbox.path().join("work.tar.zst")).unwrap();
+        assert_eq!(
+            archive.permissions().mode() & 0o7777,
+            0o600,
+            "an archive holds everything inside the directory, including what was private, so it \
+             is private itself rather than taking the directory's own permissions",
+        );
+    }
+
+    #[test]
+    fn a_moved_tree_keeps_each_file_modification_time() {
+        let sandbox = Sandbox::new("move-tree-times");
+        sandbox.directory(b"state");
+        sandbox.directory(b"elsewhere");
+        sandbox.directory(b"work");
+        sandbox.directory(b"work/deep");
+        std::fs::write(sandbox.path().join("work/top.bin"), vec![1u8; 2000]).unwrap();
+        std::fs::write(sandbox.path().join("work/deep/leaf.bin"), vec![2u8; 3000]).unwrap();
+
+        // Long ago, so "today" cannot be mistaken for it.
+        let old = std::time::SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(981_173_106);
+        for relative in ["work/top.bin", "work/deep/leaf.bin"] {
+            let file = std::fs::File::options()
+                .write(true)
+                .open(sandbox.path().join(relative))
+                .unwrap();
+            file.set_modified(old).unwrap();
+        }
+
+        let mut source = sandbox.bytes();
+        source.extend_from_slice(b"/work");
+        let mut destination = sandbox.bytes();
+        destination.extend_from_slice(b"/elsewhere");
+
+        let events = run_move(
+            "move-times",
+            &sandbox,
+            &destination,
+            "trash",
+            &[target(&source, 5000)],
+        );
+        assert_eq!(
+            completion(&events, "move-times")["result"]["completed"],
+            "1",
+            "{:?}",
+            item_results(&events, "move-times"),
+        );
+
+        for relative in ["elsewhere/work/top.bin", "elsewhere/work/deep/leaf.bin"] {
+            let arrived = std::fs::metadata(sandbox.path().join(relative)).unwrap();
+            assert_eq!(
+                arrived.modified().unwrap(),
+                old,
+                "{relative} arrived dated today; a copy of a file is the same file, not a new one",
+            );
+        }
     }
 
     #[test]

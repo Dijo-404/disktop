@@ -147,26 +147,26 @@ export function createUndoService(dependencies: UndoDependencies): UndoService {
 /**
  * What an undo did not do.
  *
- * `PLAN.md` asks an undo of a move or a compress to retire the published output
- * through a reviewed Trash action of its own. It is not retired here, and the
- * reason is the same reason every other removal in Disktop is reviewed: a
- * second deletion nobody previewed, performed as a side effect of an undo, is
- * exactly the shape of action this program exists not to take. So the output
- * is named and left, and removing it is a plan somebody makes and confirms.
+ * `PLAN.md` asks an undo of a move or a compress to retire the published
+ * output through a reviewed Trash action of its own. It is not retired here,
+ * and the reason is the same reason every other removal in Disktop is
+ * reviewed: a second deletion nobody previewed, performed as a side effect of
+ * an undo, is exactly the shape of action this program exists not to take.
+ *
+ * Nor can this name where the output went. The journal item's destination is
+ * where the *source* went — that is what made the restore possible — and the
+ * published path is not recorded anywhere, so saying "it is at X" would be
+ * inventing one. The honest note says the output is still there, says Disktop
+ * does not know where, and names the command that would show it.
  */
 function notesFor(record: JournalRecord): readonly string[] {
   if (!PUBLISHING.has(record.operation)) {
     return [];
   }
-  const published = record.items
-    .filter((item) => item.outcome === "completed")
-    .map((item) => item.path.display);
   const what = record.operation === "compress" ? "archive" : "copy";
   return [
     `The original is back. The ${what} this action published is still where it was put: an undo brings the source back and does not remove anything else.`,
-    ...(published.length === 0
-      ? []
-      : [`Review it with 'disktop clean plan --path PATH' if you no longer want it. Restored: ${published.join(", ")}.`]),
+    `Disktop's history records where the original went, not where the ${what} was published, so it cannot name it here. Look in the destination the plan fixed, and review it with 'disktop clean plan --path PATH' if you no longer want it.`,
   ];
 }
 

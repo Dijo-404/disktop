@@ -198,3 +198,107 @@ test("a rule never matches a second hardlink, whose bytes belong to another path
 
   assert.equal(matchesRule(rule, shared, NOW), false);
 });
+
+// --- What the glob syntax actually promises ---
+
+function matches(pattern, relative) {
+  return matchesRule(
+    validateRule(source({ globs: [pattern], minimum_bytes: 0, minimum_age_days: 1 })),
+    entry(`/home/example/Downloads/${relative}`),
+    NOW,
+  );
+}
+
+test("a bare ** matches everything under the root, at any depth", () => {
+  assert.equal(matches("**", "a.log"), true);
+  assert.equal(matches("**", "deep/a.log"), true);
+  assert.equal(matches("**", "deep/deeper/a.log"), true);
+});
+
+test("a trailing ** matches the named directory and everything under it", () => {
+  assert.equal(matches("build/**", "build/out.o"), true);
+  assert.equal(matches("build/**", "build/deep/out.o"), true);
+  assert.equal(matches("build/**", "build"), true);
+  assert.equal(matches("build/**", "other/out.o"), false);
+});
+
+test("** in the middle crosses any number of levels, including none", () => {
+  assert.equal(matches("build/**/*.o", "build/out.o"), true);
+  assert.equal(matches("build/**/*.o", "build/deep/deeper/out.o"), true);
+  assert.equal(matches("build/**/*.o", "elsewhere/out.o"), false);
+});
+
+test("a leading ** reaches any depth and a bare * does not", () => {
+  assert.equal(matches("**/*.log", "a.log"), true);
+  assert.equal(matches("**/*.log", "deep/a.log"), true);
+  assert.equal(matches("*.log", "deep/a.log"), false);
+  assert.equal(matches("*.log", "a.log"), true);
+});
+
+test("an exclude written with a trailing ** actually protects what is under it", () => {
+  const rule = validateRule(
+    source({ globs: ["**/*.log"], excludes: ["private/**"], minimum_bytes: 0 }),
+  );
+
+  assert.equal(
+    matchesRule(rule, entry("/home/example/Downloads/private/app.log"), NOW),
+    false,
+    "an exclusion somebody wrote has to exclude something",
+  );
+  assert.equal(matchesRule(rule, entry("/home/example/Downloads/public/app.log"), NOW), true);
+});
+
+test("? matches one character and never a slash", () => {
+  assert.equal(matches("a?.log", "ab.log"), true);
+  assert.equal(matches("a?.log", "abc.log"), false);
+  assert.equal(matches("a?b", "a/b"), false);
+});
+
+test("a pattern's special characters are literal when they are not glob syntax", () => {
+  assert.equal(matches("a+b.log", "a+b.log"), true);
+  assert.equal(matches("a+b.log", "aab.log"), false);
+  assert.equal(matches("a.log", "axlog"), false);
+});
+
+test("a pattern with as many ** segments as are allowed still answers promptly", () => {
+  // The worst case the syntax permits: eight level-crossings, each followed by
+  // a segment that the candidate keeps almost matching.
+  const pattern = `${"**/a/".repeat(8)}zzz`;
+  const candidate = `${"a/".repeat(40)}b`;
+
+  const started = Date.now();
+  const answer = matches(pattern, candidate);
+  const elapsed = Date.now() - started;
+
+  assert.equal(answer, false);
+  assert.ok(elapsed < 1000, `matching took ${elapsed}ms; a rule must not hang the program`);
+});
+
+test("a pattern with an implausible number of ** segments is refused as it is read", () => {
+  assert.throws(() => validateRule(source({ globs: [`${"**/".repeat(40)}x`] })), RangeError);
+});
+
+test("** beside other characters is refused rather than read as something it is not", () => {
+  for (const pattern of ["a**", "**a", "a**/b", "x**y"]) {
+    assert.throws(() => validateRule(source({ globs: [pattern] })), RangeError, pattern);
+  }
+});
+
+test("a root whose name renders differently from its bytes still matches correctly", () => {
+  // `display` escapes a direction-changing character into seven characters, so
+  // slicing the path by the displayed length would cut the relative path in
+  // the wrong place and match the wrong pattern.
+  const root = "/home/example/pro‮jects";
+  const rule = validateRule({
+    name: "r",
+    roots: [root],
+    globs: ["*.iso"],
+    minimum_age_days: 1,
+    minimum_bytes: 0,
+    maximum_count: 10,
+    maximum_bytes: 1_000_000,
+  });
+
+  assert.equal(matchesRule(rule, entry(`${root}/big.iso`), NOW), true);
+  assert.equal(matchesRule(rule, entry(`${root}/deep/big.iso`), NOW), false);
+});

@@ -338,3 +338,69 @@ test("a plan that publishes nothing is not checked for a destination it never ha
     false,
   );
 });
+
+test("a copy that arrived but whose source could not be dealt with is not reported as unpublished", async () => {
+  const stored = plan({
+    operation: "move",
+    destination: rawPathFromUtf8("/mnt/archive"),
+    sourceDisposition: "trash",
+  });
+  // The helper's own word for "the output arrived and was verified, but the
+  // original is still there": uncertain, which counts as neither completed nor
+  // skipped.
+  const { service: apply } = service(stored, {
+    result: { ...RESULT, planId: "", completed: 0n, skipped: 0n, failed: 1n, state: "partial" },
+  });
+
+  const outcome = await apply.apply({ planId: stored.id, confirmed: true }, SIGNAL);
+
+  const destination = outcome.result.verification.find(
+    (check) => check.check === "destination-present",
+  );
+  assert.notEqual(
+    destination.detail,
+    `Nothing was published into /mnt/archive, so there is nothing there to confirm.`,
+    "a result must not say nothing was published when a verified copy is sitting there",
+  );
+  assert.equal(
+    destination.outcome,
+    "unavailable",
+    "Disktop did not look at the destination, so it says it could not tell",
+  );
+});
+
+test("an unconfirmed move to Trash is not described as a permanent removal", async () => {
+  const stored = plan({
+    operation: "move",
+    destination: rawPathFromUtf8("/mnt/archive"),
+    sourceDisposition: "trash",
+  });
+  const { service: apply } = service(stored);
+
+  const outcome = await apply.apply({ planId: stored.id, confirmed: false }, SIGNAL);
+
+  assert.equal(outcome.kind, "refused");
+  assert.doesNotMatch(
+    outcome.failure.message,
+    /permanently/i,
+    "a confirmation prompt that misdescribes what it would do is worse than none",
+  );
+  assert.match(outcome.failure.message, /copy|move|another disk/i);
+});
+
+test("a move that trashes its source carries the note that Trash frees nothing yet", async () => {
+  const stored = plan({
+    operation: "move",
+    destination: rawPathFromUtf8("/mnt/archive"),
+    sourceDisposition: "trash",
+  });
+  const { service: apply } = service(stored);
+
+  const outcome = await apply.apply({ planId: stored.id, confirmed: true }, SIGNAL);
+
+  assert.equal(outcome.kind, "applied");
+  assert.ok(
+    outcome.notes.some((note) => /Trash/i.test(note)),
+    `notes were ${JSON.stringify(outcome.notes)}`,
+  );
+});
