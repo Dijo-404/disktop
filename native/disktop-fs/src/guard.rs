@@ -176,6 +176,16 @@ impl Guard {
             ));
         }
         if self
+            .mount_roots
+            .iter()
+            .any(|mount| mount != target && is_within(target, mount))
+        {
+            return Err(Refusal::new(
+                "protected-path",
+                "The target has another filesystem's mount point below it.",
+            ));
+        }
+        if self
             .excluded
             .iter()
             .any(|excluded| is_within(excluded, target))
@@ -631,6 +641,22 @@ mod tests {
         let refusal = Guard::from_parts(None, vec![b"/".to_vec()], &GuardContext::default())
             .expect_err("an unresolvable home is a reading that failed");
         assert_eq!(refusal.code, "protected-path");
+    }
+
+    #[test]
+    fn a_directory_with_a_mount_below_it_is_refused() {
+        let guard = Guard::from_parts(
+            Some(b"/home/example".to_vec()),
+            vec![b"/".to_vec(), b"/home/example/projects/data".to_vec()],
+            &GuardContext::default(),
+        )
+        .unwrap();
+        let refusal = guard
+            .classify(b"/home/example/projects")
+            .expect_err("a tree holding a mount point is not a target");
+        assert_eq!(refusal.code, "protected-path");
+        assert!(guard.classify(b"/home/example/projects-old").is_ok());
+        assert!(guard.classify(b"/home/example/projects/data/cache").is_ok());
     }
 
     #[test]
