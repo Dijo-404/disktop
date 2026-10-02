@@ -114,6 +114,9 @@ export function classifyGenericTarget(target: RawPath, context: ProtectedPathCon
     if (bytesEqual(bytes, pathBytes(mount))) {
       return refuse("protected-path", "The target is a mount root");
     }
+    if (isWithin(bytes, pathBytes(mount))) {
+      return refuse("protected-path", "The target has another filesystem's mount point below it");
+    }
   }
 
   for (const excluded of context.excludedRoots) {
