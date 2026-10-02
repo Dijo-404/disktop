@@ -20,7 +20,7 @@ test("the handshake reports the helper's own version and kernel probe", async ()
   const start = await NativeHelperClient.start();
   assert.equal(start.started, true, `helper did not start: ${JSON.stringify(start.capability ?? {})}`);
   try {
-    assert.deepEqual(start.hello.supportedOperations, ["hello", "probe", "cancel", "scan", "query-index", "hash-candidates", "inspect", "trash", "erase", "empty-trash", "restore", "dedup-hardlink", "copy-move", "compress", "journal-reconcile"]);
+    assert.deepEqual(start.hello.supportedOperations, ["hello", "probe", "cancel", "scan", "query-index", "hash-candidates", "inspect", "trash", "erase", "empty-trash", "restore", "dedup-hardlink", "copy-move", "compress", "manager-begin", "manager-append", "manager-finish", "journal-reconcile"]);
     assert.equal(typeof start.hello.kernelCapabilities.openat2.available, "boolean");
     assert.equal(start.hello.platform, "linux");
     // A locally built helper reports no checksum rather than inventing one.
@@ -37,13 +37,13 @@ test("responses are matched to their own request, even out of order", async () =
   try {
     const [probe, refused] = await Promise.all([
       start.client.request("probe", {}),
-      start.client.request("manager-begin", { path: "L3RtcA==" }),
+      start.client.request("system-prune", { path: "L3RtcA==" }),
     ]);
     assert.equal(probe.event, "complete");
     assert.match(probe.requestId, /^probe-/);
     assert.equal(refused.event, "error");
-    assert.match(refused.requestId, /^manager-begin-/);
-    assert.equal(refused.error.code, "unsupported-operation");
+    assert.match(refused.requestId, /^system-prune-/);
+    assert.equal(refused.error.code, "unknown-operation");
   } finally {
     await start.client.close();
   }

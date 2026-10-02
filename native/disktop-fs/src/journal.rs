@@ -119,6 +119,25 @@ pub struct ItemRecord {
     pub bytes: u64,
 }
 
+pub struct CommandRecord {
+    pub position: u64,
+    pub tool: String,
+    pub arguments: Vec<String>,
+    /// `pending`, `started`, `finished`, or `uncertain` once reconciliation
+    /// finds one that started and never finished.
+    pub state: String,
+    pub exit_code: Option<i64>,
+    pub output: Option<String>,
+}
+
+pub struct ManagerRecord {
+    pub adapter: String,
+    pub action: String,
+    pub privilege: String,
+    pub estimated_bytes: Option<u64>,
+    pub commands: Vec<CommandRecord>,
+}
+
 pub struct ActionRecord {
     pub id: String,
     pub plan_id: String,
@@ -134,6 +153,7 @@ pub struct ActionRecord {
     pub free_bytes_before: Option<u64>,
     pub free_bytes_after: Option<u64>,
     pub items: Vec<ItemRecord>,
+    pub manager: Option<ManagerRecord>,
 }
 
 pub struct AbandonedStaging {
@@ -415,8 +435,14 @@ impl Journal {
                     "Disktop stopped around this operation and cannot tell whether it happened."
                 ],
             )?;
+            self.connection.execute(
+                "UPDATE manager_command SET state = 'uncertain'
+                  WHERE action_id = ?1 AND state = 'started'",
+                params![id],
+            )?;
             let uncertain: i64 = self.connection.query_row(
-                "SELECT count(*) FROM action_item WHERE action_id = ?1 AND outcome = 'uncertain'",
+                "SELECT (SELECT count(*) FROM action_item WHERE action_id = ?1 AND outcome = 'uncertain')
+                      + (SELECT count(*) FROM manager_command WHERE action_id = ?1 AND state = 'uncertain')",
                 params![id],
                 |row| row.get(0),
             )?;
@@ -475,6 +501,7 @@ impl Journal {
             None => Ok(None),
             Some(mut record) => {
                 record.items = self.items(&record.id)?;
+                record.manager = self.manager(&record.id)?;
                 Ok(Some(record))
             }
         }
@@ -502,6 +529,7 @@ impl Journal {
         records.truncate(limit as usize);
         for record in &mut records {
             record.items = self.items(&record.id)?;
+            record.manager = self.manager(&record.id)?;
         }
 
         let next_cursor = match (overflow, records.last()) {
@@ -514,6 +542,163 @@ impl Journal {
             records,
             next_cursor,
         })
+    }
+
+    /// Record a manager action, its commands, and its items, in one transaction.
+    #[allow(clippy::too_many_arguments)]
+    pub fn begin_manager(
+        &self,
+        plan_id: &str,
+        adapter: &str,
+        action: &str,
+        privilege: &str,
+        commands: &[(String, Vec<String>)],
+        items: &[(Vec<u8>, u64)],
+        estimated_bytes: Option<u64>,
+        free_bytes_before: Option<u64>,
+    ) -> rusqlite::Result<String> {
+        self.connection.execute_batch("BEGIN IMMEDIATE")?;
+        let outcome = (|| {
+            let id = self.begin(plan_id, "manager", free_bytes_before)?;
+            self.connection.execute(
+                "INSERT INTO manager_action (action_id, adapter, manager_action, privilege, estimated_bytes)
+                 VALUES (?1, ?2, ?3, ?4, ?5)",
+                params![id, adapter, action, privilege, estimated_bytes.map(clamp)],
+            )?;
+            for (position, (tool, arguments)) in commands.iter().enumerate() {
+                let encoded = serde_json::to_string(arguments)
+                    .map_err(|error| rusqlite::Error::ToSqlConversionFailure(Box::new(error)))?;
+                self.connection.execute(
+                    "INSERT INTO manager_command (action_id, position, tool, arguments, state)
+                     VALUES (?1, ?2, ?3, ?4, 'pending')",
+                    params![id, clamp(position as u64), tool, encoded],
+                )?;
+            }
+            for (position, (path, bytes)) in items.iter().enumerate() {
+                self.connection.execute(
+                    "INSERT INTO action_item (action_id, position, path, outcome, bytes)
+                     VALUES (?1, ?2, ?3, 'in-progress', ?4)",
+                    params![id, clamp(position as u64), path, clamp(*bytes)],
+                )?;
+            }
+            Ok(id)
+        })();
+        match outcome {
+            Ok(id) => {
+                self.connection.execute_batch("COMMIT")?;
+                Ok(id)
+            }
+            Err(error) => {
+                let _ = self.connection.execute_batch("ROLLBACK");
+                Err(error)
+            }
+        }
+    }
+
+    /// Who holds an action open, and what state it is in.
+    pub fn owner(&self, action_id: &str) -> rusqlite::Result<Option<(i64, State)>> {
+        self.connection
+            .query_row(
+                "SELECT owner_pid, state FROM action WHERE id = ?1",
+                params![action_id],
+                |row| {
+                    let state: String = row.get(1)?;
+                    Ok((row.get(0)?, State::parse(&state)))
+                },
+            )
+            .optional()
+    }
+
+    pub fn command_state(
+        &self,
+        action_id: &str,
+        position: u64,
+    ) -> rusqlite::Result<Option<String>> {
+        self.connection
+            .query_row(
+                "SELECT state FROM manager_command WHERE action_id = ?1 AND position = ?2",
+                params![action_id, clamp(position)],
+                |row| row.get(0),
+            )
+            .optional()
+    }
+
+    pub fn set_command(
+        &self,
+        action_id: &str,
+        position: u64,
+        state: &str,
+        exit_code: Option<i64>,
+        output: Option<&str>,
+    ) -> rusqlite::Result<()> {
+        self.connection.execute(
+            "UPDATE manager_command SET state = ?3, exit_code = coalesce(?4, exit_code),
+                    output = coalesce(?5, output)
+              WHERE action_id = ?1 AND position = ?2",
+            params![action_id, clamp(position), state, exit_code, output],
+        )?;
+        Ok(())
+    }
+
+    pub fn add_observed(
+        &self,
+        action_id: &str,
+        position: u64,
+        path: &[u8],
+    ) -> rusqlite::Result<()> {
+        self.connection.execute(
+            "INSERT INTO action_item (action_id, position, path, outcome, bytes)
+             VALUES (?1, ?2, ?3, 'completed', 0)",
+            params![action_id, clamp(position), path],
+        )?;
+        Ok(())
+    }
+
+    pub fn manager(&self, action_id: &str) -> rusqlite::Result<Option<ManagerRecord>> {
+        let header = self
+            .connection
+            .query_row(
+                "SELECT adapter, manager_action, privilege, estimated_bytes FROM manager_action
+                  WHERE action_id = ?1",
+                params![action_id],
+                |row| {
+                    let estimated: Option<i64> = row.get(3)?;
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, String>(2)?,
+                        estimated,
+                    ))
+                },
+            )
+            .optional()?;
+        let Some((adapter, action, privilege, estimated)) = header else {
+            return Ok(None);
+        };
+        let mut statement = self.connection.prepare(
+            "SELECT position, tool, arguments, state, exit_code, output FROM manager_command
+              WHERE action_id = ?1 ORDER BY position",
+        )?;
+        let commands = statement
+            .query_map(params![action_id], |row| {
+                let encoded: String = row.get(2)?;
+                Ok(CommandRecord {
+                    position: unclamp(row.get(0)?),
+                    tool: row.get(1)?,
+                    arguments: serde_json::from_str(&encoded).unwrap_or_default(),
+                    state: row.get(3)?,
+                    exit_code: row.get(4)?,
+                    output: row.get(5)?,
+                })
+            })?
+            .collect::<rusqlite::Result<Vec<CommandRecord>>>()?;
+        Ok(Some(ManagerRecord {
+            adapter,
+            action,
+            privilege,
+            estimated_bytes: estimated.map(unclamp),
+            commands,
+        }))
     }
 
     fn items(&self, action_id: &str) -> rusqlite::Result<Vec<ItemRecord>> {
@@ -566,6 +751,7 @@ fn read_action(row: &rusqlite::Row<'_>) -> rusqlite::Result<ActionRecord> {
         free_bytes_before: before.map(unclamp),
         free_bytes_after: after.map(unclamp),
         items: Vec::new(),
+        manager: None,
     })
 }
 
@@ -604,6 +790,25 @@ CREATE TABLE IF NOT EXISTS action_item (
 );
 
 CREATE INDEX IF NOT EXISTS action_started ON action(started_at DESC, id DESC);
+
+CREATE TABLE IF NOT EXISTS manager_action (
+  action_id TEXT PRIMARY KEY REFERENCES action(id) ON DELETE CASCADE,
+  adapter TEXT NOT NULL,
+  manager_action TEXT NOT NULL,
+  privilege TEXT NOT NULL,
+  estimated_bytes INTEGER
+);
+
+CREATE TABLE IF NOT EXISTS manager_command (
+  action_id TEXT NOT NULL REFERENCES action(id) ON DELETE CASCADE,
+  position INTEGER NOT NULL,
+  tool TEXT NOT NULL,
+  arguments TEXT NOT NULL,
+  state TEXT NOT NULL,
+  exit_code INTEGER,
+  output TEXT,
+  PRIMARY KEY (action_id, position)
+);
 ";
 
 /// Add the columns a journal written by an earlier build does not have.

@@ -1215,7 +1215,6 @@
         "completed",
         "skipped",
         "failed",
-        "selectedBytes",
         "bytesMovedToTrash",
         "undoAvailable",
         "verification"
@@ -1241,7 +1240,8 @@
           "$ref": "#/$defs/decimalInteger"
         },
         "selectedBytes": {
-          "$ref": "#/$defs/decimalInteger"
+          "$ref": "#/$defs/decimalInteger",
+          "description": "What the plan reviewed, or a manager's own estimate; absent only for a manager action whose manager could not say."
         },
         "bytesMovedToTrash": {
           "$ref": "#/$defs/decimalInteger"
@@ -1378,7 +1378,6 @@
         "completed",
         "skipped",
         "failed",
-        "selectedBytes",
         "bytesMovedToTrash",
         "items"
       ],
@@ -1430,8 +1429,115 @@
           "items": {
             "$ref": "#/$defs/journalItem"
           }
+        },
+        "manager": {
+          "description": "What a manager was asked to run, and what became of each command. One that started and never finished reads 'uncertain'.",
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "adapter",
+            "action",
+            "privilege",
+            "commands"
+          ],
+          "properties": {
+            "adapter": {
+              "type": "string",
+              "minLength": 1
+            },
+            "action": {
+              "type": "string",
+              "minLength": 1
+            },
+            "privilege": {
+              "type": "string",
+              "enum": [
+                "user",
+                "root"
+              ]
+            },
+            "estimatedBytes": {
+              "$ref": "#/$defs/decimalInteger"
+            },
+            "commands": {
+              "type": "array",
+              "minItems": 1,
+              "items": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": [
+                  "tool",
+                  "arguments",
+                  "state"
+                ],
+                "properties": {
+                  "tool": {
+                    "type": "string",
+                    "minLength": 1
+                  },
+                  "arguments": {
+                    "type": "array",
+                    "items": {
+                      "type": "string"
+                    }
+                  },
+                  "state": {
+                    "type": "string",
+                    "enum": [
+                      "pending",
+                      "started",
+                      "finished",
+                      "uncertain"
+                    ]
+                  },
+                  "exitCode": {
+                    "$ref": "#/$defs/signedDecimalInteger"
+                  },
+                  "output": {
+                    "type": "string"
+                  }
+                }
+              }
+            }
+          }
         }
-      }
+      },
+      "allOf": [
+        {
+          "if": {
+            "type": "object",
+            "properties": {
+              "operation": {
+                "const": "manager"
+              }
+            },
+            "required": [
+              "operation"
+            ]
+          },
+          "then": {
+            "properties": {
+              "manager": {
+                "type": "object"
+              }
+            },
+            "required": [
+              "manager"
+            ]
+          },
+          "else": {
+            "properties": {
+              "manager": false,
+              "selectedBytes": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "selectedBytes"
+            ]
+          }
+        }
+      ]
     },
     "managerScope": {
       "description": "A bounded manager selection. The commands are derived from the action and its items by a fixed template and are shown so a reviewer sees exactly the argument vectors that will run; none of it is a shell line.",

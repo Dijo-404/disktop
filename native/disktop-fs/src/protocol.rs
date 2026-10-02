@@ -33,7 +33,7 @@ use std::thread::JoinHandle;
 
 const PROTOCOL_VERSION: u16 = 1;
 const MAX_REQUEST_BYTES: usize = 1024 * 1024;
-const SUPPORTED_OPERATIONS: [&str; 15] = [
+const SUPPORTED_OPERATIONS: [&str; 18] = [
     "hello",
     "probe",
     "cancel",
@@ -48,9 +48,11 @@ const SUPPORTED_OPERATIONS: [&str; 15] = [
     "dedup-hardlink",
     "copy-move",
     "compress",
+    "manager-begin",
+    "manager-append",
+    "manager-finish",
     "journal-reconcile",
 ];
-const PLANNED_OPERATIONS: [&str; 3] = ["manager-begin", "manager-append", "manager-finish"];
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -94,6 +96,77 @@ struct TargetArguments {
 struct SubtreeArguments {
     entries: String,
     digest: String,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct ManagerBeginArguments {
+    plan_id: String,
+    journal_directory: String,
+    adapter: String,
+    action: String,
+    privilege: String,
+    commands: Vec<ManagerCommandArguments>,
+    items: Vec<ManagerItemArguments>,
+    #[serde(default)]
+    estimated_bytes: Option<String>,
+    #[serde(default)]
+    free_bytes_before: Option<String>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct ManagerCommandArguments {
+    tool: String,
+    arguments: Vec<String>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct ManagerItemArguments {
+    id: String,
+    #[serde(default)]
+    bytes: Option<String>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct ManagerAppendArguments {
+    journal_directory: String,
+    action_id: String,
+    command: String,
+    phase: String,
+    #[serde(default)]
+    exit_code: Option<String>,
+    #[serde(default)]
+    output: Option<String>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct ManagerFinishArguments {
+    journal_directory: String,
+    action_id: String,
+    items: Vec<ManagerVerdictArguments>,
+    #[serde(default)]
+    observed: Vec<ManagerObservedArguments>,
+    #[serde(default)]
+    free_bytes_after: Option<String>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct ManagerVerdictArguments {
+    position: String,
+    outcome: String,
+    #[serde(default)]
+    message: Option<String>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct ManagerObservedArguments {
+    id: String,
 }
 
 #[derive(Deserialize)]
@@ -463,6 +536,9 @@ fn handle_request(server: &Arc<Server>, line: &[u8]) {
         "compress" => compress(server, responder, request.arguments),
         "restore" => restore(server, responder, request.arguments),
         "journal-reconcile" => journal_reconcile(&responder, request.arguments),
+        "manager-begin" => manager_begin(&responder, request.arguments),
+        "manager-append" => manager_append(&responder, request.arguments),
+        "manager-finish" => manager_finish(&responder, request.arguments),
         "hello" | "probe" if request.arguments.is_empty() => {
             responder.emit("complete", json!({ "result": hello_result() }));
         }
@@ -476,11 +552,6 @@ fn handle_request(server: &Arc<Server>, line: &[u8]) {
         "query-index" => query_index(&responder, request.arguments),
         "hash-candidates" => hash_candidates(server, responder, request.arguments),
         "inspect" => inspect(server, responder, request.arguments),
-        operation if PLANNED_OPERATIONS.contains(&operation) => fail(
-            &responder,
-            "unsupported-operation",
-            "This operation is not implemented in this helper build",
-        ),
         _ => fail(&responder, "unknown-operation", "Unknown helper operation"),
     }
 }
@@ -1267,6 +1338,169 @@ fn restore(server: &Arc<Server>, responder: Responder, arguments: Map<String, Va
     );
 }
 
+fn manager_begin(responder: &Responder, arguments: Map<String, Value>) {
+    let parsed = decode::<ManagerBeginArguments>(arguments).and_then(|arguments| {
+        Ok(crate::manager::BeginRequest {
+            plan_id: arguments.plan_id,
+            journal_directory: decoded_directory(&arguments.journal_directory)?,
+            adapter: arguments.adapter,
+            action: arguments.action,
+            privilege: arguments.privilege,
+            commands: arguments
+                .commands
+                .into_iter()
+                .map(|command| crate::manager::ManagerCommand {
+                    tool: command.tool,
+                    arguments: command.arguments,
+                })
+                .collect(),
+            items: arguments
+                .items
+                .into_iter()
+                .map(|item| {
+                    Ok(crate::manager::ManagerItem {
+                        id: item.id,
+                        bytes: optional_u64(item.bytes.as_deref(), "bytes")?,
+                    })
+                })
+                .collect::<Result<Vec<_>, String>>()?,
+            estimated_bytes: optional_u64(arguments.estimated_bytes.as_deref(), "estimatedBytes")?,
+            free_bytes_before: optional_u64(
+                arguments.free_bytes_before.as_deref(),
+                "freeBytesBefore",
+            )?,
+        })
+    });
+    let request = match parsed {
+        Ok(request) => request,
+        Err(message) => return fail(responder, "invalid-arguments", &message),
+    };
+    match crate::manager::begin(&request) {
+        Ok(action_id) => responder.emit("complete", json!({ "result": { "actionId": action_id } })),
+        Err((code, message)) => fail(responder, code, &message),
+    }
+}
+
+fn manager_append(responder: &Responder, arguments: Map<String, Value>) {
+    let parsed = decode::<ManagerAppendArguments>(arguments).and_then(|arguments| {
+        Ok(crate::manager::AppendRequest {
+            journal_directory: decoded_directory(&arguments.journal_directory)?,
+            action_id: arguments.action_id,
+            command: parse_u64(Some(&arguments.command))
+                .ok_or_else(|| "command must be a decimal position".to_owned())?,
+            phase: match arguments.phase.as_str() {
+                "started" => crate::manager::Phase::Started,
+                "finished" => crate::manager::Phase::Finished,
+                _ => return Err("phase is 'started' or 'finished'".to_owned()),
+            },
+            exit_code: match arguments.exit_code.as_deref() {
+                None => None,
+                Some(text) => Some(
+                    text.parse::<i64>()
+                        .map_err(|_| "exitCode must be a signed decimal integer".to_owned())?,
+                ),
+            },
+            output: arguments.output,
+        })
+    });
+    let request = match parsed {
+        Ok(request) => request,
+        Err(message) => return fail(responder, "invalid-arguments", &message),
+    };
+    match crate::manager::append(&request) {
+        Ok(()) => responder.emit("complete", json!({ "result": { "recorded": true } })),
+        Err((code, message)) => fail(responder, code, &message),
+    }
+}
+
+fn manager_finish(responder: &Responder, arguments: Map<String, Value>) {
+    let parsed = decode::<ManagerFinishArguments>(arguments).and_then(|arguments| {
+        Ok(crate::manager::FinishRequest {
+            journal_directory: decoded_directory(&arguments.journal_directory)?,
+            action_id: arguments.action_id,
+            items: arguments
+                .items
+                .into_iter()
+                .map(|verdict| {
+                    Ok(crate::manager::Verdict {
+                        position: parse_u64(Some(&verdict.position))
+                            .ok_or_else(|| "position must be a decimal integer".to_owned())?,
+                        outcome: match verdict.outcome.as_str() {
+                            "completed" => crate::journal::Outcome::Completed,
+                            "skipped" => crate::journal::Outcome::Skipped,
+                            "failed" => crate::journal::Outcome::Failed,
+                            _ => return Err("outcome is completed, skipped, or failed".to_owned()),
+                        },
+                        message: verdict.message,
+                    })
+                })
+                .collect::<Result<Vec<_>, String>>()?,
+            observed: arguments.observed.into_iter().map(|item| item.id).collect(),
+            free_bytes_after: optional_u64(
+                arguments.free_bytes_after.as_deref(),
+                "freeBytesAfter",
+            )?,
+        })
+    });
+    let request = match parsed {
+        Ok(request) => request,
+        Err(message) => return fail(responder, "invalid-arguments", &message),
+    };
+    match crate::manager::finish(&request) {
+        Ok(summary) => {
+            let mut result = Map::new();
+            result.insert("journalId".to_owned(), summary.journal_id.into());
+            result.insert("state".to_owned(), summary.state.as_str().into());
+            result.insert("completed".to_owned(), summary.completed.to_string().into());
+            result.insert("skipped".to_owned(), summary.skipped.to_string().into());
+            result.insert("failed".to_owned(), summary.failed.to_string().into());
+            if let Some(selected) = summary.selected_bytes {
+                result.insert("selectedBytes".to_owned(), selected.to_string().into());
+            }
+            result.insert("bytesMovedToTrash".to_owned(), "0".into());
+            if let Some(before) = summary.free_bytes_before {
+                result.insert("freeBytesBefore".to_owned(), before.to_string().into());
+            }
+            if let Some(after) = summary.free_bytes_after {
+                result.insert("freeBytesAfter".to_owned(), after.to_string().into());
+            }
+            result.insert("undoAvailable".to_owned(), false.into());
+            responder.emit("complete", json!({ "result": Value::Object(result) }));
+        }
+        Err((code, message)) => fail(responder, code, &message),
+    }
+}
+
+fn manager_record(manager: &journal::ManagerRecord) -> Value {
+    let commands: Vec<Value> = manager
+        .commands
+        .iter()
+        .map(|command| {
+            let mut entry = Map::new();
+            entry.insert("position".to_owned(), command.position.to_string().into());
+            entry.insert("tool".to_owned(), command.tool.clone().into());
+            entry.insert("arguments".to_owned(), json!(command.arguments));
+            entry.insert("state".to_owned(), command.state.clone().into());
+            if let Some(code) = command.exit_code {
+                entry.insert("exitCode".to_owned(), code.to_string().into());
+            }
+            if let Some(output) = &command.output {
+                entry.insert("output".to_owned(), output.clone().into());
+            }
+            Value::Object(entry)
+        })
+        .collect();
+    let mut object = Map::new();
+    object.insert("adapter".to_owned(), manager.adapter.clone().into());
+    object.insert("action".to_owned(), manager.action.clone().into());
+    object.insert("privilege".to_owned(), manager.privilege.clone().into());
+    if let Some(estimated) = manager.estimated_bytes {
+        object.insert("estimatedBytes".to_owned(), estimated.to_string().into());
+    }
+    object.insert("commands".to_owned(), Value::Array(commands));
+    Value::Object(object)
+}
+
 fn inspect(server: &Arc<Server>, responder: Responder, arguments: Map<String, Value>) {
     let arguments: InspectArguments = match decode(arguments) {
         Ok(arguments) => arguments,
@@ -1723,10 +1957,20 @@ pub fn journal_record(record: &journal::ActionRecord) -> Value {
     object.insert("completed".to_owned(), record.completed.to_string().into());
     object.insert("skipped".to_owned(), record.skipped.to_string().into());
     object.insert("failed".to_owned(), record.failed.to_string().into());
-    object.insert(
-        "selectedBytes".to_owned(),
-        record.selected_bytes.to_string().into(),
-    );
+    match &record.manager {
+        None => {
+            object.insert(
+                "selectedBytes".to_owned(),
+                record.selected_bytes.to_string().into(),
+            );
+        }
+        Some(manager) => {
+            if let Some(estimated) = manager.estimated_bytes {
+                object.insert("selectedBytes".to_owned(), estimated.to_string().into());
+            }
+            object.insert("manager".to_owned(), manager_record(manager));
+        }
+    }
     object.insert(
         "bytesMovedToTrash".to_owned(),
         record.trashed_bytes.to_string().into(),
@@ -2110,6 +2354,9 @@ mod tests {
                 "dedup-hardlink",
                 "copy-move",
                 "compress",
+                "manager-begin",
+                "manager-append",
+                "manager-finish",
                 "journal-reconcile"
             ])
         );
@@ -2183,16 +2430,14 @@ mod tests {
         assert_eq!(output[0]["result"]["records"], json!([]));
     }
 
-    /// An operation this build does not implement is refused by name, so a
-    /// client can tell "not here yet" from "never".
     #[test]
-    fn a_planned_operation_is_explicitly_unsupported() {
+    fn an_operation_no_build_has_is_refused_by_name() {
         let output = responses(
-            "{\"protocolVersion\":1,\"requestId\":\"manager-1\",\"operation\":\"manager-begin\",\"arguments\":{}}\n",
+            "{\"protocolVersion\":1,\"requestId\":\"nope-1\",\"operation\":\"system-prune\",\"arguments\":{}}\n",
         );
         assert_eq!(output[0]["event"], "error");
-        assert_eq!(output[0]["requestId"], "manager-1");
-        assert_eq!(output[0]["error"]["code"], "unsupported-operation");
+        assert_eq!(output[0]["requestId"], "nope-1");
+        assert_eq!(output[0]["error"]["code"], "unknown-operation");
     }
 
     #[test]
@@ -2688,6 +2933,112 @@ mod tests {
         assert_eq!(record["items"].as_array().unwrap().len(), 1);
         assert_eq!(record["items"][0]["outcome"], "completed");
         assert!(record["items"][0]["destination"].is_string());
+    }
+
+    // --- Manager actions ---------------------------------------------------------
+
+    #[test]
+    fn a_manager_action_is_journalled_from_intent_to_outcome_in_one_session() {
+        let sandbox = Sandbox::new("manager-protocol");
+        let mut state = sandbox.bytes();
+        state.extend_from_slice(b"/state");
+        let journal = crate::base64::encode(&state);
+        let begin = format!(
+            "{{\"protocolVersion\":1,\"requestId\":\"mb-1\",\"operation\":\"manager-begin\",\
+               \"arguments\":{{\"planId\":\"plan-0123456789abcd\",\"journalDirectory\":\"{journal}\",\
+               \"adapter\":\"apt\",\"action\":\"apt.clean\",\"privilege\":\"root\",\
+               \"commands\":[{{\"tool\":\"apt-get\",\"arguments\":[\"clean\"]}}],\
+               \"items\":[{{\"id\":\"curl_8.5.0-2_amd64.deb\",\"bytes\":\"400000\"}}],\
+               \"estimatedBytes\":\"400000\",\"freeBytesBefore\":\"1000\"}}}}\n"
+        );
+        let events = session(&[begin], |events| terminal(events, "mb-1"));
+        let action_id = completion(&events, "mb-1")["result"]["actionId"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+
+        let append = |id: &str, phase: &str, extra: &str| {
+            format!(
+                "{{\"protocolVersion\":1,\"requestId\":\"{id}\",\"operation\":\"manager-append\",\
+                   \"arguments\":{{\"journalDirectory\":\"{journal}\",\"actionId\":\"{action_id}\",\
+                   \"command\":\"0\",\"phase\":\"{phase}\"{extra}}}}}\n"
+            )
+        };
+        let finish = format!(
+            "{{\"protocolVersion\":1,\"requestId\":\"mf-1\",\"operation\":\"manager-finish\",\
+               \"arguments\":{{\"journalDirectory\":\"{journal}\",\"actionId\":\"{action_id}\",\
+               \"items\":[{{\"position\":\"0\",\"outcome\":\"completed\"}}],\"freeBytesAfter\":\"401000\"}}}}\n"
+        );
+        let _ = action_id;
+        let events = session(
+            &[
+                append("ma-1", "started", ""),
+                append(
+                    "ma-2",
+                    "finished",
+                    ",\"exitCode\":\"0\",\"output\":\"Done\"",
+                ),
+                finish,
+            ],
+            |events| terminal(events, "mf-1"),
+        );
+        assert_eq!(completion(&events, "ma-1")["result"]["recorded"], true);
+        let result = &completion(&events, "mf-1")["result"];
+        assert_eq!(result["state"], "complete");
+        assert_eq!(result["selectedBytes"], "400000");
+        assert_eq!(result["bytesMovedToTrash"], "0");
+        assert_eq!(result["undoAvailable"], false);
+    }
+
+    #[test]
+    fn a_manager_action_another_helper_began_cannot_be_appended_to() {
+        let sandbox = Sandbox::new("manager-protocol-owner");
+        let mut state = sandbox.bytes();
+        state.extend_from_slice(b"/state");
+        let journal = crate::base64::encode(&state);
+        let begin = format!(
+            "{{\"protocolVersion\":1,\"requestId\":\"mb-2\",\"operation\":\"manager-begin\",\
+               \"arguments\":{{\"planId\":\"plan-0123456789abcd\",\"journalDirectory\":\"{journal}\",\
+               \"adapter\":\"docker\",\"action\":\"docker.prune-build-cache\",\"privilege\":\"user\",\
+               \"commands\":[{{\"tool\":\"docker\",\"arguments\":[\"builder\",\"prune\",\"--force\"]}}],\
+               \"items\":[]}}}}\n"
+        );
+        let events = session(&[begin], |events| terminal(events, "mb-2"));
+        let action_id = completion(&events, "mb-2")["result"]["actionId"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        crate::journal::Journal::open(std::path::Path::new(std::ffi::OsStr::from_bytes(&state)))
+            .unwrap()
+            .connection_for_tests()
+            .execute(
+                "UPDATE action SET owner_pid = 1 WHERE id = ?1",
+                [&action_id],
+            )
+            .unwrap();
+        let append = format!(
+            "{{\"protocolVersion\":1,\"requestId\":\"ma-3\",\"operation\":\"manager-append\",\
+               \"arguments\":{{\"journalDirectory\":\"{journal}\",\"actionId\":\"{action_id}\",\
+               \"command\":\"0\",\"phase\":\"started\"}}}}\n"
+        );
+        let events = session(&[append], |events| terminal(events, "ma-3"));
+        assert_eq!(events.last().unwrap()["error"]["code"], "unknown-request");
+    }
+
+    #[test]
+    fn a_manager_begin_naming_a_shell_is_refused() {
+        let sandbox = Sandbox::new("manager-protocol-shell");
+        let mut state = sandbox.bytes();
+        state.extend_from_slice(b"/state");
+        let begin = format!(
+            "{{\"protocolVersion\":1,\"requestId\":\"mb-3\",\"operation\":\"manager-begin\",\
+               \"arguments\":{{\"planId\":\"plan-0123456789abcd\",\"journalDirectory\":\"{}\",\
+               \"adapter\":\"apt\",\"action\":\"apt.clean\",\"privilege\":\"root\",\
+               \"commands\":[{{\"tool\":\"sh\",\"arguments\":[\"-c\",\"true\"]}}],\"items\":[]}}}}\n",
+            crate::base64::encode(&state)
+        );
+        let events = session(&[begin], |events| terminal(events, "mb-3"));
+        assert_eq!(events.last().unwrap()["error"]["code"], "invalid-arguments");
     }
 
     // --- A reviewed directory's contents --------------------------------------

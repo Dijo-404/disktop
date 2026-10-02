@@ -355,7 +355,7 @@ export function encodeActionResult(
     completed: decimalBytes(result.completed),
     skipped: decimalBytes(result.skipped),
     failed: decimalBytes(result.failed),
-    selectedBytes: decimalBytes(result.selectedBytes),
+    ...(result.selectedBytes === undefined ? {} : { selectedBytes: decimalBytes(result.selectedBytes) }),
     bytesMovedToTrash: decimalBytes(result.bytesMovedToTrash),
     ...(result.freeBytesBefore === undefined ? {} : { freeBytesBefore: decimalBytes(result.freeBytesBefore) }),
     ...(result.freeBytesAfter === undefined ? {} : { freeBytesAfter: decimalBytes(result.freeBytesAfter) }),
@@ -386,8 +386,27 @@ export function encodeJournalRecord(record: JournalRecord): Record<string, unkno
     completed: decimalBytes(record.completed),
     skipped: decimalBytes(record.skipped),
     failed: decimalBytes(record.failed),
-    selectedBytes: decimalBytes(record.selectedBytes),
+    ...(record.selectedBytes === undefined ? {} : { selectedBytes: decimalBytes(record.selectedBytes) }),
     bytesMovedToTrash: decimalBytes(record.bytesMovedToTrash),
+    ...(record.manager === undefined
+      ? {}
+      : {
+          manager: {
+            adapter: record.manager.adapter,
+            action: record.manager.action,
+            privilege: record.manager.privilege,
+            ...(record.manager.estimatedBytes === undefined
+              ? {}
+              : { estimatedBytes: decimalBytes(record.manager.estimatedBytes) }),
+            commands: record.manager.commands.map((command) => ({
+              tool: command.tool,
+              arguments: [...command.arguments],
+              state: command.state,
+              ...(command.exitCode === undefined ? {} : { exitCode: command.exitCode.toString(10) }),
+              ...(command.output === undefined ? {} : { output: command.output }),
+            })),
+          },
+        }),
     ...(record.freeBytesBefore === undefined ? {} : { freeBytesBefore: decimalBytes(record.freeBytesBefore) }),
     ...(record.freeBytesAfter === undefined ? {} : { freeBytesAfter: decimalBytes(record.freeBytesAfter) }),
     items: record.items.map((item) => ({

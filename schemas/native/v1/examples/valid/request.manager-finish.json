@@ -1,0 +1,16 @@
+{
+  "protocolVersion": 1,
+  "requestId": "manager-finish-1",
+  "operation": "manager-finish",
+  "arguments": {
+    "journalDirectory": "L2hvbWUvZXhhbXBsZS8ubG9jYWwvc3RhdGUvZGlza3RvcA==",
+    "actionId": "act-1790957024565-9f2c1ab07d4e5610",
+    "items": [
+      {
+        "position": "0",
+        "outcome": "completed"
+      }
+    ],
+    "freeBytesAfter": "52429200000"
+  }
+}

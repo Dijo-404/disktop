@@ -34,6 +34,22 @@ export interface JournalItem {
   readonly bytes: Bytes;
 }
 
+export interface JournalManagerCommand {
+  readonly tool: string;
+  readonly arguments: readonly string[];
+  readonly state: "pending" | "started" | "finished" | "uncertain";
+  readonly exitCode?: bigint;
+  readonly output?: string;
+}
+
+export interface JournalManager {
+  readonly adapter: string;
+  readonly action: string;
+  readonly privilege: "user" | "root";
+  readonly estimatedBytes?: Bytes;
+  readonly commands: readonly JournalManagerCommand[];
+}
+
 export interface JournalRecord {
   readonly id: string;
   readonly planId: string;
@@ -49,11 +65,12 @@ export interface JournalRecord {
   readonly completed: bigint;
   readonly skipped: bigint;
   readonly failed: bigint;
-  readonly selectedBytes: Bytes;
+  readonly selectedBytes?: Bytes;
   readonly bytesMovedToTrash: Bytes;
   readonly freeBytesBefore?: Bytes;
   readonly freeBytesAfter?: Bytes;
   readonly items: readonly JournalItem[];
+  readonly manager?: JournalManager;
 }
 
 export interface JournalPage {
