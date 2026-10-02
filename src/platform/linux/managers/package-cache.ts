@@ -95,7 +95,7 @@ export function createPackageCacheAdapters(ports: PackageCachePorts): readonly M
           items,
           evidence: [
             `${items.length} of ${listing.items.length} cached package(s) are versions that are not installed.`,
-            "pacman makes the final choice and also drops the sync databases of repositories no longer configured.",
+            "pacman makes the final choice of which cached files go.",
           ],
         };
       },

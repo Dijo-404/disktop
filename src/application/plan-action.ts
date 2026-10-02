@@ -18,6 +18,8 @@ import {
 import type { InventoryPort } from "../ports/inventory.js";
 import type { FootprintPort, PathFacts, PathProbe } from "../ports/providers.js";
 import type { InspectOutcome, InspectPort, PlanStore } from "../ports/actions.js";
+import type { ManagerInventoryPort } from "../ports/managers.js";
+import { MANAGER_ACTIONS, isManagerAction, managerScope } from "../domain/managers.js";
 import { CapabilityUnavailable } from "../domain/errors.js";
 import type { FootprintService } from "./footprint.js";
 
@@ -70,6 +72,8 @@ export interface PlanDependencies {
   readonly footprints: FootprintPort;
   readonly store: Pick<PlanStore, "save">;
   readonly inspect: InspectPort;
+  /** Absent where no manager adapter was built; a manager plan is then refused. */
+  readonly managers?: ManagerInventoryPort;
   readonly settings: PlanSettings;
   readonly now: () => Date;
   /**
@@ -104,6 +108,9 @@ const GENERIC_OPERATIONS: readonly ActionOperation[] = [
 export function createPlanService(dependencies: PlanDependencies): PlanService {
   return {
     async plan(request, signal) {
+      if (request.operation === "manager") {
+        return planManager(dependencies, request);
+      }
       if (!GENERIC_OPERATIONS.includes(request.operation)) {
         return refuse("not-implemented", `Disktop cannot plan a '${request.operation}' action yet.`);
       }
@@ -309,6 +316,67 @@ export function createPlanService(dependencies: PlanDependencies): PlanService {
       return { kind: "planned", plan };
     },
   };
+}
+
+const MANAGER_PREFIX = "managers:";
+
+async function planManager(dependencies: PlanDependencies, request: PlanRequest): Promise<PlanOutcome> {
+  if (
+    request.path !== undefined ||
+    request.destination !== undefined ||
+    request.sourceDisposition !== undefined ||
+    request.keepPath !== undefined ||
+    request.replacePath !== undefined
+  ) {
+    return refuse("invalid-input", "A manager plan names a manager finding, not a path, destination, or kept copy.");
+  }
+  const findingId = request.findingId;
+  if (findingId === undefined || !findingId.startsWith(MANAGER_PREFIX)) {
+    return refuse("invalid-input", "A manager plan needs a finding from 'disktop clean' whose id starts with 'managers:'.");
+  }
+  const action = findingId.slice(MANAGER_PREFIX.length);
+  if (!isManagerAction(action)) {
+    return refuse("invalid-plan", `${findingId} is reported for information; Disktop offers no action on it.`);
+  }
+  if (dependencies.managers === undefined) {
+    return refuse("not-implemented", "No manager adapter is available in this build.");
+  }
+  const preview = await dependencies.managers.preview(action, {});
+  if (preview.kind === "refused") {
+    return refuse(preview.capability === undefined ? "invalid-plan" : "unsupported", preview.message);
+  }
+  const proposal = preview.proposal;
+  if (!proposal.offered) {
+    return refuse("invalid-plan", `${proposal.title}: there is nothing here Disktop will offer to remove right now.`);
+  }
+  let scope;
+  try {
+    scope = managerScope({
+      action,
+      items: proposal.items,
+      parameters: proposal.parameters,
+      count: proposal.count,
+      ...(proposal.estimatedBytes === undefined ? {} : { estimatedBytes: proposal.estimatedBytes }),
+      preview: proposal.preview,
+    });
+  } catch (error) {
+    return refuse("invalid-plan", `The manager's selection could not be reviewed: ${String((error as Error).message)}`);
+  }
+  const spec = MANAGER_ACTIONS[action];
+  const plan = buildPlan({
+    operation: "manager",
+    providerId: "managers",
+    findingId,
+    scopeSummary: proposal.title,
+    createdAt: dependencies.now(),
+    expiryMinutes: dependencies.settings.expiryMinutes,
+    entries: [],
+    manager: scope,
+    ...(spec.regenerationCost === undefined ? {} : { regenerationCost: spec.regenerationCost }),
+    warnings: [...spec.warnings, ...proposal.evidence],
+  });
+  await dependencies.store.save(plan);
+  return { kind: "planned", plan };
 }
 
 /**

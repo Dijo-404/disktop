@@ -410,3 +410,10 @@ test("an action this machine cannot carry out says why, without claiming it is a
   assert.match(message, /no apt adapter/);
   assert.doesNotMatch(message, /change files/);
 });
+
+test("a manager finding is planned as a manager action without naming --operation", async () => {
+  const context = actionContext();
+  await runCli(["clean", "plan", "managers:apt.clean", "--json"], context);
+  assert.equal(context.recordedActions.plan.operation, "manager");
+  assert.equal(context.recordedActions.plan.findingId, "managers:apt.clean");
+});

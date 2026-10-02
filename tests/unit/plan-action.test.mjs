@@ -686,3 +686,71 @@ test("emptying Trash records what was in it, so something trashed later is not r
   assert.equal(inspected[0].display, "/home/example/.local/share/Trash");
   assert.ok(outcome.plan.entries[0].subtree);
 });
+
+function managerService(previewOutcome) {
+  const saved = [];
+  const planner = createPlanService({
+    footprint: { async discover() { throw new Error("a manager plan does not rediscover every detector"); } },
+    inventory: { async list() { return { devices: [], filesystems: [{ id: "fs-1", type: "ext4", source: "/dev/sda1", mounts: [rawPathFromUtf8("/")], totalBytes: 1n, freeBytes: 1n, availableBytes: 1n, network: false, removable: false }], warnings: [], capability: { status: "available", explanation: "read" } }; } },
+    paths: { async facts() { return undefined; } },
+    footprints: { async measure() { return { measurements: [], warnings: [] }; } },
+    inspect: { async inspect() { return new Map(); } },
+    managers: { async discover() { return []; }, async preview() { return previewOutcome; } },
+    store: { async save(plan) { saved.push(plan); } },
+    settings: {
+      home: HOME,
+      allowedRoots: [HOME],
+      excludedRoots: [rawPathFromUtf8("/home/example/.local/state/disktop")],
+      trashDirectory: rawPathFromUtf8("/home/example/.local/share/Trash"),
+      expiryMinutes: 60,
+    },
+    now: () => NOW,
+  });
+  return { planner, saved };
+}
+
+const CONTAINER_PROPOSAL = {
+  action: "docker.remove-stopped-containers",
+  title: "Stopped Docker containers",
+  evidence: ["2 container(s) have exited."],
+  items: [{ id: "a".repeat(64) }, { id: "b".repeat(64) }],
+  count: { kind: "exact", value: 2n },
+  bytesBasis: "unknown",
+  preview: "listed",
+  offered: true,
+  parameters: {},
+};
+
+test("a manager finding is planned from a live preview, with its derived commands", async () => {
+  const { planner, saved } = managerService({ kind: "proposal", proposal: CONTAINER_PROPOSAL });
+  const outcome = await planner.plan({ operation: "manager", findingId: "managers:docker.remove-stopped-containers" }, SIGNAL);
+  assert.equal(outcome.kind, "planned");
+  assert.equal(outcome.plan.operation, "manager");
+  assert.equal(outcome.plan.manager.commands.length, 2);
+  assert.equal(outcome.plan.exactItemCount, 2n);
+  assert.equal(outcome.plan.reversibility, "irreversible");
+  assert.equal(saved.length, 1);
+});
+
+test("a finding reported for information cannot be planned", async () => {
+  const { planner, saved } = managerService({ kind: "proposal", proposal: { ...CONTAINER_PROPOSAL, offered: false } });
+  const outcome = await planner.plan({ operation: "manager", findingId: "managers:docker.remove-stopped-containers" }, SIGNAL);
+  assert.equal(outcome.kind, "refused");
+  assert.equal(saved.length, 0);
+  const named = await planner.plan({ operation: "manager", findingId: "managers:docker.named-volumes" }, SIGNAL);
+  assert.equal(named.kind, "refused");
+});
+
+test("a manager plan takes a finding, not a path", async () => {
+  const { planner } = managerService({ kind: "proposal", proposal: CONTAINER_PROPOSAL });
+  const outcome = await planner.plan({ operation: "manager", path: rawPathFromUtf8("/var/cache/apt") }, SIGNAL);
+  assert.equal(outcome.kind, "refused");
+  assert.equal(outcome.failure.code, "invalid-input");
+});
+
+test("a manager the preview cannot reach now is refused with its reason", async () => {
+  const { planner } = managerService({ kind: "refused", message: "docker is not installed.", capability: { status: "missing-tool", explanation: "docker is not installed." } });
+  const outcome = await planner.plan({ operation: "manager", findingId: "managers:docker.remove-stopped-containers" }, SIGNAL);
+  assert.equal(outcome.kind, "refused");
+  assert.match(outcome.failure.message, /not installed/);
+});

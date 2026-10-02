@@ -238,6 +238,7 @@ export function encodeFinding(finding: Finding): Record<string, unknown> {
     evidence: [...finding.evidence],
     paths: finding.paths.map(encodeRawPath),
     ...(finding.managerScope === undefined ? {} : { managerScope: finding.managerScope }),
+    ...(finding.managerAction === undefined ? {} : { managerAction: finding.managerAction }),
     size: encodeFindingSize(finding.size),
     confidence: finding.confidence,
     capability: encodeCapability(finding.capability),

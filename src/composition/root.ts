@@ -1,4 +1,4 @@
-import { homedir } from "node:os";
+import { homedir, release } from "node:os";
 import { join } from "node:path";
 import { createDashboardService, type DashboardService, type DashboardSettings } from "../application/dashboard.js";
 import { createExploreService, type ExploreService } from "../application/explore.js";
@@ -19,6 +19,18 @@ import { createToolPort } from "../platform/linux/tools.js";
 import { createPackageInventory } from "../platform/linux/packages/index.js";
 import { createBuiltInProviders } from "../providers/index.js";
 import { createNativeActions } from "../platform/linux/actions/index.js";
+import { createContainerAdapter } from "../platform/linux/managers/containers.js";
+import { createManagerExecutor } from "../platform/linux/managers/execute.js";
+import { createFlatpakAdapter } from "../platform/linux/managers/flatpak.js";
+import { createManagerInventory } from "../platform/linux/managers/index.js";
+import { createJournaldAdapter } from "../platform/linux/managers/journald.js";
+import { createKernelAdapter } from "../platform/linux/managers/kernels.js";
+import { createPackageCacheAdapters } from "../platform/linux/managers/package-cache.js";
+import { createSnapAdapter } from "../platform/linux/managers/snap.js";
+import { createTmpfilesAdapter } from "../platform/linux/managers/tmpfiles.js";
+import { createCommandRunner } from "../platform/linux/privilege.js";
+import { resolveTrustedExecutable } from "../platform/linux/process.js";
+import type { ActionPort } from "../ports/actions.js";
 import { createNativeScanner } from "../platform/linux/scan/index.js";
 import { NativeHelperClient } from "../native/client.js";
 import type { Accounting } from "../ports/scan.js";
@@ -151,9 +163,35 @@ export async function createServices(options: CompositionOptions = {}): Promise<
     homeTrashDirectory,
     start: () => NativeHelperClient.start(),
   });
+  const installed = async (tool: string): Promise<boolean> => (await resolveTrustedExecutable(tool)) !== undefined;
+  const managerAdapters = [
+    ...createPackageCacheAdapters({ tools, paths: discovery.paths, installed }),
+    createJournaldAdapter({ tools, keepBytes: BigInt(config.managers.journalKeepBytes) }),
+    createSnapAdapter({ tools, paths: discovery.paths }),
+    createFlatpakAdapter({ tools, home: options.homeDirectory ?? homedir() }),
+    createContainerAdapter("docker", { tools }),
+    createContainerAdapter("podman", { tools }),
+    createKernelAdapter({ tools, runningRelease: release, installed }),
+    createTmpfilesAdapter({ tools, installed }),
+  ];
+  const managers = createManagerInventory(managerAdapters);
+  const managerExecutor = createManagerExecutor({
+    adapters: managerAdapters,
+    runner: createCommandRunner(),
+    journalDirectory: locations.stateDirectory,
+    start: () => NativeHelperClient.start(),
+  });
+  const routedActions: ActionPort = {
+    apply: (plan, signal, applyOptions) =>
+      plan.operation === "manager"
+        ? managerExecutor.apply(plan, signal, applyOptions)
+        : actions.apply(plan, signal, applyOptions),
+    restore: (journalId, signal) => actions.restore(journalId, signal),
+  };
+
   const explore = createExploreService(scanner);
   const footprint = createFootprintService(
-    createBuiltInProviders({ packages: createPackageInventory(tools) }),
+    createBuiltInProviders({ packages: createPackageInventory(tools), managers }),
     discovery,
     footprints,
   );
@@ -167,6 +205,7 @@ export async function createServices(options: CompositionOptions = {}): Promise<
       footprints,
       store: planStore,
       inspect: actions,
+      managers,
       settings: {
         home,
         // Home is the scope cleanup acts inside; it is never a target itself,
@@ -187,11 +226,11 @@ export async function createServices(options: CompositionOptions = {}): Promise<
     }),
     apply: createApplyService({
       store: planStore,
-      actions,
+      actions: routedActions,
       now: () => new Date(),
       currentRuleHashes: () => ruleHashes,
     }),
-    undo: createUndoService({ journal: actions, actions }),
+    undo: createUndoService({ journal: actions, actions: routedActions }),
     find: createFindService(explore, createDuplicateService(scanner), inventory),
     scan: createScanService(scanner, {
       crossFilesystems: config.scan.crossFilesystems,
