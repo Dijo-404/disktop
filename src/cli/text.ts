@@ -1,3 +1,4 @@
+import { describeCommand, type ManagerScope } from "../domain/managers.js";
 import type { Alert, Filesystem, IndexedEntry, StorageDevice, Warning } from "../domain/models.js";
 import type { DecidedGroup } from "../application/duplicates.js";
 import type { ScanSummary } from "../application/scan.js";
@@ -315,16 +316,45 @@ function operationVerb(operation: ActionPlan["operation"]): string {
   }
 }
 
+const SHOWN_COMMANDS = 5;
+
+function managerLines(scope: ManagerScope, units: Units): string[] {
+  const lines: string[] = [];
+  const count =
+    scope.count.kind === "unknown"
+      ? "unknown: the manager decides what goes"
+      : `${scope.count.kind === "exact" ? "exactly" : "about"} ${scope.count.value} item(s)`;
+  lines.push(`  Items: ${count}`);
+  lines.push(
+    `  Estimated: ${scope.estimatedBytes === undefined ? "unknown" : formatBytes(scope.estimatedBytes, units)}`,
+  );
+  lines.push(
+    scope.privilege === "root"
+      ? "  Needs: administrator rights, asked for through sudo or pkexec for these commands only"
+      : "  Needs: nothing beyond your own account",
+  );
+  for (const command of scope.commands.slice(0, SHOWN_COMMANDS)) {
+    lines.push(`  Runs: ${describeCommand(command, scope.privilege)}`);
+  }
+  if (scope.commands.length > SHOWN_COMMANDS) {
+    lines.push(`  Runs: and ${scope.commands.length - SHOWN_COMMANDS} more of the same, one per item`);
+  }
+  return lines;
+}
+
 export function planLines(plan: ActionPlan, units: Units): string[] {
   const lines = [
     `Plan ${plan.id}`,
     `  ${operationVerb(plan.operation)}: ${plan.scopeSummary}`,
-    `  Selected: ${formatBytes(plan.selectedBytes, units)}${
-      plan.exactItemCount === undefined ? "" : ` across ${plan.exactItemCount} reviewed item(s)`
-    }`,
+    `  Selected: ${
+      plan.selectedBytes === undefined ? "unknown until the manager runs" : formatBytes(plan.selectedBytes, units)
+    }${plan.exactItemCount === undefined ? "" : ` across ${plan.exactItemCount} reviewed item(s)`}`,
     `  Reversible: ${plan.reversibility === "undo-from-trash" ? "yes, with 'disktop undo'" : "no"}`,
     `  Expires: ${plan.expiresAt}`,
   ];
+  if (plan.manager !== undefined) {
+    lines.push(...managerLines(plan.manager, units));
+  }
   if (plan.keepPath !== undefined) {
     lines.push(`  Keeps: ${plan.keepPath.display}`);
     lines.push("  Every other file listed becomes a second name for that one.");
