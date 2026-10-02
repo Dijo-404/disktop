@@ -70,3 +70,30 @@ test("this host's journal and Flatpak installations are read without changing ei
   const flatpak = await createFlatpakAdapter({ tools: ports.tools, home: process.env.HOME ?? "/" }).discover();
   assert.ok(["available", "missing-tool"].includes(flatpak.capability.status));
 });
+
+test("this host's Docker is read, and no named volume is ever selectable", async (t) => {
+  const { createContainerAdapter } = await import("../../dist/platform/linux/managers/containers.js");
+  const { MANAGER_ACTIONS } = await import("../../dist/domain/managers.js");
+  const discovery = await createContainerAdapter("docker", { tools: (await hostPorts()).tools }).discover();
+  if (discovery.capability.status !== "available") {
+    t.skip(`docker is not usable here: ${discovery.capability.explanation}`);
+    return;
+  }
+  const named = new Set(
+    spawnSync("docker", ["volume", "ls", "--filter", "dangling=true", "--format", "{{.Name}}\t{{.Labels}}"], { encoding: "utf8" })
+      .stdout.split("\n")
+      .filter((line) => line !== "" && !line.includes("com.docker.volume.anonymous="))
+      .map((line) => line.split("\t")[0]),
+  );
+  for (const proposal of discovery.proposals) {
+    const pattern = MANAGER_ACTIONS[proposal.action].itemPattern;
+    for (const item of proposal.items) {
+      assert.match(item.id, pattern);
+      assert.equal(named.has(item.id), false, `${item.id} is a named volume`);
+    }
+  }
+  const reported = discovery.proposals.find((proposal) => proposal.slug === "docker.named-volumes");
+  if (named.size > 0) {
+    assert.equal(reported.offered, false);
+  }
+});

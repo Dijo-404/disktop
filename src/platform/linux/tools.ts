@@ -15,6 +15,12 @@ const DEVICE = /^\/dev\/[A-Za-z0-9][A-Za-z0-9/_.:-]*$/;
  */
 export const ALLOWED_QUERIES: Readonly<Record<string, readonly (readonly QueryWord[])[]>> = {
   btrfs: [["subvolume", "list", "/"]],
+  docker: [
+    ["image", "ls", "--filter", "dangling=true", "--no-trunc", "--format", "{{.ID}}\t{{.Size}}"],
+    ["container", "ls", "--all", "--filter", "status=exited", "--filter", "status=created", "--no-trunc", "--format", "{{.ID}}\t{{.State}}"],
+    ["volume", "ls", "--filter", "dangling=true", "--format", "{{.Name}}\t{{.Labels}}"],
+    ["system", "df", "--format", "{{json .}}"],
+  ],
   "dpkg-query": [["-W", "-f=${Package}\t${Installed-Size}\t${Status}\n"]],
   flatpak: [
     ["list", "--columns=application,size,origin"],
@@ -27,6 +33,11 @@ export const ALLOWED_QUERIES: Readonly<Record<string, readonly (readonly QueryWo
   pacman: [["-Qi"], ["-Q"]],
   pip: [["list", "--format=json"]],
   pip3: [["list", "--format=json"]],
+  podman: [
+    ["image", "ls", "--filter", "dangling=true", "--no-trunc", "--format", "{{.ID}}\t{{.Size}}"],
+    ["container", "ls", "--all", "--filter", "status=exited", "--filter", "status=created", "--no-trunc", "--format", "{{.ID}}\t{{.State}}"],
+    ["volume", "ls", "--filter", "dangling=true", "--format", "{{.Name}}\t{{.Anonymous}}"],
+  ],
   rpm: [["-qa", "--qf", "%{NAME}\t%{SIZE}\n"]],
   smartctl: [["--scan", "-j"], ["-H", "-A", "-j", DEVICE]],
   snap: [["list"], ["list", "--all"]],

@@ -31,6 +31,8 @@ export interface CommandRunner {
 
 export interface ManagerProposal {
   readonly action: ManagerActionId;
+  /** Distinguishes a reported-only proposal from the offered one sharing its action. */
+  readonly slug?: string;
   readonly title: string;
   readonly evidence: readonly string[];
   readonly items: readonly ManagerItem[];
