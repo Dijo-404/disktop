@@ -38,6 +38,8 @@ export interface PlanOptions {
   readonly operation?: string;
   readonly destination?: string;
   readonly source?: string;
+  readonly keepPath?: string;
+  readonly replacePath?: string;
 }
 
 export interface ApplyOptions {
@@ -129,6 +131,12 @@ export async function runPlan(context: CliContext, options: PlanOptions): Promis
           ? {}
           : { destination: rawPathFromUtf8(context.resolvePath(options.destination)) }),
         ...(options.source === undefined ? {} : { sourceDisposition: options.source }),
+        ...(options.keepPath === undefined
+          ? {}
+          : { keepPath: rawPathFromUtf8(context.resolvePath(options.keepPath)) }),
+        ...(options.replacePath === undefined
+          ? {}
+          : { replacePath: rawPathFromUtf8(context.resolvePath(options.replacePath)) }),
       },
       controller.signal,
     );

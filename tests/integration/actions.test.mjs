@@ -10,7 +10,7 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
 import { existsSync, readdirSync } from "node:fs";
-import { mkdir, mkdtemp, readFile, rm, stat, utimes, writeFile } from "node:fs/promises";
+import { chmod, mkdir, mkdtemp, readFile, rm, stat, utimes, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { after, test } from "node:test";
@@ -608,4 +608,161 @@ test("a trash plan refuses a destination rather than ignoring it", async () => {
 
   assert.equal(result.status, 2);
   assert.match(JSON.parse(result.stdout).error.message, /destination/i);
+});
+
+test("a reviewed hardlink replacement makes one inode out of two copies and cannot be undone", async () => {
+  const home = await disktopHome();
+  const tree = await createActionTree(home);
+
+  const planned = envelope(
+    disktop(home, [
+      "clean",
+      "plan",
+      "--path",
+      tree.duplicates.original,
+      "--replace",
+      tree.duplicates.copy,
+      "--operation",
+      "hardlink",
+      "--json",
+    ]),
+    "plan",
+  );
+
+  assert.equal(planned.data.plan.operation, "dedup-hardlink");
+  assert.equal(planned.data.plan.reversibility, "irreversible");
+  assert.equal(planned.data.plan.keepPath.display, tree.duplicates.original);
+  assert.equal(planned.data.plan.entries.length, 2);
+
+  const before = await stat(tree.duplicates.original);
+  const copyBefore = await stat(tree.duplicates.copy);
+  assert.notEqual(before.ino, copyBefore.ino, "the fixture starts as two separate inodes");
+
+  const applied = envelope(
+    disktop(home, ["clean", "apply", planned.data.plan.id, "--yes", "--permanent", "--json"]),
+    "apply",
+  );
+
+  assert.equal(applied.data.result.completed, "1");
+  assert.equal(
+    applied.data.result.bytesMovedToTrash,
+    "0",
+    "nothing went to Trash, so nothing can be put back",
+  );
+  assert.equal(applied.data.result.undoAvailable, false);
+
+  const after = await stat(tree.duplicates.original);
+  const copyAfter = await stat(tree.duplicates.copy);
+  assert.equal(after.ino, copyAfter.ino, "both names now reach one inode");
+  assert.deepEqual(
+    await readFile(tree.duplicates.copy),
+    await readFile(tree.duplicates.original),
+    "the bytes under the replaced name are the bytes that were there",
+  );
+
+  const undone = disktop(home, ["undo", applied.data.result.journalId, "--yes", "--json"]);
+  assert.equal(undone.status, 2, "an irreversible action has nothing to put back");
+});
+
+test("a hardlink replacement refuses two files that do not hold the same bytes", async () => {
+  const home = await disktopHome();
+  const tree = await createActionTree(home);
+  const decoy = join(tree.duplicates.root, "other.bin");
+
+  const planned = envelope(
+    disktop(home, [
+      "clean",
+      "plan",
+      "--path",
+      tree.duplicates.original,
+      "--replace",
+      decoy,
+      "--operation",
+      "hardlink",
+      "--json",
+    ]),
+    "plan",
+  );
+
+  const applied = disktop(home, [
+    "clean",
+    "apply",
+    planned.data.plan.id,
+    "--yes",
+    "--permanent",
+    "--json",
+  ]);
+
+  assert.equal(applied.status, 3, "a refused item makes the action incomplete");
+  const document = JSON.parse(applied.stdout);
+  assert.equal(document.data.result.failed, "1");
+  assert.equal(document.data.result.completed, "0");
+
+  const keep = await stat(tree.duplicates.original);
+  const other = await stat(decoy);
+  assert.notEqual(keep.ino, other.ino, "the file nobody proved identical is untouched");
+  assert.equal((await readFile(decoy)).length, 200_000);
+});
+
+test("a hardlink replacement refuses a file whose permissions differ", async () => {
+  const home = await disktopHome();
+  const tree = await createActionTree(home);
+  await chmod(tree.duplicates.copy, 0o600);
+  await chmod(tree.duplicates.original, 0o644);
+
+  const planned = envelope(
+    disktop(home, [
+      "clean",
+      "plan",
+      "--path",
+      tree.duplicates.original,
+      "--replace",
+      tree.duplicates.copy,
+      "--operation",
+      "hardlink",
+      "--json",
+    ]),
+    "plan",
+  );
+
+  const applied = disktop(home, [
+    "clean",
+    "apply",
+    planned.data.plan.id,
+    "--yes",
+    "--permanent",
+    "--json",
+  ]);
+
+  assert.equal(applied.status, 3);
+  const keep = await stat(tree.duplicates.original);
+  const copy = await stat(tree.duplicates.copy);
+  assert.notEqual(keep.ino, copy.ino);
+});
+
+test("a hardlink plan applied without acknowledging its irreversibility is refused", async () => {
+  const home = await disktopHome();
+  const tree = await createActionTree(home);
+
+  const planned = envelope(
+    disktop(home, [
+      "clean",
+      "plan",
+      "--path",
+      tree.duplicates.original,
+      "--replace",
+      tree.duplicates.copy,
+      "--operation",
+      "hardlink",
+      "--json",
+    ]),
+    "plan",
+  );
+
+  const applied = disktop(home, ["clean", "apply", planned.data.plan.id, "--yes", "--json"]);
+
+  assert.equal(applied.status, 2);
+  const keep = await stat(tree.duplicates.original);
+  const copy = await stat(tree.duplicates.copy);
+  assert.notEqual(keep.ino, copy.ino, "nothing was replaced");
 });

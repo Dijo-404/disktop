@@ -527,3 +527,56 @@ test("a hardlink plan over a group of duplicates fixes every path in it", async 
   assert.equal(outcome.plan.reversibility, "irreversible");
   assert.equal(outcome.plan.destination, undefined);
 });
+
+test("planning a hardlink from two explicit paths keeps the one named by --path", async () => {
+  const { service: planner } = service({ facts: facts({ kind: "file", device: 66306n }) });
+
+  const outcome = await planner.plan(
+    {
+      operation: "dedup-hardlink",
+      path: rawPathFromUtf8("/home/example/a.bin"),
+      replacePath: rawPathFromUtf8("/home/example/b.bin"),
+    },
+    SIGNAL,
+  );
+
+  assert.equal(outcome.kind, "planned");
+  assert.equal(outcome.plan.entries.length, 2);
+  assert.equal(outcome.plan.keepPath.display, "/home/example/a.bin");
+  assert.deepEqual(
+    outcome.plan.entries.map((planned) => planned.path.display),
+    ["/home/example/a.bin", "/home/example/b.bin"],
+  );
+});
+
+test("a hardlink plan that would replace a file with itself is refused", async () => {
+  const { service: planner } = service({ facts: facts({ kind: "file" }) });
+
+  const outcome = await planner.plan(
+    {
+      operation: "dedup-hardlink",
+      path: rawPathFromUtf8("/home/example/a.bin"),
+      replacePath: rawPathFromUtf8("/home/example/a.bin"),
+    },
+    SIGNAL,
+  );
+
+  assert.equal(outcome.kind, "refused");
+  assert.equal(outcome.failure.code, "invalid-input");
+});
+
+test("--replace on an operation that keeps nothing is refused", async () => {
+  const { service: planner } = service({ facts: facts({ kind: "file" }) });
+
+  const outcome = await planner.plan(
+    {
+      operation: "trash",
+      path: rawPathFromUtf8("/home/example/a.bin"),
+      replacePath: rawPathFromUtf8("/home/example/b.bin"),
+    },
+    SIGNAL,
+  );
+
+  assert.equal(outcome.kind, "refused");
+  assert.equal(outcome.failure.code, "invalid-input");
+});

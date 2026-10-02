@@ -309,6 +309,10 @@ export function planLines(plan: ActionPlan, units: Units): string[] {
     `  Reversible: ${plan.reversibility === "undo-from-trash" ? "yes, with 'disktop undo'" : "no"}`,
     `  Expires: ${plan.expiresAt}`,
   ];
+  if (plan.keepPath !== undefined) {
+    lines.push(`  Keeps: ${plan.keepPath.display}`);
+    lines.push("  Every other file listed becomes a second name for that one.");
+  }
   if (plan.destination !== undefined) {
     lines.push(`  Publishes into: ${plan.destination.display}`);
   }

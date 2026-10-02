@@ -133,6 +133,15 @@ definition. `/mnt/archive` is a legitimate destination and an illegitimate targe
 still applies is everything that says "not yours to write into": the protected system
 roots, the shared container roots themselves, and Trash and Disktop's own state.
 
+`--operation hardlink` replaces one copy of a file with a second name for another copy,
+freeing the replaced copy's bytes. It is irreversible, so it needs `--permanent` at apply
+time like any other irreversible plan. From an explicit path it takes a pair: `--path` is
+the copy that survives and `--replace PATH` is the copy that becomes a name for it. The
+plan records which one is kept rather than leaving it to the order of its entries. Before
+anything is linked, the helper reads both files in full and refuses unless they hold
+exactly the same bytes, and refuses again if their owner, group, or permissions differ —
+one inode has one set of those, and linking would silently change the replaced file's.
+
 `--source permanent` makes the whole plan irreversible and carries the warning that
 says so, because publishing a copy and then releasing the original's bytes is a
 permanent removal with an extra step.

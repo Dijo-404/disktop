@@ -967,6 +967,10 @@
             "trash",
             "permanent"
           ]
+        },
+        "keepPath": {
+          "description": "The copy a hardlink replacement keeps. Always one of this plan's own entries, and present for exactly that operation. It is named rather than inferred from entry order because the operation is irreversible.",
+          "$ref": "#/$defs/rawPath"
         }
       },
       "allOf": [
@@ -1047,6 +1051,35 @@
               "reversibility": {
                 "const": "irreversible"
               }
+            }
+          }
+        },
+        {
+          "description": "A hardlink replacement names the copy it keeps; no other operation keeps anything.",
+          "if": {
+            "type": "object",
+            "properties": {
+              "operation": {
+                "const": "dedup-hardlink"
+              }
+            },
+            "required": [
+              "operation"
+            ]
+          },
+          "then": {
+            "properties": {
+              "keepPath": {
+                "type": "object"
+              }
+            },
+            "required": [
+              "keepPath"
+            ]
+          },
+          "else": {
+            "properties": {
+              "keepPath": false
             }
           }
         }

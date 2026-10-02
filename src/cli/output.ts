@@ -302,6 +302,7 @@ export function encodeActionPlan(plan: ActionPlan): Record<string, unknown> {
     ...(plan.sourceDisposition === undefined
       ? {}
       : { sourceDisposition: plan.sourceDisposition }),
+    ...(plan.keepPath === undefined ? {} : { keepPath: encodeRawPath(plan.keepPath) }),
     warnings: [...plan.warnings],
   };
 }

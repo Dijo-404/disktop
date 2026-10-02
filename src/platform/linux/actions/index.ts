@@ -71,7 +71,9 @@ export function createNativeActions(options: NativeActionOptions): ActionPort & 
       const operation = helperOperation(plan);
       const result = await run(
         operation,
-        operation === "empty-trash"
+        operation === "dedup-hardlink"
+          ? hardlinkArguments(plan, journalDirectory)
+          : operation === "empty-trash"
           ? {
               planId: plan.id,
               journalDirectory,
@@ -148,12 +150,38 @@ function helperOperation(plan: ActionPlan): string {
       return "erase";
     case "empty-trash":
       return "empty-trash";
+    case "dedup-hardlink":
+      return "dedup-hardlink";
     default:
       throw new CapabilityUnavailable({
         status: "unsupported-kernel",
         explanation: `Disktop cannot carry out a '${plan.operation}' plan yet.`,
       });
   }
+}
+
+/**
+ * The kept copy and the ones that become names for it.
+ *
+ * `keepPath` is one of the plan's own entries, so the fingerprint the helper
+ * revalidates it against is the one that was reviewed rather than one this
+ * adapter made up on the way past.
+ */
+function hardlinkArguments(
+  plan: ActionPlan,
+  journalDirectory: string,
+): Record<string, unknown> {
+  const entries = plan.entries ?? [];
+  const keep = entries.find((entry) => entry.path.bytesBase64 === plan.keepPath?.bytesBase64);
+  if (keep === undefined) {
+    throw new Error("A hardlink plan reached apply without the copy it keeps among its entries");
+  }
+  return {
+    planId: plan.id,
+    journalDirectory,
+    keep: encodeTarget(keep),
+    targets: entries.filter((entry) => entry !== keep).map(encodeTarget),
+  };
 }
 
 function encodeTarget(entry: PlannedEntry): Record<string, unknown> {

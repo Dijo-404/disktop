@@ -248,6 +248,26 @@
           }
         }
       }
+    },
+    {
+      "if": {
+        "type": "object",
+        "properties": {
+          "operation": {
+            "const": "dedup-hardlink"
+          }
+        },
+        "required": [
+          "operation"
+        ]
+      },
+      "then": {
+        "properties": {
+          "arguments": {
+            "$ref": "#/$defs/dedupHardlinkArguments"
+          }
+        }
+      }
     }
   ],
   "$defs": {
@@ -503,6 +523,36 @@
           "type": "integer",
           "minimum": 2,
           "maximum": 1000
+        }
+      }
+    },
+    "dedupHardlinkArguments": {
+      "description": "Replace every reviewed duplicate with a link to one kept file. The kept file is validated once before any item, because it is what every target becomes; a kept file that is not what the plan reviewed makes the whole request wrong rather than one item of it. The helper byte-compares each target against it immediately before linking, whatever digest grouped them.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "planId",
+        "journalDirectory",
+        "keep",
+        "targets"
+      ],
+      "properties": {
+        "planId": {
+          "$ref": "common.json#/$defs/planId"
+        },
+        "journalDirectory": {
+          "$ref": "common.json#/$defs/pathBytes"
+        },
+        "keep": {
+          "description": "The copy that survives. It may not also appear in `targets`.",
+          "$ref": "common.json#/$defs/mutationTarget"
+        },
+        "targets": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "$ref": "common.json#/$defs/mutationTarget"
+          }
         }
       }
     }
