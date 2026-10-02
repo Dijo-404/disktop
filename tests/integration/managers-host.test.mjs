@@ -55,3 +55,18 @@ test("pacman's cache on this host is read, and every offered item is a name Disk
     }
   }
 });
+
+test("this host's journal and Flatpak installations are read without changing either", async (t) => {
+  const { createJournaldAdapter } = await import("../../dist/platform/linux/managers/journald.js");
+  const { createFlatpakAdapter } = await import("../../dist/platform/linux/managers/flatpak.js");
+  const ports = await hostPorts();
+  const journal = await createJournaldAdapter({ tools: ports.tools, keepBytes: 536_870_912n }).discover();
+  if (journal.capability.status === "missing-tool") {
+    t.skip("journalctl is not installed here");
+  } else {
+    assert.equal(journal.capability.status, "available");
+    assert.equal(journal.proposals[0].bytesBasis, "manager-reported");
+  }
+  const flatpak = await createFlatpakAdapter({ tools: ports.tools, home: process.env.HOME ?? "/" }).discover();
+  assert.ok(["available", "missing-tool"].includes(flatpak.capability.status));
+});

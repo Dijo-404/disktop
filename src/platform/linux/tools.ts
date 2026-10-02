@@ -16,7 +16,11 @@ const DEVICE = /^\/dev\/[A-Za-z0-9][A-Za-z0-9/_.:-]*$/;
 export const ALLOWED_QUERIES: Readonly<Record<string, readonly (readonly QueryWord[])[]>> = {
   btrfs: [["subvolume", "list", "/"]],
   "dpkg-query": [["-W", "-f=${Package}\t${Installed-Size}\t${Status}\n"]],
-  flatpak: [["list", "--columns=application,size,origin"]],
+  flatpak: [
+    ["list", "--columns=application,size,origin"],
+    ["list", "--user", "--columns=ref"],
+    ["list", "--system", "--columns=ref"],
+  ],
   journalctl: [["--disk-usage"]],
   lsof: [["-v"], ["+L1", "-F", "pcnsk"]],
   npm: [["ls", "-g", "--depth=0", "--json"]],
@@ -25,7 +29,7 @@ export const ALLOWED_QUERIES: Readonly<Record<string, readonly (readonly QueryWo
   pip3: [["list", "--format=json"]],
   rpm: [["-qa", "--qf", "%{NAME}\t%{SIZE}\n"]],
   smartctl: [["--scan", "-j"], ["-H", "-A", "-j", DEVICE]],
-  snap: [["list"]],
+  snap: [["list"], ["list", "--all"]],
   zfs: [["list", "-H", "-p", "-t", "snapshot", "-o", "name,used"]],
 };
 
