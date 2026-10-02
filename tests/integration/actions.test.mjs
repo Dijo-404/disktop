@@ -1234,3 +1234,57 @@ test("history marks a compress that trashed its source as undoable, and a perman
   );
   assert.equal(undoable.length, 1, "only the one that trashed its source left anything to put back");
 });
+
+test("a directory something was added to below its top level since review is skipped, not moved", async () => {
+  const home = await disktopHome();
+  const tree = await createActionTree(home);
+  const nested = join(tree.cache, "nested");
+  await mkdir(nested, { recursive: true });
+  await writeFile(join(nested, "old.bin"), "old");
+
+  const plan = envelope(disktop(home, ["clean", "plan", "--path", tree.cache, "--json"]), "plan");
+  assert.ok(plan.data.plan.entries[0].subtree, "a reviewed directory records what was inside it");
+  await writeFile(join(nested, "new.bin"), "arrived after review");
+
+  const applied = disktop(home, ["clean", "apply", plan.data.plan.id, "--yes", "--json"]);
+  const result = envelope(applied, "apply");
+  assert.equal(applied.status, 3);
+  assert.equal(result.data.result.skipped, "1");
+  assert.equal(existsSync(join(nested, "new.bin")), true, "the directory and what arrived in it stay where they were");
+});
+
+test("a directory with a bind mount inside it is refused at planning time", async () => {
+  const home = await disktopHome();
+  const tree = await createActionTree(home);
+  const inner = join(tree.cache, "mounted");
+  const source = join(home, "elsewhere");
+  await mkdir(source, { recursive: true });
+  const env = {
+    ...process.env,
+    NO_COLOR: "1",
+    HOME: home,
+    XDG_CONFIG_HOME: join(home, "config"),
+    XDG_DATA_HOME: join(home, "data"),
+    XDG_CACHE_HOME: join(home, "cache"),
+    XDG_STATE_HOME: join(home, "state"),
+  };
+  const run = spawnSync(
+    "unshare",
+    [
+      "--mount",
+      "--map-root-user",
+      "sh",
+      "-c",
+      `mkdir -p '${inner}' && mount --bind '${source}' '${inner}' && node dist/bin/disktop.js clean plan --path '${tree.cache}' --json`,
+    ],
+    { encoding: "utf8", env },
+  );
+  if (run.error !== undefined || run.status === null || run.stdout.trim() === "") {
+    process.stderr.write("skipped: this host cannot create a private mount namespace\n");
+    return;
+  }
+  const refused = JSON.parse(run.stdout);
+  assert.equal(refused.status, "error");
+  assert.equal(refused.error.code, "protected-path");
+  assert.equal(existsSync(tree.cache), true);
+});

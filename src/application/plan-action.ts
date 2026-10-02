@@ -17,7 +17,8 @@ import {
 } from "../domain/protected-paths.js";
 import type { InventoryPort } from "../ports/inventory.js";
 import type { FootprintPort, PathFacts, PathProbe } from "../ports/providers.js";
-import type { PlanStore } from "../ports/actions.js";
+import type { InspectOutcome, InspectPort, PlanStore } from "../ports/actions.js";
+import { CapabilityUnavailable } from "../domain/errors.js";
 import type { FootprintService } from "./footprint.js";
 
 export interface PlanRequest {
@@ -68,6 +69,7 @@ export interface PlanDependencies {
   /** Measures a directory's whole subtree, which one stat cannot. */
   readonly footprints: FootprintPort;
   readonly store: Pick<PlanStore, "save">;
+  readonly inspect: InspectPort;
   readonly settings: PlanSettings;
   readonly now: () => Date;
   /**
@@ -254,6 +256,12 @@ export function createPlanService(dependencies: PlanDependencies): PlanService {
         }
         entries.push(toEntry(path, facts, measured.get(path.bytesBase64)));
       }
+
+      const reviewed = await withSubtrees(dependencies, entries, signal);
+      if ("failure" in reviewed) {
+        return { kind: "refused", failure: reviewed.failure };
+      }
+      entries.splice(0, entries.length, ...reviewed.entries);
 
       if (
         request.operation === "dedup-hardlink" &&
@@ -522,6 +530,58 @@ function toEntry(path: RawPath, facts: PathFacts, measuredBytes: bigint | undefi
     // subtree; one stat would only describe its own inode.
     reviewedBytes: measuredBytes ?? facts.allocatedBytes,
   };
+}
+
+const INSPECT_FAILURES: Readonly<Record<string, OperationFailure["code"]>> = {
+  "protected-path": "protected-path",
+  "permission-denied": "permission-denied",
+  "changed-target": "changed-target",
+  cancelled: "cancelled",
+};
+
+async function withSubtrees(
+  dependencies: PlanDependencies,
+  entries: readonly PlannedEntry[],
+  signal: AbortSignal,
+): Promise<{ readonly entries: readonly PlannedEntry[] } | { readonly failure: OperationFailure }> {
+  const directories = entries.filter((entry) => entry.expected.kind === "directory");
+  if (directories.length === 0) {
+    return { entries };
+  }
+  let answers: ReadonlyMap<string, InspectOutcome>;
+  try {
+    answers = await dependencies.inspect.inspect(
+      directories.map((entry) => entry.path),
+      signal,
+    );
+  } catch (error) {
+    const explanation =
+      error instanceof CapabilityUnavailable ? error.capability.explanation : String(error);
+    return {
+      failure: failure(
+        "unsupported",
+        `What is inside a directory could not be recorded, so it was not planned: ${explanation}`,
+      ),
+    };
+  }
+  const reviewed: PlannedEntry[] = [];
+  for (const entry of entries) {
+    if (entry.expected.kind !== "directory") {
+      reviewed.push(entry);
+      continue;
+    }
+    const answer = answers.get(entry.path.bytesBase64);
+    if (answer === undefined || answer.kind === "refused") {
+      return {
+        failure: failure(
+          answer === undefined ? "internal-error" : (INSPECT_FAILURES[answer.code] ?? "invalid-plan"),
+          `${entry.path.display} cannot be reviewed: ${answer === undefined ? "the helper did not answer for it" : answer.message}`,
+        ),
+      };
+    }
+    reviewed.push({ ...entry, subtree: answer.subtree });
+  }
+  return { entries: reviewed };
 }
 
 function scopeSummary(entries: readonly PlannedEntry[]): string {

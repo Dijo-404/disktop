@@ -294,6 +294,9 @@ export function encodeActionPlan(plan: ActionPlan): Record<string, unknown> {
               modifiedNanoseconds: decimalBytes(entry.expected.modifiedNanoseconds),
             },
             reviewedBytes: decimalBytes(entry.reviewedBytes),
+            ...(entry.subtree === undefined
+              ? {}
+              : { subtree: { entries: decimalBytes(entry.subtree.entries), digest: entry.subtree.digest } }),
           })),
         }),
     ...(plan.managerScope === undefined ? {} : { managerScope: plan.managerScope }),

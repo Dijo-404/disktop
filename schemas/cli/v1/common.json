@@ -872,7 +872,54 @@
         "reviewedBytes": {
           "description": "Blocks this entry occupied when the plan was made. The result reports this number back, partitioned by what became of the entry.",
           "$ref": "#/$defs/decimalInteger"
+        },
+        "subtree": {
+          "description": "What a reviewed directory held: every entry below it, digested. The helper digests it again immediately before the directory is moved or removed and skips the item when anything inside changed.",
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "entries",
+            "digest"
+          ],
+          "properties": {
+            "entries": {
+              "$ref": "#/$defs/decimalInteger"
+            },
+            "digest": {
+              "type": "string",
+              "pattern": "^[0-9a-f]{64}$"
+            }
+          }
         }
+      },
+      "if": {
+        "type": "object",
+        "properties": {
+          "expected": {
+            "type": "object",
+            "properties": {
+              "kind": {
+                "const": "directory"
+              }
+            },
+            "required": [
+              "kind"
+            ]
+          }
+        },
+        "required": [
+          "expected"
+        ]
+      },
+      "then": {
+        "properties": {
+          "subtree": {
+            "type": "object"
+          }
+        },
+        "required": [
+          "subtree"
+        ]
       }
     },
     "actionPlan": {

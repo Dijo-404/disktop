@@ -281,3 +281,20 @@ for (const [name, edit] of Object.entries(TAMPERINGS)) {
     assert.equal(await tamper(edit), undefined);
   });
 }
+
+test("a reviewed directory's subtree survives being stored", async () => {
+  const store = createPlanStore(await sandbox());
+  const base = plan();
+  const saved = { ...base, entries: [{ ...base.entries[0], subtree: { entries: 12n, digest: "0f".repeat(32) } }] };
+  await store.save(saved);
+  assert.deepEqual(await store.get(saved.id), saved);
+});
+
+test("a stored subtree whose digest is not a digest is not read", async () => {
+  assert.equal(
+    await tamper((document) => {
+      document.entries[0].subtree = { entries: "1", digest: "not-hex" };
+    }),
+    undefined,
+  );
+});

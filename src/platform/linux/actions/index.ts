@@ -13,6 +13,8 @@ import {
 import type {
   ActionJournalPort,
   ActionPort,
+  InspectOutcome,
+  InspectPort,
   JournalItem,
   JournalPage,
   JournalRecord,
@@ -38,7 +40,9 @@ const PAGE_SIZE = 50;
  * a redundancy in it. One helper is started per operation and shut down after
  * it, so nothing is left running between commands.
  */
-export function createNativeActions(options: NativeActionOptions): ActionPort & ActionJournalPort {
+export function createNativeActions(
+  options: NativeActionOptions,
+): ActionPort & ActionJournalPort & InspectPort {
   const journalDirectory = rawPathFromUtf8(options.journalDirectory).bytesBase64;
   const homeTrashDirectory = rawPathFromUtf8(options.homeTrashDirectory).bytesBase64;
 
@@ -91,7 +95,10 @@ export function createNativeActions(options: NativeActionOptions): ActionPort & 
               // The helper recognises this user's own Trash from this rather
               // than taking Node's word for which directories it may empty.
               homeTrashDirectory,
-              trashDirectories: (plan.entries ?? []).map((entry) => entry.path.bytesBase64),
+              trashDirectories: (plan.entries ?? []).map((entry) => ({
+                path: entry.path.bytesBase64,
+                subtree: encodeSubtree(entry),
+              })),
             }
           : {
               planId: plan.id,
@@ -103,6 +110,27 @@ export function createNativeActions(options: NativeActionOptions): ActionPort & 
         signal,
       );
       return { ...result, planId: plan.id };
+    },
+
+    async inspect(paths, signal) {
+      const client = await connect(options.start);
+      try {
+        let terminal: HelperEvent | undefined;
+        for await (const event of client.stream(
+          "inspect",
+          { paths: paths.map((path) => path.bytesBase64) },
+          signal,
+        )) {
+          terminal = event;
+        }
+        if (terminal === undefined) {
+          throw new Error("The helper closed before it said what the directories hold.");
+        }
+        refuseError(terminal, client);
+        return parseInspection(terminal.result);
+      } finally {
+        await client.close();
+      }
     },
 
     async restore(journalId, signal) {
@@ -231,7 +259,47 @@ function encodeTarget(entry: PlannedEntry): Record<string, unknown> {
       modifiedNanoseconds: entry.expected.modifiedNanoseconds.toString(10),
     },
     reviewedBytes: entry.reviewedBytes.toString(10),
+    ...(entry.subtree === undefined
+      ? {}
+      : { subtree: { entries: entry.subtree.entries.toString(10), digest: entry.subtree.digest } }),
   };
+}
+
+function encodeSubtree(entry: PlannedEntry): { readonly entries: string; readonly digest: string } {
+  if (entry.subtree === undefined) {
+    throw new Error(`${entry.path.display} reached apply without what it held at review`);
+  }
+  return { entries: entry.subtree.entries.toString(10), digest: entry.subtree.digest };
+}
+
+function parseInspection(result: unknown): ReadonlyMap<string, InspectOutcome> {
+  const paths = (result as { paths?: unknown } | undefined)?.paths;
+  if (!Array.isArray(paths)) {
+    throw new Error("The helper's inspection named no paths.");
+  }
+  const answers = new Map<string, InspectOutcome>();
+  for (const answer of paths as Record<string, unknown>[]) {
+    const path = answer["path"];
+    if (typeof path !== "string") {
+      throw new Error("The helper's inspection named a path it did not encode.");
+    }
+    const subtree = answer["subtree"] as { entries?: unknown; digest?: unknown } | undefined;
+    const refusal = answer["refusal"] as { code?: unknown; message?: unknown } | undefined;
+    if (
+      subtree !== undefined &&
+      typeof subtree.entries === "string" &&
+      /^[0-9]{1,20}$/.test(subtree.entries) &&
+      typeof subtree.digest === "string" &&
+      /^[0-9a-f]{64}$/.test(subtree.digest)
+    ) {
+      answers.set(path, { kind: "inspected", subtree: { entries: BigInt(subtree.entries), digest: subtree.digest } });
+    } else if (refusal !== undefined && typeof refusal.code === "string" && typeof refusal.message === "string") {
+      answers.set(path, { kind: "refused", code: refusal.code, message: sanitizeText(refusal.message) });
+    } else {
+      throw new Error("The helper answered an inspection in a shape Disktop does not recognise.");
+    }
+  }
+  return answers;
 }
 
 /**
