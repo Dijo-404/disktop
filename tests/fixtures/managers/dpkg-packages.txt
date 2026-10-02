@@ -1,0 +1,13 @@
+bash	install ok installed	7164
+linux-image-6.8.0-40-generic	install ok installed	14660
+linux-modules-6.8.0-40-generic	install ok installed	91344
+linux-headers-6.8.0-40-generic	install ok installed	24412
+linux-headers-6.8.0-40	install ok installed	79968
+linux-image-6.8.0-45-generic	install ok installed	14660
+linux-modules-6.8.0-45-generic	install ok installed	91360
+linux-headers-6.8.0-45-generic	install ok installed	24412
+linux-headers-6.8.0-45	install ok installed	79968
+linux-image-6.8.0-47-generic	install ok installed	14660
+linux-modules-6.8.0-47-generic	install ok installed	91360
+linux-image-6.8.0-31-generic	deinstall ok config-files	14660
+linux-image-generic	install ok installed	12

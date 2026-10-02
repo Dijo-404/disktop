@@ -1,0 +1,12 @@
+NOTE: This is only a simulation!
+      apt-get needs root privileges for real execution.
+Reading package lists...
+Building dependency tree...
+Reading state information...
+The following packages will be REMOVED:
+  linux-headers-6.8.0-40* linux-headers-6.8.0-40-generic* linux-image-6.8.0-40-generic* linux-modules-6.8.0-40-generic*
+0 upgraded, 0 newly installed, 4 to remove and 0 not upgraded.
+Purg linux-headers-6.8.0-40-generic [6.8.0-40.40]
+Purg linux-headers-6.8.0-40 [6.8.0-40.40]
+Purg linux-modules-6.8.0-40-generic [6.8.0-40.40]
+Purg linux-image-6.8.0-40-generic [6.8.0-40.40]
