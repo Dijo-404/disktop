@@ -1,0 +1,4 @@
+Failed to open directory /etc/credstore: Permission denied
+Would remove "/var/lib/systemd/coredump/core.python3.1000.0123456789abcdef0123456789abcdef.46054.1789722030000000.zst"
+Would remove "/var/crash/_usr_bin_example.1000.crash"
+Would restore access and modification time on "/var/lib/systemd/coredump": Fri 2026-10-02 22:12:18.112335 IST, Thu 2026-10-01 09:49:40.388682 IST

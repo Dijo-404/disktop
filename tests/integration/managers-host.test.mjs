@@ -112,3 +112,18 @@ test("this host's kernels are judged by its own package manager, and the running
     assert.ok(discovery.capability.explanation.length > 0);
   }
 });
+
+test("this host's tmpfiles policies are previewed by dry run and nothing is cleaned", async (t) => {
+  const { createTmpfilesAdapter } = await import("../../dist/platform/linux/managers/tmpfiles.js");
+  const ports = await hostPorts();
+  const discovery = await createTmpfilesAdapter(ports).discover();
+  if (discovery.capability.status === "missing-tool") {
+    t.skip("systemd-tmpfiles is not installed here");
+    return;
+  }
+  assert.equal(discovery.proposals.length, 3);
+  for (const proposal of discovery.proposals) {
+    assert.ok(["simulated", "none"].includes(proposal.preview));
+    assert.deepEqual(proposal.items, []);
+  }
+});

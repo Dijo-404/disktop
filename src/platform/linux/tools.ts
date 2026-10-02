@@ -53,6 +53,11 @@ export const ALLOWED_QUERIES: Readonly<Record<string, readonly (readonly QueryWo
   ],
   smartctl: [["--scan", "-j"], ["-H", "-A", "-j", DEVICE]],
   snap: [["list"], ["list", "--all"]],
+  "systemd-tmpfiles": [
+    ["--user", "--clean", "--dry-run"],
+    ["--clean", "--dry-run"],
+    ["--clean", "--dry-run", "--prefix=/var/crash", "--prefix=/var/lib/systemd/coredump"],
+  ],
   zfs: [["list", "-H", "-p", "-t", "snapshot", "-o", "name,used"]],
 };
 
