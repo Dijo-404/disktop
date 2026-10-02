@@ -355,3 +355,54 @@ test("emptying Trash names each Trash directory with what it held at review", as
     { path: trash.bytesBase64, subtree: { entries: "2", digest: "d".repeat(64) } },
   ]);
 });
+
+test("a manager record decodes with its commands, and an unknown estimate stays absent", async () => {
+  const helper = fakeHelper([
+    {
+      protocolVersion: 1,
+      requestId: "journal-reconcile-1",
+      eventId: "1",
+      event: "complete",
+      result: {
+        reconciled: "1",
+        records: [
+          {
+            id: "act-1790957024565-9f2c1ab07d4e5610",
+            planId: "plan-20261002090000000-7c1d2e3f",
+            operation: "manager",
+            startedAtMilliseconds: "1790957024565",
+            state: "uncertain",
+            completed: "0",
+            skipped: "0",
+            failed: "0",
+            bytesMovedToTrash: "0",
+            manager: {
+              adapter: "journald",
+              action: "journald.vacuum",
+              privilege: "root",
+              commands: [
+                { position: "0", tool: "journalctl", arguments: ["--vacuum-size=536870912"], state: "uncertain", output: "bad\u001b[2J" },
+              ],
+            },
+            items: [],
+          },
+        ],
+      },
+    },
+  ]);
+  const actions = createNativeActions({ journalDirectory: JOURNAL_DIRECTORY, homeTrashDirectory: HOME_TRASH_DIRECTORY, start: helper.start });
+  const [record] = (await actions.list()).records;
+  assert.equal(record.selectedBytes, undefined);
+  assert.equal(record.manager.action, "journald.vacuum");
+  assert.equal(record.manager.commands[0].state, "uncertain");
+  assert.doesNotMatch(record.manager.commands[0].output, /\u001b/);
+});
+
+test("a manager result without an estimate keeps its selected bytes absent", async () => {
+  const { parseActionResult } = await import("../../dist/native/protocol.js");
+  const result = parseActionResult({
+    journalId: "act-1", state: "complete", completed: "0", skipped: "0", failed: "0",
+    bytesMovedToTrash: "0", undoAvailable: false,
+  });
+  assert.equal(result.selectedBytes, undefined);
+});

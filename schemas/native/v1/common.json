@@ -694,7 +694,6 @@
         "completed",
         "skipped",
         "failed",
-        "selectedBytes",
         "bytesMovedToTrash",
         "items"
       ],
@@ -744,6 +743,9 @@
           "items": {
             "$ref": "#/$defs/journalItem"
           }
+        },
+        "manager": {
+          "$ref": "#/$defs/managerRecord"
         }
       },
       "allOf": [
@@ -780,6 +782,41 @@
                 }
               }
             }
+          }
+        },
+        {
+          "description": "Only a manager action's record may leave its selected bytes unknown.",
+          "if": {
+            "type": "object",
+            "properties": {
+              "operation": {
+                "const": "manager"
+              }
+            },
+            "required": [
+              "operation"
+            ]
+          },
+          "then": {
+            "properties": {
+              "manager": {
+                "type": "object"
+              }
+            },
+            "required": [
+              "manager"
+            ]
+          },
+          "else": {
+            "properties": {
+              "manager": false,
+              "selectedBytes": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "selectedBytes"
+            ]
           }
         }
       ]
@@ -819,7 +856,6 @@
         "completed",
         "skipped",
         "failed",
-        "selectedBytes",
         "bytesMovedToTrash",
         "undoAvailable"
       ],
@@ -841,7 +877,7 @@
           "$ref": "#/$defs/decimalInteger"
         },
         "selectedBytes": {
-          "description": "What the plan reviewed, over every target it named, whatever became of them.",
+          "description": "What the plan reviewed, or a manager's own estimate. Absent only for a manager action whose manager could not say beforehand.",
           "$ref": "#/$defs/decimalInteger"
         },
         "bytesMovedToTrash": {
@@ -1083,6 +1119,98 @@
                 ]
               }
             ]
+          }
+        }
+      }
+    },
+    "managerTool": {
+      "type": "string",
+      "enum": [
+        "apt-get",
+        "dpkg",
+        "dnf",
+        "rpm",
+        "pacman",
+        "journalctl",
+        "snap",
+        "flatpak",
+        "docker",
+        "podman",
+        "systemd-tmpfiles"
+      ]
+    },
+    "managerRecord": {
+      "description": "What a manager was asked to run, and what became of each command. A command that started and never finished reads 'uncertain' once reconciliation has looked at it.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "adapter",
+        "action",
+        "privilege",
+        "commands"
+      ],
+      "properties": {
+        "adapter": {
+          "type": "string",
+          "minLength": 1
+        },
+        "action": {
+          "type": "string",
+          "minLength": 1
+        },
+        "privilege": {
+          "type": "string",
+          "enum": [
+            "user",
+            "root"
+          ]
+        },
+        "estimatedBytes": {
+          "$ref": "#/$defs/decimalInteger"
+        },
+        "commands": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "position",
+              "tool",
+              "arguments",
+              "state"
+            ],
+            "properties": {
+              "position": {
+                "$ref": "#/$defs/decimalInteger"
+              },
+              "tool": {
+                "$ref": "#/$defs/managerTool"
+              },
+              "arguments": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                }
+              },
+              "state": {
+                "type": "string",
+                "enum": [
+                  "pending",
+                  "started",
+                  "finished",
+                  "uncertain"
+                ]
+              },
+              "exitCode": {
+                "type": "string",
+                "pattern": "^-?(0|[1-9][0-9]{0,18})$"
+              },
+              "output": {
+                "type": "string",
+                "maxLength": 16384
+              }
+            }
           }
         }
       }

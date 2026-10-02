@@ -401,7 +401,7 @@ export function resultLines(
 ): string[] {
   const lines = [
     `${result.completed} completed, ${result.skipped} skipped, ${result.failed} failed (${result.state})`,
-    `  Selected:            ${formatBytes(result.selectedBytes, units)}`,
+    `  Selected:            ${result.selectedBytes === undefined ? "unknown" : formatBytes(result.selectedBytes, units)}`,
     `  Moved to Trash:      ${formatBytes(result.bytesMovedToTrash, units)}`,
     `  Free space changed:  ${
       observedFreeSpaceChange === undefined

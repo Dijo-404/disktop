@@ -316,7 +316,7 @@ function toResult(result: ReturnType<typeof parseActionResult>): ActionResult {
     completed: result.completed,
     skipped: result.skipped,
     failed: result.failed,
-    selectedBytes: result.selectedBytes,
+    ...(result.selectedBytes === undefined ? {} : { selectedBytes: result.selectedBytes }),
     bytesMovedToTrash: result.bytesMovedToTrash,
     ...(result.freeBytesBefore === undefined ? {} : { freeBytesBefore: result.freeBytesBefore }),
     ...(result.freeBytesAfter === undefined ? {} : { freeBytesAfter: result.freeBytesAfter }),
@@ -339,11 +339,30 @@ function toJournalRecord(record: NativeJournalRecord): JournalRecord {
     completed: record.completed,
     skipped: record.skipped,
     failed: record.failed,
-    selectedBytes: record.selectedBytes,
+    ...(record.selectedBytes === undefined ? {} : { selectedBytes: record.selectedBytes }),
     bytesMovedToTrash: record.bytesMovedToTrash,
     ...(record.freeBytesBefore === undefined ? {} : { freeBytesBefore: record.freeBytesBefore }),
     ...(record.freeBytesAfter === undefined ? {} : { freeBytesAfter: record.freeBytesAfter }),
     items: record.items.map(toJournalItem),
+    ...(record.manager === undefined
+      ? {}
+      : {
+          manager: {
+            adapter: record.manager.adapter,
+            action: record.manager.action,
+            privilege: record.manager.privilege,
+            ...(record.manager.estimatedBytes === undefined
+              ? {}
+              : { estimatedBytes: record.manager.estimatedBytes }),
+            commands: record.manager.commands.map((command) => ({
+              tool: command.tool,
+              arguments: command.arguments,
+              state: command.state,
+              ...(command.exitCode === undefined ? {} : { exitCode: command.exitCode }),
+              ...(command.output === undefined ? {} : { output: sanitizeText(command.output) }),
+            })),
+          },
+        }),
   };
 }
 

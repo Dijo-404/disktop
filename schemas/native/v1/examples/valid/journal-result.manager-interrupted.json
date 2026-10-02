@@ -1,0 +1,38 @@
+{
+  "protocolVersion": 1,
+  "requestId": "journal-reconcile-1",
+  "eventId": "1",
+  "event": "complete",
+  "result": {
+    "reconciled": "1",
+    "records": [
+      {
+        "id": "act-1790957024565-9f2c1ab07d4e5610",
+        "planId": "plan-20261002090000000-7c1d2e3f",
+        "operation": "manager",
+        "startedAtMilliseconds": "1790957024565",
+        "state": "uncertain",
+        "completed": "0",
+        "skipped": "0",
+        "failed": "0",
+        "bytesMovedToTrash": "0",
+        "manager": {
+          "adapter": "journald",
+          "action": "journald.vacuum",
+          "privilege": "root",
+          "commands": [
+            {
+              "position": "0",
+              "tool": "journalctl",
+              "arguments": [
+                "--vacuum-size=536870912"
+              ],
+              "state": "uncertain"
+            }
+          ]
+        },
+        "items": []
+      }
+    ]
+  }
+}

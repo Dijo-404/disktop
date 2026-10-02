@@ -1,0 +1,28 @@
+{
+  "protocolVersion": 1,
+  "requestId": "manager-begin-1",
+  "operation": "manager-begin",
+  "arguments": {
+    "planId": "plan-20261002090000000-7c1d2e3f",
+    "journalDirectory": "L2hvbWUvZXhhbXBsZS8ubG9jYWwvc3RhdGUvZGlza3RvcA==",
+    "adapter": "apt",
+    "action": "apt.clean",
+    "privilege": "root",
+    "commands": [
+      {
+        "tool": "apt-get",
+        "arguments": [
+          "clean"
+        ]
+      }
+    ],
+    "items": [
+      {
+        "id": "curl_8.5.0-2_amd64.deb",
+        "bytes": "400000"
+      }
+    ],
+    "estimatedBytes": "400000",
+    "freeBytesBefore": "52428800000"
+  }
+}

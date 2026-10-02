@@ -147,8 +147,8 @@ export interface ActionResult {
   readonly completed: bigint;
   readonly skipped: bigint;
   readonly failed: bigint;
-  /** What the plan reviewed, whatever became of it. */
-  readonly selectedBytes: Bytes;
+  /** What the plan reviewed, whatever became of it; absent for a manager that could not say. */
+  readonly selectedBytes?: Bytes;
   /** The reviewed size of what actually moved. Usually frees nothing yet. */
   readonly bytesMovedToTrash: Bytes;
   /** Space available before the first item and after the last, when readable. */

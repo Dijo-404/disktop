@@ -417,11 +417,28 @@ export interface NativeActionResult {
   readonly completed: bigint;
   readonly skipped: bigint;
   readonly failed: bigint;
-  readonly selectedBytes: bigint;
+  readonly selectedBytes?: bigint;
   readonly bytesMovedToTrash: bigint;
   readonly freeBytesBefore?: bigint;
   readonly freeBytesAfter?: bigint;
   readonly undoAvailable: boolean;
+}
+
+export interface NativeManagerCommand {
+  readonly position: bigint;
+  readonly tool: string;
+  readonly arguments: readonly string[];
+  readonly state: "pending" | "started" | "finished" | "uncertain";
+  readonly exitCode?: bigint;
+  readonly output?: string;
+}
+
+export interface NativeManagerRecord {
+  readonly adapter: string;
+  readonly action: string;
+  readonly privilege: "user" | "root";
+  readonly estimatedBytes?: bigint;
+  readonly commands: readonly NativeManagerCommand[];
 }
 
 export interface NativeJournalItem {
@@ -443,11 +460,12 @@ export interface NativeJournalRecord {
   readonly completed: bigint;
   readonly skipped: bigint;
   readonly failed: bigint;
-  readonly selectedBytes: bigint;
+  readonly selectedBytes?: bigint;
   readonly bytesMovedToTrash: bigint;
   readonly freeBytesBefore?: bigint;
   readonly freeBytesAfter?: bigint;
   readonly items: readonly NativeJournalItem[];
+  readonly manager?: NativeManagerRecord;
 }
 
 export interface NativeJournalPage {
@@ -487,7 +505,9 @@ export function parseActionResult(result: unknown): NativeActionResult {
     completed: decimal(result.completed, "completed"),
     skipped: decimal(result.skipped, "skipped"),
     failed: decimal(result.failed, "failed"),
-    selectedBytes: decimal(result.selectedBytes, "selectedBytes"),
+    ...(result.selectedBytes === undefined
+      ? {}
+      : { selectedBytes: decimal(result.selectedBytes, "selectedBytes") }),
     bytesMovedToTrash: decimal(result.bytesMovedToTrash, "bytesMovedToTrash"),
     ...(result.freeBytesBefore === undefined
       ? {}
@@ -521,6 +541,13 @@ function parseJournalRecord(value: unknown): NativeJournalRecord {
   if (typeof value.operation !== "string" || !Array.isArray(value.items)) {
     throw new Error("The helper returned a journal record without its operation or items");
   }
+  const manager = value.manager === undefined ? undefined : parseManagerRecord(value.manager);
+  if ((value.operation === "manager") !== (manager !== undefined)) {
+    throw new Error("The helper returned a journal record whose manager details do not match its operation");
+  }
+  if (manager === undefined && value.selectedBytes === undefined) {
+    throw new Error("The helper returned a journal record without the bytes it selected");
+  }
   return {
     id: value.id,
     planId: value.planId,
@@ -533,7 +560,9 @@ function parseJournalRecord(value: unknown): NativeJournalRecord {
     completed: decimal(value.completed, "completed"),
     skipped: decimal(value.skipped, "skipped"),
     failed: decimal(value.failed, "failed"),
-    selectedBytes: decimal(value.selectedBytes, "selectedBytes"),
+    ...(value.selectedBytes === undefined
+      ? {}
+      : { selectedBytes: decimal(value.selectedBytes, "selectedBytes") }),
     bytesMovedToTrash: decimal(value.bytesMovedToTrash, "bytesMovedToTrash"),
     ...(value.freeBytesBefore === undefined
       ? {}
@@ -542,6 +571,53 @@ function parseJournalRecord(value: unknown): NativeJournalRecord {
       ? {}
       : { freeBytesAfter: decimal(value.freeBytesAfter, "freeBytesAfter") }),
     items: value.items.map((item: unknown) => parseJournalItem(item)),
+    ...(manager === undefined ? {} : { manager }),
+  };
+}
+
+const COMMAND_STATES = new Set(["pending", "started", "finished", "uncertain"]);
+
+function parseManagerRecord(value: unknown): NativeManagerRecord {
+  if (
+    !isRecord(value) ||
+    typeof value.adapter !== "string" ||
+    typeof value.action !== "string" ||
+    (value.privilege !== "user" && value.privilege !== "root") ||
+    !Array.isArray(value.commands)
+  ) {
+    throw new Error("The helper returned a manager record it could not have written");
+  }
+  return {
+    adapter: value.adapter,
+    action: value.action,
+    privilege: value.privilege,
+    ...(value.estimatedBytes === undefined
+      ? {}
+      : { estimatedBytes: decimal(value.estimatedBytes, "estimatedBytes") }),
+    commands: value.commands.map((command: unknown) => {
+      if (
+        !isRecord(command) ||
+        typeof command.tool !== "string" ||
+        !Array.isArray(command.arguments) ||
+        command.arguments.some((argument: unknown) => typeof argument !== "string") ||
+        typeof command.state !== "string" ||
+        !COMMAND_STATES.has(command.state)
+      ) {
+        throw new Error("The helper returned a manager command it could not have written");
+      }
+      const exitCode = command.exitCode;
+      if (exitCode !== undefined && (typeof exitCode !== "string" || !/^-?(0|[1-9][0-9]{0,18})$/.test(exitCode))) {
+        throw new Error("The helper returned an exit status that is not a decimal integer");
+      }
+      return {
+        position: decimal(command.position, "position"),
+        tool: command.tool,
+        arguments: command.arguments as string[],
+        state: command.state as NativeManagerCommand["state"],
+        ...(exitCode === undefined ? {} : { exitCode: BigInt(exitCode) }),
+        ...(typeof command.output === "string" ? { output: command.output } : {}),
+      };
+    }),
   };
 }
 

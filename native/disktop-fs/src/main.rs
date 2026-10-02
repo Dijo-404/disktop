@@ -6,6 +6,7 @@ mod duplicates;
 mod guard;
 mod index;
 mod journal;
+mod manager;
 mod protocol;
 mod query;
 mod subtree;
