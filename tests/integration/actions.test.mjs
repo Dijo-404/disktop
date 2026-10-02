@@ -1288,3 +1288,34 @@ test("a directory with a bind mount inside it is refused at planning time", asyn
   assert.equal(refused.error.code, "protected-path");
   assert.equal(existsSync(tree.cache), true);
 });
+
+test("as root, Disktop plans no change to a file and the helper refuses one", async () => {
+  const home = await disktopHome();
+  const tree = await createActionTree(home);
+  const env = {
+    ...process.env,
+    NO_COLOR: "1",
+    HOME: home,
+    XDG_CONFIG_HOME: join(home, "config"),
+    XDG_DATA_HOME: join(home, "data"),
+    XDG_CACHE_HOME: join(home, "cache"),
+    XDG_STATE_HOME: join(home, "state"),
+  };
+  const asRoot = spawnSync("unshare", ["--user", "--map-root-user", process.execPath, "dist/bin/disktop.js", "clean", "plan", "--path", tree.cache, "--json"], { encoding: "utf8", env });
+  if (asRoot.error !== undefined || asRoot.stdout.trim() === "") {
+    process.stderr.write("skipped: this host cannot create a user namespace\n");
+    return;
+  }
+  const refused = JSON.parse(asRoot.stdout);
+  assert.equal(refused.status, "error");
+  assert.equal(refused.error.code, "permission-denied");
+  assert.match(refused.error.message, /root/);
+
+  const helper = spawnSync("unshare", ["--user", "--map-root-user", "native/disktop-fs/target/debug/disktop-fs"], {
+    encoding: "utf8",
+    input: `${JSON.stringify({ protocolVersion: 1, requestId: "trash-root", operation: "trash", arguments: { planId: "plan-0123456789abcd", journalDirectory: Buffer.from(join(home, "state")).toString("base64"), homeTrashDirectory: Buffer.from(join(home, "trash")).toString("base64"), targets: [] } })}\n`,
+  });
+  const event = JSON.parse(helper.stdout.trim().split("\n").at(-1));
+  assert.equal(event.error.code, "permission-denied");
+  assert.equal(existsSync(tree.cache), true);
+});

@@ -1137,6 +1137,9 @@ fn duplicate_result(report: &duplicates::Report) -> Value {
 }
 
 fn trash(server: &Arc<Server>, responder: Responder, arguments: Map<String, Value>) {
+    if refuse_as_root(&responder) {
+        return;
+    }
     let arguments: TrashArguments = match decode(arguments) {
         Ok(arguments) => arguments,
         Err(message) => return fail(&responder, "invalid-arguments", &message),
@@ -1166,6 +1169,9 @@ fn trash(server: &Arc<Server>, responder: Responder, arguments: Map<String, Valu
 
 /// Replace every reviewed duplicate with a link to one kept file.
 fn dedup_hardlink(server: &Arc<Server>, responder: Responder, arguments: Map<String, Value>) {
+    if refuse_as_root(&responder) {
+        return;
+    }
     let arguments: DedupHardlinkArguments = match decode(arguments) {
         Ok(arguments) => arguments,
         Err(message) => return fail(&responder, "invalid-arguments", &message),
@@ -1193,6 +1199,9 @@ fn dedup_hardlink(server: &Arc<Server>, responder: Responder, arguments: Map<Str
 
 /// Copy every reviewed target onto another filesystem, then dispose of the source.
 fn copy_move(server: &Arc<Server>, responder: Responder, arguments: Map<String, Value>) {
+    if refuse_as_root(&responder) {
+        return;
+    }
     let arguments: CopyMoveArguments = match decode(arguments) {
         Ok(arguments) => arguments,
         Err(message) => return fail(&responder, "invalid-arguments", &message),
@@ -1220,6 +1229,9 @@ fn copy_move(server: &Arc<Server>, responder: Responder, arguments: Map<String, 
 
 /// Compress every reviewed target, then dispose of the source.
 fn compress(server: &Arc<Server>, responder: Responder, arguments: Map<String, Value>) {
+    if refuse_as_root(&responder) {
+        return;
+    }
     let arguments: CompressArguments = match decode(arguments) {
         Ok(arguments) => arguments,
         Err(message) => return fail(&responder, "invalid-arguments", &message),
@@ -1247,6 +1259,9 @@ fn compress(server: &Arc<Server>, responder: Responder, arguments: Map<String, V
 
 /// Remove every reviewed target permanently.
 fn erase(server: &Arc<Server>, responder: Responder, arguments: Map<String, Value>) {
+    if refuse_as_root(&responder) {
+        return;
+    }
     let arguments: EraseArguments = match decode(arguments) {
         Ok(arguments) => arguments,
         Err(message) => return fail(&responder, "invalid-arguments", &message),
@@ -1274,6 +1289,9 @@ fn erase(server: &Arc<Server>, responder: Responder, arguments: Map<String, Valu
 
 /// Empty every directory that really is a Trash.
 fn empty_trash(server: &Arc<Server>, responder: Responder, arguments: Map<String, Value>) {
+    if refuse_as_root(&responder) {
+        return;
+    }
     let arguments: EmptyTrashArguments = match decode(arguments) {
         Ok(arguments) => arguments,
         Err(message) => return fail(&responder, "invalid-arguments", &message),
@@ -1301,6 +1319,9 @@ fn empty_trash(server: &Arc<Server>, responder: Responder, arguments: Map<String
 
 /// Put back what a Trash move moved.
 fn restore(server: &Arc<Server>, responder: Responder, arguments: Map<String, Value>) {
+    if refuse_as_root(&responder) {
+        return;
+    }
     let arguments: RestoreArguments = match decode(arguments) {
         Ok(arguments) => arguments,
         Err(message) => return fail(&responder, "invalid-arguments", &message),
@@ -1569,6 +1590,23 @@ fn inspect_one(
         ));
     }
     crate::subtree::digest(parent.descriptor(), &parent.name, cancelled)
+}
+
+/// Running as root, the helper journals manager actions and changes no user file itself.
+fn generic_mutation_refusal(euid: u32) -> Option<&'static str> {
+    (euid == 0).then_some(
+        "The helper is running as root, where it changes no user file itself. Run Disktop as the user who owns these files.",
+    )
+}
+
+fn refuse_as_root(responder: &Responder) -> bool {
+    match generic_mutation_refusal(unsafe { libc::geteuid() }) {
+        Some(message) => {
+            fail(responder, "permission-denied", message);
+            true
+        }
+        None => false,
+    }
 }
 
 fn require_containment() -> Result<(), String> {
@@ -2933,6 +2971,12 @@ mod tests {
         assert_eq!(record["items"].as_array().unwrap().len(), 1);
         assert_eq!(record["items"][0]["outcome"], "completed");
         assert!(record["items"][0]["destination"].is_string());
+    }
+
+    #[test]
+    fn as_root_the_helper_changes_no_user_file_itself() {
+        assert!(generic_mutation_refusal(0).is_some());
+        assert!(generic_mutation_refusal(1000).is_none());
     }
 
     // --- Manager actions ---------------------------------------------------------

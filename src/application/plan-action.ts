@@ -54,6 +54,8 @@ export interface PlanSettings {
   /** This user's own Trash, which only `empty-trash` may name as a target. */
   readonly trashDirectory: RawPath;
   readonly expiryMinutes: number;
+  /** 0 means Disktop runs as root, where it changes no file itself. */
+  readonly effectiveUserId?: number;
 }
 
 export type PlanOutcome =
@@ -147,6 +149,10 @@ export function createPlanService(dependencies: PlanDependencies): PlanService {
             return refuse(verdict.code, `${path.display} cannot be cleaned up: ${verdict.reason}.`);
           }
         }
+      }
+
+      if (dependencies.settings.effectiveUserId === 0) {
+        return refuse("permission-denied", ROOT_REFUSAL);
       }
 
       // Where the output goes is decided here and nowhere else. A move has to
@@ -319,6 +325,9 @@ export function createPlanService(dependencies: PlanDependencies): PlanService {
 }
 
 const MANAGER_PREFIX = "managers:";
+
+export const ROOT_REFUSAL =
+  "Disktop is running as root, where it reads everything and changes no file itself. Run it as the user who owns these files; only a reviewed manager action runs as root.";
 
 async function planManager(dependencies: PlanDependencies, request: PlanRequest): Promise<PlanOutcome> {
   if (
