@@ -59,8 +59,9 @@ function service(stored, overrides = {}) {
         },
       },
       actions: {
-        async apply(reviewed) {
+        async apply(reviewed, _signal, options) {
           applied.push(reviewed);
+          applied.options = options;
           return overrides.result ?? { ...RESULT, planId: reviewed.id };
         },
         async restore() {
@@ -403,4 +404,82 @@ test("a move that trashes its source carries the note that Trash frees nothing y
     outcome.notes.some((note) => /Trash/i.test(note)),
     `notes were ${JSON.stringify(outcome.notes)}`,
   );
+});
+
+async function managerPlan() {
+  const { managerScope } = await import("../../dist/domain/managers.js");
+  return buildPlan({
+    operation: "manager",
+    providerId: "managers",
+    findingId: "managers:docker.prune-build-cache",
+    scopeSummary: "Docker build cache",
+    createdAt: NOW,
+    expiryMinutes: 60,
+    entries: [],
+    manager: managerScope({ action: "docker.prune-build-cache", items: [], parameters: {}, count: { kind: "unknown" }, preview: "none" }),
+    warnings: [],
+  });
+}
+
+const MANAGER_RESULT = {
+  planId: "",
+  completed: 0n,
+  skipped: 0n,
+  failed: 0n,
+  bytesMovedToTrash: 0n,
+  freeBytesBefore: 1000n,
+  freeBytesAfter: 5000n,
+  state: "complete",
+  journalId: "act-1",
+  undoAvailable: false,
+  verification: [
+    { check: "manager-verified", outcome: "passed", detail: "Build cache listed again." },
+    { check: "manager-command", outcome: "passed", detail: "All 1 command(s) finished with status 0." },
+  ],
+};
+
+test("a manager plan is irreversible and needs --permanent", async () => {
+  const reviewed = await managerPlan();
+  const { service: apply, applied } = service(reviewed, { result: MANAGER_RESULT });
+  const refused = await apply.apply({ planId: reviewed.id, confirmed: true }, SIGNAL);
+  assert.equal(refused.kind, "refused");
+  assert.match(refused.failure.message, /--permanent/);
+  assert.equal(applied.length, 0);
+});
+
+test("a manager plan's prompt says what runs, not that files are removed", async () => {
+  const reviewed = await managerPlan();
+  const { service: apply } = service(reviewed, { result: MANAGER_RESULT });
+  const refused = await apply.apply({ planId: reviewed.id, confirmed: false }, SIGNAL);
+  assert.match(refused.failure.message, /docker builder prune --force/);
+});
+
+test("whether somebody can answer a password prompt reaches the action port", async () => {
+  const reviewed = await managerPlan();
+  const { service: apply, applied } = service(reviewed, { result: MANAGER_RESULT });
+  await apply.apply({ planId: reviewed.id, confirmed: true, acknowledgePermanent: true, interactive: true }, SIGNAL);
+  assert.equal(applied.options.interactive, true);
+});
+
+test("a manager result keeps the executor's checks and adds the free-space reading", async () => {
+  const reviewed = await managerPlan();
+  const { service: apply } = service(reviewed, { result: MANAGER_RESULT });
+  const outcome = await apply.apply({ planId: reviewed.id, confirmed: true, acknowledgePermanent: true }, SIGNAL);
+  assert.equal(outcome.kind, "applied");
+  const checks = outcome.result.verification.map((check) => check.check);
+  assert.deepEqual(checks, ["manager-verified", "manager-command", "free-space-read"]);
+  assert.equal(outcome.result.state, "complete");
+  assert.equal(outcome.observedFreeSpaceChange, 4000n);
+  assert.ok(outcome.notes.some((note) => /estimate/i.test(note)));
+});
+
+test("a manager result whose command failed is not complete", async () => {
+  const reviewed = await managerPlan();
+  const failed = {
+    ...MANAGER_RESULT,
+    verification: [{ check: "manager-command", outcome: "failed", detail: "docker exited with status 1." }],
+  };
+  const { service: apply } = service(reviewed, { result: failed });
+  const outcome = await apply.apply({ planId: reviewed.id, confirmed: true, acknowledgePermanent: true }, SIGNAL);
+  assert.equal(outcome.result.state, "partial");
 });

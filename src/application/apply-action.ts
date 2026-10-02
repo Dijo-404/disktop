@@ -16,6 +16,8 @@ export interface ApplyRequest {
   readonly confirmed: boolean;
   /** Acknowledges a plan that is already irreversible; it never makes one so. */
   readonly acknowledgePermanent?: boolean;
+  /** Whether somebody is at a terminal to answer an authentication prompt. */
+  readonly interactive?: boolean;
 }
 
 export type ApplyOutcome =
@@ -54,6 +56,9 @@ export interface ApplyDependencies {
 
 const CONCURRENCY_NOTE =
   "Other processes write to the same filesystem, so the observed free-space change is not only this action's doing.";
+
+const MANAGER_NOTE =
+  "What a manager reports about its own size is an estimate; the free-space readings are the measurement.";
 
 const TRASH_NOTE =
   "A Trash move on the same filesystem usually frees nothing until Trash is emptied.";
@@ -122,7 +127,9 @@ export function createApplyService(dependencies: ApplyDependencies): ApplyServic
 
       let applied: ActionResult;
       try {
-        applied = await dependencies.actions.apply(plan, signal);
+        applied = await dependencies.actions.apply(plan, signal, {
+          interactive: request.interactive ?? false,
+        });
       } catch (error) {
         if (error instanceof CapabilityUnavailable) {
           return { kind: "unavailable", capability: error.capability };
@@ -136,7 +143,8 @@ export function createApplyService(dependencies: ApplyDependencies): ApplyServic
 
       // What the helper did, and then the separate question of whether the
       // action as a whole did what the plan described.
-      const verification = verify(plan, applied);
+      const verification =
+        plan.operation === "manager" ? [...applied.verification, ...verify(plan, applied)] : verify(plan, applied);
       const result: ActionResult = {
         ...applied,
         verification,
@@ -154,6 +162,9 @@ export function createApplyService(dependencies: ApplyDependencies): ApplyServic
       // source has freed nothing on that filesystem either.
       if (plan.operation === "trash" || plan.sourceDisposition === "trash") {
         notes.unshift(TRASH_NOTE);
+      }
+      if (plan.operation === "manager") {
+        notes.unshift(MANAGER_NOTE);
       }
 
       return {
@@ -191,6 +202,8 @@ function describe(plan: ActionPlan): string {
       return `copy ${scope} to ${plan.destination?.display ?? "another disk"}${afterwards}`;
     case "compress":
       return `compress ${scope} into ${plan.destination?.display ?? "an archive beside it"}${afterwards}`;
+    case "manager":
+      return `run ${plan.managerScope ?? "the manager's reviewed command"}, which cannot be undone`;
     case "dedup-hardlink":
       return `replace ${scope} with links to ${plan.keepPath?.display ?? "the copy being kept"}, which cannot be undone`;
     default:

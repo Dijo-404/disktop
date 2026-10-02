@@ -8,8 +8,13 @@ import type { Bytes, RawPath } from "../domain/models.js";
  * refused to do. Neither takes a path, because neither decides what to act on
  * — the plan and the journal already did.
  */
+export interface ApplyOptions {
+  /** Whether somebody is at a terminal to answer an authentication prompt. */
+  readonly interactive?: boolean;
+}
+
 export interface ActionPort {
-  apply(plan: ActionPlan, signal: AbortSignal): Promise<ActionResult>;
+  apply(plan: ActionPlan, signal: AbortSignal, options?: ApplyOptions): Promise<ActionResult>;
   /** Put back what one Trash action moved, identified by its journal record. */
   restore(journalId: string, signal: AbortSignal): Promise<ActionResult>;
 }

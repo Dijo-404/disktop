@@ -234,6 +234,7 @@ test("applying a confirmed plan reports the three numbers separately", async () 
     planId: PLAN.id,
     confirmed: true,
     acknowledgePermanent: false,
+    interactive: false,
   });
 });
 
@@ -385,4 +386,27 @@ test("a cursor the journal did not issue is an input error from history, not a c
   const envelope = envelopeOf(context, "history");
   assert.equal(envelope.command, "history");
   assert.equal(envelope.error.code, "invalid-input");
+});
+
+test("apply tells the pipeline whether a password prompt can be answered", async () => {
+  const atTerminal = actionContext();
+  atTerminal.interactive = true;
+  await runCli(["clean", "apply", PLAN.id, "--yes"], atTerminal);
+  assert.equal(atTerminal.recordedActions.apply.interactive, true);
+
+  const scripted = actionContext();
+  scripted.interactive = true;
+  await runCli(["clean", "apply", PLAN.id, "--yes", "--json"], scripted);
+  assert.equal(scripted.recordedActions.apply.interactive, false, "--json never prompts");
+});
+
+test("an action this machine cannot carry out says why, without claiming it is about files", async () => {
+  const context = actionContext({
+    applyOutcome: { kind: "unavailable", capability: { status: "missing-tool", explanation: "Disktop has no apt adapter on this machine." } },
+  });
+  const status = await runCli(["clean", "apply", PLAN.id, "--yes", "--json"], context);
+  assert.equal(status, 2);
+  const message = envelopeOf(context, "apply").error.message;
+  assert.match(message, /no apt adapter/);
+  assert.doesNotMatch(message, /change files/);
 });

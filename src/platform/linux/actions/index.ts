@@ -309,7 +309,7 @@ function parseInspection(result: unknown): ReadonlyMap<string, InspectOutcome> {
  * and whether that matched the plan is a question `apply-action.ts` asks from
  * the side the plan is on.
  */
-function toResult(result: ReturnType<typeof parseActionResult>): ActionResult {
+export function toResult(result: ReturnType<typeof parseActionResult>): ActionResult {
   return {
     planId: "",
     verification: [],
@@ -413,7 +413,7 @@ const FAILURE_CODES: Readonly<Record<string, OperationFailureCode>> = {
  * else is a refusal about this particular request, and reaches the caller as a
  * failure it is expected to report rather than as a crash.
  */
-function refuseError(event: HelperEvent, client: NativeHelperClient): void {
+export function refuseError(event: HelperEvent, client: Pick<NativeHelperClient, "diagnostics">): void {
   if (event.event !== "error") {
     return;
   }
@@ -436,7 +436,7 @@ function refuseError(event: HelperEvent, client: NativeHelperClient): void {
   throw new Error(explanation);
 }
 
-async function connect(start: () => Promise<HelperStart>): Promise<NativeHelperClient> {
+export async function connect(start: () => Promise<HelperStart>): Promise<NativeHelperClient> {
   const started = await start();
   if (!started.started) {
     throw new CapabilityUnavailable(started.capability);
