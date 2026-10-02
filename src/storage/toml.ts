@@ -5,7 +5,7 @@
  * silently dropped from a configuration that controls safety behaviour.
  */
 export type TomlValue = string | number | boolean | readonly TomlValue[];
-export type TomlTable = { [key: string]: TomlValue | TomlTable };
+export type TomlTable = { [key: string]: TomlValue | TomlTable | readonly TomlTable[] };
 
 const BARE_KEY = /^[A-Za-z0-9_-]+$/;
 // A key that becomes an object's prototype would be invisible to the
@@ -16,6 +16,7 @@ const INTEGER = /^[+-]?(0|[1-9][0-9]*)$/;
 export function parseToml(source: string): TomlTable {
   const root = Object.create(null) as TomlTable;
   const seenTables = new Set<string>();
+  const seenArrays = new Set<string>();
   let table = root;
   let tableName = "";
 
@@ -27,8 +28,30 @@ export function parseToml(source: string): TomlTable {
       continue;
     }
 
+    // `[[name]]` starts another block of an array of tables. Each block is its
+    // own table, so a key repeated inside one is still an error while the same
+    // key in the next block is ordinary.
     if (line.startsWith("[[")) {
-      throw fail(lineNumber, "arrays of tables are not supported");
+      if (!line.endsWith("]]")) {
+        throw fail(lineNumber, "unterminated array-of-tables header");
+      }
+      const name = line.slice(2, -2).trim();
+      if (!BARE_KEY.test(name) || RESERVED_KEYS.has(name)) {
+        throw fail(lineNumber, `unsupported array-of-tables name '${name}'`);
+      }
+      if (seenTables.has(name)) {
+        throw fail(lineNumber, `'${name}' is already a table, so it cannot also be an array of tables`);
+      }
+      seenArrays.add(name);
+      table = Object.create(null) as TomlTable;
+      const existing = root[name];
+      if (Array.isArray(existing)) {
+        (existing as TomlTable[]).push(table);
+      } else {
+        root[name] = [table] as readonly TomlTable[];
+      }
+      tableName = name;
+      continue;
     }
 
     if (line.startsWith("[")) {
@@ -41,6 +64,9 @@ export function parseToml(source: string): TomlTable {
       }
       if (seenTables.has(name)) {
         throw fail(lineNumber, `table '${name}' is defined twice`);
+      }
+      if (seenArrays.has(name)) {
+        throw fail(lineNumber, `'${name}' is already an array of tables, so it cannot also be a table`);
       }
       seenTables.add(name);
       table = Object.create(null) as TomlTable;

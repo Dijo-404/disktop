@@ -40,6 +40,14 @@ export interface ApplyDependencies {
   readonly store: Pick<PlanStore, "get">;
   readonly actions: ActionPort;
   readonly now: () => Date;
+  /**
+   * The hashes of the cleanup rules as the configuration file holds them now.
+   *
+   * Absent when the caller has no rules to compare against, which is not the
+   * same as a rule having been removed: a surface that never loaded any is a
+   * surface with nothing to contradict the plan, and the plan stands.
+   */
+  readonly currentRuleHashes?: () => ReadonlySet<string>;
 }
 
 const CONCURRENCY_NOTE =
@@ -79,6 +87,19 @@ export function createApplyService(dependencies: ApplyDependencies): ApplyServic
           "invalid-plan",
           `${plan.id} expired at ${plan.expiresAt} and describes a filesystem that may have moved on. Plan it again.`,
         );
+      }
+
+      // A plan from a rule was reviewed against that rule. If the rule has
+      // been edited or removed since, the confirmation somebody gave was for a
+      // different selection than the one the file now describes, and carrying
+      // it over would apply a rule nobody agreed to.
+      if (plan.ruleHash !== undefined && dependencies.currentRuleHashes !== undefined) {
+        if (!dependencies.currentRuleHashes().has(plan.ruleHash)) {
+          return refuse(
+            "invalid-plan",
+            `${plan.id} was reviewed against a cleanup rule that has since been changed or removed from config.toml. Plan it again so you can see what the rule selects now.`,
+          );
+        }
       }
 
       const irreversible = requiresAcknowledgement(plan);

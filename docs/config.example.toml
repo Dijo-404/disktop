@@ -66,3 +66,39 @@ large_log_bytes = 134217728
 # detector that finds more says so in a warning rather than silently listing
 # fewer. 1 to 1000.
 max_findings_per_provider = 50
+
+# Cleanup rules you write yourself.
+#
+# A rule is data and only data: where to look, what to match, how old and how
+# large, and hard limits on how much it may select. There is no setting for a
+# command, and no combination of these turns one into a program Disktop runs.
+#
+# What a rule produces is a finding like any other. It appears in `disktop
+# clean`, it is reviewed into a plan with `disktop clean plan`, and nothing
+# happens until `disktop clean apply ... --yes`. The plan records which rule it
+# came from; if you edit the rule afterwards, the plan is refused and you are
+# asked to review it again against what the rule now says.
+#
+# Roots are checked against the same policy as everything else: a protected
+# system root or a shared container root such as /home is refused outright.
+
+# [[rules]]
+# name = "old disk images in Downloads"
+# roots = ["/home/example/Downloads"]
+# globs = ["*.iso", "*.img"]
+# excludes = ["keep-*"]
+# kinds = ["file"]            # "file", "directory", or both. Defaults to file.
+# minimum_age_days = 30       # Not modified for this long.
+# minimum_bytes = 104857600   # At least this large on disk.
+# maximum_count = 50          # The rule stops here, and says that it did.
+# maximum_bytes = 10737418240 # And here.
+
+# [[rules]]
+# name = "stale Rust build output"
+# roots = ["/home/example/projects"]
+# globs = ["**/target"]       # ** crosses directory levels; * does not.
+# kinds = ["directory"]
+# minimum_age_days = 60
+# minimum_bytes = 0
+# maximum_count = 20
+# maximum_bytes = 53687091200

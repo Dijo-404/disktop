@@ -242,3 +242,36 @@ test("an operation that keeps nothing may not name a kept copy", () => {
     RangeError,
   );
 });
+
+test("a plan built from a rule carries the rule's hash", () => {
+  const plan = buildPlan({
+    operation: "trash",
+    providerId: "rules",
+    findingId: "rules:old-downloads",
+    scopeSummary: "2 entries",
+    createdAt: new Date("2026-10-02T09:00:00.000Z"),
+    expiryMinutes: 60,
+    entries: [entry("/home/example/Downloads/a.iso")],
+    warnings: [],
+    ruleHash: "a".repeat(64),
+  });
+
+  assert.equal(plan.ruleHash, "a".repeat(64));
+});
+
+test("a rule hash that is not a hash is refused rather than stored", () => {
+  assert.throws(
+    () =>
+      buildPlan({
+        operation: "trash",
+        providerId: "rules",
+        scopeSummary: "1 entry",
+        createdAt: new Date("2026-10-02T09:00:00.000Z"),
+        expiryMinutes: 60,
+        entries: [entry()],
+        warnings: [],
+        ruleHash: "not-a-hash",
+      }),
+    RangeError,
+  );
+});
