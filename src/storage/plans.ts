@@ -7,7 +7,13 @@ import type {
   EntryFingerprint,
   PlannedEntry,
 } from "../domain/actions.js";
-import { ACTION_OPERATIONS, isExpired, reversibilityOf } from "../domain/actions.js";
+import {
+  ACTION_OPERATIONS,
+  isExpired,
+  publishesOutput,
+  reversibilityOf,
+  type SourceDisposition,
+} from "../domain/actions.js";
 import type { RawPath } from "../domain/models.js";
 import { rawPathFromBytes } from "../domain/paths.js";
 import { decimalBytes, parseDecimalBytes } from "../domain/sizes.js";
@@ -133,6 +139,10 @@ function encodePlan(plan: ActionPlan): Record<string, unknown> {
     ...(plan.entries === undefined ? {} : { entries: plan.entries.map(encodeEntry) }),
     ...(plan.managerScope === undefined ? {} : { managerScope: plan.managerScope }),
     ...(plan.regenerationCost === undefined ? {} : { regenerationCost: plan.regenerationCost }),
+    ...(plan.destination === undefined ? {} : { destination: plan.destination.bytesBase64 }),
+    ...(plan.sourceDisposition === undefined
+      ? {}
+      : { sourceDisposition: plan.sourceDisposition }),
     warnings: [...plan.warnings],
   };
 }
@@ -163,6 +173,25 @@ function decodePlan(document: unknown): ActionPlan | undefined {
   if (!ACTION_OPERATIONS.includes(operation)) {
     return undefined;
   }
+  // A disposition this build does not know is a plan it cannot carry out: it
+  // decides whether the source survives, and there is no safe default for that.
+  let disposition: SourceDisposition | undefined;
+  if (document.sourceDisposition !== undefined) {
+    const stored = text(document.sourceDisposition);
+    if (stored !== "trash" && stored !== "permanent") {
+      return undefined;
+    }
+    disposition = stored;
+  }
+  // The two travel together. One without the other is a plan missing half of
+  // what apply time is forbidden to decide.
+  if (publishesOutput(operation) !== (disposition !== undefined)) {
+    return undefined;
+  }
+  if (publishesOutput(operation) !== (document.destination !== undefined)) {
+    return undefined;
+  }
+
   const plan: ActionPlan = {
     id: text(document.id),
     operation,
@@ -173,7 +202,7 @@ function decodePlan(document: unknown): ActionPlan | undefined {
     scopeSummary: text(document.scopeSummary),
     // Re-derived, never read: a stored claim that a permanent removal can be
     // undone would slip past the acknowledgement an irreversible plan needs.
-    reversibility: reversibilityOf(operation),
+    reversibility: reversibilityOf(operation, disposition),
     permission: text(document.permission) === "manager-privilege" ? "manager-privilege" : "user",
     ...(document.exactItemCount === undefined
       ? {}
@@ -184,6 +213,10 @@ function decodePlan(document: unknown): ActionPlan | undefined {
     ...(document.regenerationCost === undefined
       ? {}
       : { regenerationCost: text(document.regenerationCost) }),
+    ...(document.destination === undefined
+      ? {}
+      : { destination: decodePath(text(document.destination)) }),
+    ...(disposition === undefined ? {} : { sourceDisposition: disposition }),
     warnings: Array.isArray(document.warnings) ? document.warnings.map(text) : [],
   };
   return plan;

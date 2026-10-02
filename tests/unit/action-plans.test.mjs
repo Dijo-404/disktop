@@ -89,3 +89,102 @@ test("an irreversible plan always carries the warning that says so", () => {
     `warnings were ${JSON.stringify(plan.warnings)}`,
   );
 });
+
+// --- Phase 5: plans that carry a destination and a source disposition ---
+
+function movable(overrides = {}) {
+  return {
+    operation: "move",
+    providerId: "explicit-path",
+    scopeSummary: "1 directory",
+    createdAt: new Date("2026-10-02T09:00:00.000Z"),
+    expiryMinutes: 60,
+    entries: [entry()],
+    warnings: [],
+    destination: rawPathFromUtf8("/mnt/archive"),
+    sourceDisposition: "trash",
+    ...overrides,
+  };
+}
+
+test("a move plan carries where it publishes and what becomes of the source", () => {
+  const plan = buildPlan(movable());
+
+  assert.equal(plan.destination.display, "/mnt/archive");
+  assert.equal(plan.sourceDisposition, "trash");
+});
+
+test("a move without a destination is refused: apply time cannot choose one", () => {
+  assert.throws(() => buildPlan(movable({ destination: undefined })), RangeError);
+});
+
+test("a move without a source disposition is refused", () => {
+  assert.throws(() => buildPlan(movable({ sourceDisposition: undefined })), RangeError);
+});
+
+test("a compress plan needs both as well", () => {
+  const plan = buildPlan(movable({ operation: "compress" }));
+  assert.equal(plan.sourceDisposition, "trash");
+  assert.throws(() => buildPlan(movable({ operation: "compress", destination: undefined })), RangeError);
+});
+
+test("an operation that publishes nothing may not carry a destination", () => {
+  assert.throws(() => buildPlan(movable({ operation: "trash" })), RangeError);
+  assert.throws(
+    () =>
+      buildPlan(
+        movable({
+          operation: "dedup-hardlink",
+          destination: undefined,
+          entries: [entry("/home/example/a.bin"), entry("/home/example/b.bin")],
+        }),
+      ),
+    RangeError,
+  );
+});
+
+test("a move that trashes its source can be undone; one that erases it cannot", () => {
+  assert.equal(buildPlan(movable()).reversibility, "undo-from-trash");
+
+  const permanent = buildPlan(movable({ sourceDisposition: "permanent" }));
+  assert.equal(permanent.reversibility, "irreversible");
+  assert.ok(
+    permanent.warnings.some((warning) => /cannot be undone/i.test(warning)),
+    `warnings were ${JSON.stringify(permanent.warnings)}`,
+  );
+});
+
+test("a compress that erases its source is irreversible for the same reason", () => {
+  const plan = buildPlan(movable({ operation: "compress", sourceDisposition: "permanent" }));
+  assert.equal(plan.reversibility, "irreversible");
+});
+
+test("replacing a duplicate with a hardlink stays irreversible whatever else is asked", () => {
+  const plan = buildPlan(
+    movable({
+      operation: "dedup-hardlink",
+      destination: undefined,
+      sourceDisposition: undefined,
+      entries: [entry("/home/example/a.bin"), entry("/home/example/b.bin")],
+    }),
+  );
+
+  assert.equal(plan.reversibility, "irreversible");
+  assert.equal(plan.destination, undefined);
+  assert.equal(plan.sourceDisposition, undefined);
+});
+
+test("a hardlink plan needs at least two entries: there is nothing to link one file to", () => {
+  assert.throws(
+    () =>
+      buildPlan(
+        movable({
+          operation: "dedup-hardlink",
+          destination: undefined,
+          sourceDisposition: undefined,
+          entries: [],
+        }),
+      ),
+    RangeError,
+  );
+});

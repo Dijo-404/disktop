@@ -40,6 +40,23 @@ export interface PlannedEntry {
  */
 export type Reversibility = "undo-from-trash" | "irreversible";
 
+/**
+ * What becomes of a source once a move or a compress has published its output.
+ *
+ * This is the whole difference between an operation somebody can take back and
+ * one they cannot, so it is fixed at review time like the operation itself.
+ * `trash` leaves the original recoverable from the journal; `permanent`
+ * releases its bytes and nothing can bring them back.
+ */
+export type SourceDisposition = "trash" | "permanent";
+
+/** The operations that publish an output somewhere and then deal with a source. */
+const PUBLISHING: readonly ActionOperation[] = ["move", "compress"];
+
+export function publishesOutput(operation: ActionOperation): boolean {
+  return PUBLISHING.includes(operation);
+}
+
 /** Who has to be asked before the action can run. */
 export type ActionPermission = "user" | "manager-privilege";
 
@@ -63,6 +80,13 @@ export interface ActionPlan {
   /** A bounded manager selection, never a shell line. */
   readonly managerScope?: string;
   readonly regenerationCost?: string;
+  /**
+   * Where a move or compress publishes its output, and absent for every other
+   * operation. Fixed here so apply time cannot choose a different disk.
+   */
+  readonly destination?: RawPath;
+  /** What becomes of the source, for the same two operations and no others. */
+  readonly sourceDisposition?: SourceDisposition;
   readonly warnings: readonly string[];
 }
 
@@ -93,6 +117,8 @@ export interface PlanInput {
   readonly entries: readonly PlannedEntry[];
   readonly managerScope?: string;
   readonly regenerationCost?: string;
+  readonly destination?: RawPath;
+  readonly sourceDisposition?: SourceDisposition;
   readonly warnings: readonly string[];
   readonly id?: string;
   readonly random?: () => string;
@@ -118,8 +144,20 @@ const IRREVERSIBLE: readonly ActionOperation[] = ["permanent", "empty-trash", "d
  * file that said a permanent removal could be undone cannot slip past the
  * acknowledgement an irreversible plan needs.
  */
-export function reversibilityOf(operation: ActionOperation): Reversibility {
-  return IRREVERSIBLE.includes(operation) ? "irreversible" : "undo-from-trash";
+export function reversibilityOf(
+  operation: ActionOperation,
+  disposition?: SourceDisposition,
+): Reversibility {
+  if (IRREVERSIBLE.includes(operation)) {
+    return "irreversible";
+  }
+  // A move or a compress is only as reversible as what it does to the source.
+  // Publishing a copy somewhere and then releasing the original's bytes is a
+  // permanent removal with an extra step, and it is told to a person as one.
+  if (publishesOutput(operation) && disposition === "permanent") {
+    return "irreversible";
+  }
+  return "undo-from-trash";
 }
 
 const IRREVERSIBLE_WARNING =
@@ -157,8 +195,27 @@ export function buildPlan(input: PlanInput): ActionPlan {
   if (input.expiryMinutes <= 0) {
     throw new RangeError("A plan has to expire at some point after it was made");
   }
+  // A duplicate has to be replaced by a link to something, and that something
+  // has to be in the plan. One entry is a file with nothing to point at.
+  if (input.operation === "dedup-hardlink" && input.entries.length < 2) {
+    throw new RangeError(
+      "Replacing a duplicate with a hardlink needs the file to keep and at least one to replace",
+    );
+  }
 
-  const reversibility = reversibilityOf(input.operation);
+  const publishing = publishesOutput(input.operation);
+  if (publishing && (input.destination === undefined || input.sourceDisposition === undefined)) {
+    throw new RangeError(
+      "A move or compress plan fixes its destination and what becomes of its source; apply time cannot choose either",
+    );
+  }
+  if (!publishing && (input.destination !== undefined || input.sourceDisposition !== undefined)) {
+    throw new RangeError(
+      `A '${input.operation}' plan publishes nothing, so it carries no destination or source disposition`,
+    );
+  }
+
+  const reversibility = reversibilityOf(input.operation, input.sourceDisposition);
   const warnings = [...input.warnings];
   if (reversibility === "irreversible" && !warnings.includes(IRREVERSIBLE_WARNING)) {
     warnings.push(IRREVERSIBLE_WARNING);
@@ -184,6 +241,10 @@ export function buildPlan(input: PlanInput): ActionPlan {
     ...(manager ? {} : { entries: [...input.entries] }),
     ...(input.managerScope === undefined ? {} : { managerScope: input.managerScope }),
     ...(input.regenerationCost === undefined ? {} : { regenerationCost: input.regenerationCost }),
+    ...(input.destination === undefined ? {} : { destination: input.destination }),
+    ...(input.sourceDisposition === undefined
+      ? {}
+      : { sourceDisposition: input.sourceDisposition }),
     warnings,
   };
 }

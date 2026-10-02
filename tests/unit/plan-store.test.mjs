@@ -161,3 +161,73 @@ test("a stored plan naming an operation this build does not know is skipped", as
 
   assert.equal(await store.get(saved.id), undefined);
 });
+
+// --- Phase 5: a destination and a source disposition round-trip ---
+
+test("a move plan's destination and source disposition survive being stored", async () => {
+  const store = createPlanStore(await sandbox());
+  const saved = plan({
+    operation: "move",
+    destination: rawPathFromUtf8("/mnt/archive"),
+    sourceDisposition: "trash",
+  });
+
+  await store.save(saved);
+
+  const loaded = await store.get(saved.id);
+  assert.deepEqual(loaded, saved);
+  assert.equal(loaded.destination.display, "/mnt/archive");
+  assert.equal(loaded.sourceDisposition, "trash");
+});
+
+test("a destination whose bytes are not valid UTF-8 round-trips exactly", async () => {
+  const store = createPlanStore(await sandbox());
+  const odd = rawPathFromBytes(new Uint8Array([0x2f, 0x6d, 0x6e, 0x74, 0x2f, 0xff, 0xfe]));
+  const saved = plan({ operation: "move", destination: odd, sourceDisposition: "permanent" });
+
+  await store.save(saved);
+
+  const loaded = await store.get(saved.id);
+  assert.equal(loaded.destination.bytesBase64, odd.bytesBase64);
+});
+
+test("a stored file claiming a permanent move can be undone is not believed", async () => {
+  const root = await sandbox();
+  const store = createPlanStore(root);
+  const saved = plan({
+    operation: "move",
+    destination: rawPathFromUtf8("/mnt/archive"),
+    sourceDisposition: "permanent",
+  });
+  await store.save(saved);
+
+  const file = join(root, "plans", `${saved.id}.json`);
+  const tampered = JSON.parse(await readFile(file, "utf8"));
+  tampered.reversibility = "undo-from-trash";
+  await writeFile(file, JSON.stringify(tampered));
+
+  const loaded = await store.get(saved.id);
+  assert.equal(
+    loaded.reversibility,
+    "irreversible",
+    "reversibility is re-derived from the operation and the disposition, never read",
+  );
+});
+
+test("a stored file whose disposition is not one Disktop knows is skipped, not guessed at", async () => {
+  const root = await sandbox();
+  const store = createPlanStore(root);
+  const saved = plan({
+    operation: "move",
+    destination: rawPathFromUtf8("/mnt/archive"),
+    sourceDisposition: "trash",
+  });
+  await store.save(saved);
+
+  const file = join(root, "plans", `${saved.id}.json`);
+  const tampered = JSON.parse(await readFile(file, "utf8"));
+  tampered.sourceDisposition = "shred";
+  await writeFile(file, JSON.stringify(tampered));
+
+  assert.equal(await store.get(saved.id), undefined);
+});

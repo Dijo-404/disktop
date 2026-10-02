@@ -78,7 +78,13 @@ function service(overrides = {}) {
           };
         },
       },
-      paths: { async facts() { return overrides.facts ?? facts(); } },
+      paths: {
+        async facts(path) {
+          return typeof overrides.facts === "function"
+            ? overrides.facts(path)
+            : (overrides.facts ?? facts());
+        },
+      },
       footprints: {
         async measure(paths) {
           return {
@@ -281,4 +287,243 @@ test("a file whose timestamp predates the epoch is planned, not crashed on", asy
 
   assert.equal(outcome.kind, "planned");
   assert.equal(outcome.plan.entries[0].expected.modifiedNanoseconds, 0n);
+});
+
+// --- Phase 5: move, compress, and hardlink plans ---
+
+/** Facts that put one path on another filesystem, so a move is a real move. */
+function acrossDisks(elsewhere) {
+  return (path) =>
+    path.display.startsWith(elsewhere)
+      ? facts({ kind: "directory", device: 2049n, inode: 2n })
+      : facts({ kind: "file", device: 66306n });
+}
+
+test("planning a move fixes where it publishes and what becomes of the source", async () => {
+  const { service: planner, saved } = service({ facts: acrossDisks("/mnt/archive") });
+
+  const outcome = await planner.plan(
+    {
+      operation: "move",
+      path: rawPathFromUtf8("/home/example/big.iso"),
+      destination: rawPathFromUtf8("/mnt/archive"),
+      sourceDisposition: "trash",
+    },
+    SIGNAL,
+  );
+
+  assert.equal(outcome.kind, "planned");
+  assert.equal(outcome.plan.operation, "move");
+  assert.equal(outcome.plan.destination.display, "/mnt/archive");
+  assert.equal(outcome.plan.sourceDisposition, "trash");
+  assert.deepEqual(saved, [outcome.plan]);
+});
+
+test("a move onto the same filesystem is refused: that is a rename, not a move", async () => {
+  const { service: planner } = service({
+    facts: (path) =>
+      path.display === "/home/example/elsewhere"
+        ? facts({ kind: "directory", device: 66306n })
+        : facts({ kind: "file", device: 66306n }),
+  });
+
+  const outcome = await planner.plan(
+    {
+      operation: "move",
+      path: rawPathFromUtf8("/home/example/big.iso"),
+      destination: rawPathFromUtf8("/home/example/elsewhere"),
+      sourceDisposition: "trash",
+    },
+    SIGNAL,
+  );
+
+  assert.equal(outcome.kind, "refused");
+  assert.equal(outcome.failure.code, "invalid-plan");
+  assert.match(outcome.failure.message, /same filesystem/i);
+});
+
+test("a move whose destination sits inside its own source is refused", async () => {
+  const { service: planner } = service({ facts: acrossDisks("/home/example/work/archive") });
+
+  const outcome = await planner.plan(
+    {
+      operation: "move",
+      path: rawPathFromUtf8("/home/example/work"),
+      destination: rawPathFromUtf8("/home/example/work/archive"),
+      sourceDisposition: "trash",
+    },
+    SIGNAL,
+  );
+
+  assert.equal(outcome.kind, "refused");
+  assert.equal(outcome.failure.code, "invalid-plan");
+  assert.match(outcome.failure.message, /inside/i);
+});
+
+test("a move without a destination is refused before anything is stored", async () => {
+  const { service: planner, saved } = service({ facts: facts({ kind: "file" }) });
+
+  const outcome = await planner.plan(
+    { operation: "move", path: rawPathFromUtf8("/home/example/big.iso"), sourceDisposition: "trash" },
+    SIGNAL,
+  );
+
+  assert.equal(outcome.kind, "refused");
+  assert.equal(outcome.failure.code, "invalid-input");
+  assert.deepEqual(saved, []);
+});
+
+test("a move without a source disposition is refused: apply time cannot choose", async () => {
+  const { service: planner } = service({ facts: acrossDisks("/mnt/archive") });
+
+  const outcome = await planner.plan(
+    {
+      operation: "move",
+      path: rawPathFromUtf8("/home/example/big.iso"),
+      destination: rawPathFromUtf8("/mnt/archive"),
+    },
+    SIGNAL,
+  );
+
+  assert.equal(outcome.kind, "refused");
+  assert.equal(outcome.failure.code, "invalid-input");
+});
+
+test("a move whose destination is a protected root is refused", async () => {
+  const { service: planner } = service({ facts: acrossDisks("/etc") });
+
+  const outcome = await planner.plan(
+    {
+      operation: "move",
+      path: rawPathFromUtf8("/home/example/big.iso"),
+      destination: rawPathFromUtf8("/etc"),
+      sourceDisposition: "trash",
+    },
+    SIGNAL,
+  );
+
+  assert.equal(outcome.kind, "refused");
+  assert.equal(outcome.failure.code, "protected-path");
+});
+
+test("a move whose destination does not exist is refused rather than created", async () => {
+  const { service: planner } = service({
+    facts: (path) =>
+      path.display === "/mnt/archive" ? undefined : facts({ kind: "file", device: 66306n }),
+  });
+
+  const outcome = await planner.plan(
+    {
+      operation: "move",
+      path: rawPathFromUtf8("/home/example/big.iso"),
+      destination: rawPathFromUtf8("/mnt/archive"),
+      sourceDisposition: "trash",
+    },
+    SIGNAL,
+  );
+
+  assert.equal(outcome.kind, "refused");
+  assert.match(outcome.failure.message, /\/mnt\/archive/);
+});
+
+test("a move whose destination is a file rather than a directory is refused", async () => {
+  const { service: planner } = service({
+    facts: (path) =>
+      path.display === "/mnt/archive"
+        ? facts({ kind: "file", device: 2049n })
+        : facts({ kind: "file", device: 66306n }),
+  });
+
+  const outcome = await planner.plan(
+    {
+      operation: "move",
+      path: rawPathFromUtf8("/home/example/big.iso"),
+      destination: rawPathFromUtf8("/mnt/archive"),
+      sourceDisposition: "trash",
+    },
+    SIGNAL,
+  );
+
+  assert.equal(outcome.kind, "refused");
+  assert.match(outcome.failure.message, /directory/i);
+});
+
+test("planning a compress publishes beside the source when no destination is named", async () => {
+  const { service: planner } = service({
+    facts: (path) =>
+      path.display === "/home/example"
+        ? facts({ kind: "directory", device: 66306n })
+        : facts({ kind: "directory", device: 66306n }),
+  });
+
+  const outcome = await planner.plan(
+    {
+      operation: "compress",
+      path: rawPathFromUtf8("/home/example/work"),
+      sourceDisposition: "trash",
+    },
+    SIGNAL,
+  );
+
+  assert.equal(outcome.kind, "planned");
+  assert.equal(
+    outcome.plan.destination.display,
+    "/home/example",
+    "an archive lands beside what it archives unless somebody said otherwise",
+  );
+  assert.equal(outcome.plan.sourceDisposition, "trash");
+});
+
+test("a permanent disposition makes the plan irreversible and says so", async () => {
+  const { service: planner } = service({ facts: acrossDisks("/mnt/archive") });
+
+  const outcome = await planner.plan(
+    {
+      operation: "move",
+      path: rawPathFromUtf8("/home/example/big.iso"),
+      destination: rawPathFromUtf8("/mnt/archive"),
+      sourceDisposition: "permanent",
+    },
+    SIGNAL,
+  );
+
+  assert.equal(outcome.kind, "planned");
+  assert.equal(outcome.plan.reversibility, "irreversible");
+  assert.ok(outcome.plan.warnings.some((warning) => /cannot be undone/i.test(warning)));
+});
+
+test("planning a hardlink replacement over one file is refused", async () => {
+  const { service: planner } = service({ facts: facts({ kind: "file" }) });
+
+  const outcome = await planner.plan(
+    { operation: "dedup-hardlink", path: rawPathFromUtf8("/home/example/a.bin") },
+    SIGNAL,
+  );
+
+  assert.equal(outcome.kind, "refused");
+  assert.equal(outcome.failure.code, "invalid-plan");
+  assert.match(outcome.failure.message, /two/i);
+});
+
+test("a hardlink plan over a group of duplicates fixes every path in it", async () => {
+  const { service: planner } = service({
+    facts: facts({ kind: "file", device: 66306n }),
+    findings: [
+      finding({
+        id: "duplicates:group-1",
+        paths: [rawPathFromUtf8("/home/example/a.bin"), rawPathFromUtf8("/home/example/b.bin")],
+        availableActionIds: ["dedup-hardlink"],
+      }),
+    ],
+  });
+
+  const outcome = await planner.plan(
+    { operation: "dedup-hardlink", findingId: "duplicates:group-1" },
+    SIGNAL,
+  );
+
+  assert.equal(outcome.kind, "planned");
+  assert.equal(outcome.plan.entries.length, 2);
+  assert.equal(outcome.plan.reversibility, "irreversible");
+  assert.equal(outcome.plan.destination, undefined);
 });

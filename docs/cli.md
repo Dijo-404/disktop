@@ -119,6 +119,24 @@ it is never presented as this action's doing alone.
 An action that skipped or failed anything exits `3`, so a script that never reads the
 JSON still learns that what was reviewed is not what happened.
 
+`--operation move` and `--operation compress` fix two more things that apply time may
+not change: `--destination PATH`, the directory the output is published into, and
+`--source trash|permanent`, what becomes of the original once that output is verified.
+A move has to name a destination — "somewhere else" is the whole point of one and
+there is no disk Disktop may pick on somebody's behalf — while a compress publishes
+beside the source unless told otherwise. A move onto the source's own filesystem is
+refused: it frees nothing, and `mv` already does it.
+
+A destination is judged by its own policy rather than by the one that bounds what
+Disktop may remove, because a cross-disk move means writing outside the user's roots by
+definition. `/mnt/archive` is a legitimate destination and an illegitimate target. What
+still applies is everything that says "not yours to write into": the protected system
+roots, the shared container roots themselves, and Trash and Disktop's own state.
+
+`--source permanent` makes the whole plan irreversible and carries the warning that
+says so, because publishing a copy and then releasing the original's bytes is a
+permanent removal with an extra step.
+
 Planning by `FINDING_ID` rediscovers first, so it takes as long as `disktop clean`
 does. Planning `--path` does not. A path whose bytes are not valid UTF-8 cannot be
 given as `--path`, because process arguments are UTF-8; such a path is still

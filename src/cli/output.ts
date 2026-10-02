@@ -298,6 +298,10 @@ export function encodeActionPlan(plan: ActionPlan): Record<string, unknown> {
         }),
     ...(plan.managerScope === undefined ? {} : { managerScope: plan.managerScope }),
     ...(plan.regenerationCost === undefined ? {} : { regenerationCost: plan.regenerationCost }),
+    ...(plan.destination === undefined ? {} : { destination: encodeRawPath(plan.destination) }),
+    ...(plan.sourceDisposition === undefined
+      ? {}
+      : { sourceDisposition: plan.sourceDisposition }),
     warnings: [...plan.warnings],
   };
 }

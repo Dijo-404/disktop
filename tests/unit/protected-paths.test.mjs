@@ -1,7 +1,12 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { rawPathFromBytes, rawPathFromUtf8 } from "../../dist/domain/paths.js";
-import { PROTECTED_ROOTS, classifyGenericTarget, isRefusedAsAllowedRoot } from "../../dist/domain/protected-paths.js";
+import {
+  PROTECTED_ROOTS,
+  classifyDestination,
+  classifyGenericTarget,
+  isRefusedAsAllowedRoot,
+} from "../../dist/domain/protected-paths.js";
 
 const context = {
   homeDirectory: rawPathFromUtf8("/home/example"),
@@ -99,4 +104,67 @@ test("an incomplete context fails closed rather than skipping a rule", () => {
     assert.equal(result.allowed, false, missing);
     assert.equal(result.code, "invalid-plan");
   }
+});
+
+// --- Phase 5: where a move or compress may publish ---
+
+test("a destination may be outside every allowed root, because that is the point of a move", () => {
+  const verdict = classifyDestination(rawPathFromUtf8("/mnt/archive"), context);
+
+  assert.equal(verdict.allowed, true);
+});
+
+test("a destination may be a mount root, which is usually exactly where another disk is", () => {
+  const verdict = classifyDestination(rawPathFromUtf8("/mnt/backup"), {
+    ...context,
+    mountRoots: [rawPathFromUtf8("/"), rawPathFromUtf8("/mnt/backup")],
+  });
+
+  assert.equal(verdict.allowed, true);
+});
+
+test("a destination may be the home directory, which is never a target but is a fine place to write", () => {
+  const verdict = classifyDestination(rawPathFromUtf8("/home/example"), context);
+
+  assert.equal(verdict.allowed, true);
+});
+
+test("a protected system root is never a destination", () => {
+  for (const path of ["/etc", "/usr/local", "/boot", "/"]) {
+    const verdict = classifyDestination(rawPathFromUtf8(path), context);
+    assert.equal(verdict.allowed, false, path);
+    assert.equal(verdict.code, "protected-path", path);
+  }
+});
+
+test("a shared container root is never a destination, though a directory inside one is", () => {
+  assert.equal(classifyDestination(rawPathFromUtf8("/mnt"), context).allowed, false);
+  assert.equal(classifyDestination(rawPathFromUtf8("/media"), context).allowed, false);
+  assert.equal(classifyDestination(rawPathFromUtf8("/mnt/archive"), context).allowed, true);
+});
+
+test("Trash and Disktop's own state are never a destination", () => {
+  const verdict = classifyDestination(
+    rawPathFromUtf8("/home/example/.local/share/Trash/files"),
+    context,
+  );
+
+  assert.equal(verdict.allowed, false);
+  assert.equal(verdict.code, "protected-path");
+});
+
+test("a relative or unnormalised destination is refused", () => {
+  for (const path of ["relative/path", "/mnt/../etc", "/mnt/./archive"]) {
+    assert.equal(classifyDestination(rawPathFromUtf8(path), context).allowed, false, path);
+  }
+});
+
+test("a destination is refused when the context nobody could read is incomplete", () => {
+  const verdict = classifyDestination(rawPathFromUtf8("/mnt/archive"), {
+    ...context,
+    excludedRoots: [],
+  });
+
+  assert.equal(verdict.allowed, false);
+  assert.equal(verdict.code, "invalid-plan");
 });
