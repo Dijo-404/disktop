@@ -20,7 +20,7 @@ export const ALLOWED_QUERIES: Readonly<Record<string, readonly (readonly QueryWo
   journalctl: [["--disk-usage"]],
   lsof: [["-v"], ["+L1", "-F", "pcnsk"]],
   npm: [["ls", "-g", "--depth=0", "--json"]],
-  pacman: [["-Qi"]],
+  pacman: [["-Qi"], ["-Q"]],
   pip: [["list", "--format=json"]],
   pip3: [["list", "--format=json"]],
   rpm: [["-qa", "--qf", "%{NAME}\t%{SIZE}\n"]],
