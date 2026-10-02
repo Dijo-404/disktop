@@ -1,0 +1,48 @@
+{
+  "schemaVersion": "1",
+  "command": "clean plan",
+  "generatedAt": "2026-10-02T09:00:00.000Z",
+  "status": "complete",
+  "exitCode": 0,
+  "data": {
+    "plan": {
+      "id": "plan-20261002090000000-0a9b8c7d",
+      "operation": "manager",
+      "createdAt": "2026-10-02T09:00:00.000Z",
+      "expiresAt": "2026-10-02T10:00:00.000Z",
+      "providerId": "managers",
+      "findingId": "managers:journald.vacuum",
+      "scopeSummary": "Archived systemd journal files",
+      "reversibility": "irreversible",
+      "permission": "manager-privilege",
+      "managerScope": "sudo journalctl --vacuum-size=536870912",
+      "manager": {
+        "action": "journald.vacuum",
+        "adapter": "journald",
+        "privilege": "root",
+        "parameters": {
+          "keepBytes": "536870912"
+        },
+        "items": [],
+        "commands": [
+          {
+            "tool": "journalctl",
+            "arguments": [
+              "--vacuum-size=536870912"
+            ],
+            "display": "sudo journalctl --vacuum-size=536870912"
+          }
+        ],
+        "perItem": false,
+        "count": {
+          "kind": "unknown"
+        },
+        "preview": "none"
+      },
+      "warnings": [
+        "The active journal file is never removed; only sealed, archived ones are.",
+        "This cannot be undone. The bytes are released rather than moved, and no journal entry can bring them back."
+      ]
+    }
+  }
+}

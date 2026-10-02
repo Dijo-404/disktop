@@ -15,6 +15,13 @@ import {
   reversibilityOf,
   type SourceDisposition,
 } from "../domain/actions.js";
+import {
+  describeCommand,
+  isManagerAction,
+  managerScope,
+  type ManagerPreview,
+  type ManagerScope,
+} from "../domain/managers.js";
 import type { RawPath } from "../domain/models.js";
 import { rawPathFromBytes } from "../domain/paths.js";
 import { decimalBytes, parseDecimalBytes } from "../domain/sizes.js";
@@ -25,7 +32,7 @@ const PRIVATE_FILE_MODE = 0o600;
 const PLAN_SUFFIX = ".json";
 
 /** Bumped when the stored shape changes, so an old plan is skipped, not guessed at. */
-export const PLAN_VERSION = 1;
+export const PLAN_VERSION = 2;
 
 /** The longest expiry `cleanup.plan_expiry_minutes` can configure. */
 const MAX_EXPIRY_MILLISECONDS = 1440 * 60_000;
@@ -139,9 +146,9 @@ function encodePlan(plan: ActionPlan): Record<string, unknown> {
     reversibility: plan.reversibility,
     permission: plan.permission,
     ...(plan.exactItemCount === undefined ? {} : { exactItemCount: decimalBytes(plan.exactItemCount) }),
-    selectedBytes: decimalBytes(plan.selectedBytes),
+    ...(plan.selectedBytes === undefined ? {} : { selectedBytes: decimalBytes(plan.selectedBytes) }),
     ...(plan.entries === undefined ? {} : { entries: plan.entries.map(encodeEntry) }),
-    ...(plan.managerScope === undefined ? {} : { managerScope: plan.managerScope }),
+    ...(plan.manager === undefined ? {} : { manager: encodeManager(plan.manager) }),
     ...(plan.regenerationCost === undefined ? {} : { regenerationCost: plan.regenerationCost }),
     ...(plan.destination === undefined ? {} : { destination: plan.destination.bytesBase64 }),
     ...(plan.sourceDisposition === undefined
@@ -151,6 +158,76 @@ function encodePlan(plan: ActionPlan): Record<string, unknown> {
     ...(plan.ruleHash === undefined ? {} : { ruleHash: plan.ruleHash }),
     warnings: [...plan.warnings],
   };
+}
+
+function encodeManager(scope: ManagerScope): Record<string, unknown> {
+  return {
+    action: scope.action,
+    parameters: { ...scope.parameters },
+    items: scope.items.map((item) => ({
+      id: item.id,
+      ...(item.bytes === undefined ? {} : { bytes: decimalBytes(item.bytes) }),
+    })),
+    count:
+      scope.count.kind === "unknown"
+        ? { kind: "unknown" }
+        : { kind: scope.count.kind, value: decimalBytes(scope.count.value) },
+    ...(scope.estimatedBytes === undefined ? {} : { estimatedBytes: decimalBytes(scope.estimatedBytes) }),
+    preview: scope.preview,
+  };
+}
+
+const MANAGER_KEYS = new Set(["action", "parameters", "items", "count", "estimatedBytes", "preview"]);
+const PREVIEWS: readonly ManagerPreview[] = ["listed", "simulated", "none"];
+
+function decodeManager(value: unknown): ManagerScope {
+  if (!isRecord(value) || Object.keys(value).some((key) => !MANAGER_KEYS.has(key))) {
+    throw new RangeError("A stored manager selection holds something this build does not read");
+  }
+  const action = text(value.action);
+  if (!isManagerAction(action)) {
+    throw new RangeError("A stored manager selection names an action this build does not know");
+  }
+  const parameters = value.parameters;
+  if (!isRecord(parameters)) {
+    throw new RangeError("A stored manager selection has no parameters");
+  }
+  const items = value.items;
+  if (!Array.isArray(items)) {
+    throw new RangeError("A stored manager selection has no items");
+  }
+  const count = value.count;
+  if (!isRecord(count)) {
+    throw new RangeError("A stored manager selection has no count");
+  }
+  const kind = text(count.kind);
+  const preview = text(value.preview) as ManagerPreview;
+  if (!PREVIEWS.includes(preview)) {
+    throw new RangeError("A stored manager selection has no preview kind");
+  }
+  return managerScope({
+    action,
+    parameters: Object.fromEntries(Object.entries(parameters).map(([key, entry]) => [key, text(entry)])),
+    items: items.map((item: unknown) => {
+      if (!isRecord(item) || Object.keys(item).some((key) => key !== "id" && key !== "bytes")) {
+        throw new RangeError("A stored manager item holds something this build does not read");
+      }
+      return {
+        id: text(item.id),
+        ...(item.bytes === undefined ? {} : { bytes: parseDecimalBytes(text(item.bytes)) }),
+      };
+    }),
+    count:
+      kind === "unknown"
+        ? { kind }
+        : kind === "exact" || kind === "estimated"
+          ? { kind, value: parseDecimalBytes(text(count.value)) }
+          : (() => {
+              throw new RangeError("A stored manager count is not one this build knows");
+            })(),
+    ...(value.estimatedBytes === undefined ? {} : { estimatedBytes: parseDecimalBytes(text(value.estimatedBytes)) }),
+    preview,
+  });
 }
 
 function encodeEntry(entry: PlannedEntry): Record<string, unknown> {
@@ -218,6 +295,25 @@ function decodePlan(document: unknown): ActionPlan | undefined {
   if (operation !== "manager" && (decodedEntries === undefined || decodedEntries.length === 0)) {
     return undefined;
   }
+  if ((operation === "manager") !== (document.manager !== undefined)) {
+    return undefined;
+  }
+  const manager = operation === "manager" ? decodeManager(document.manager) : undefined;
+  if (manager !== undefined) {
+    if (decodedEntries !== undefined) {
+      return undefined;
+    }
+    const stored = document.selectedBytes === undefined ? undefined : parseDecimalBytes(text(document.selectedBytes));
+    if (stored !== manager.estimatedBytes) {
+      return undefined;
+    }
+    const exact = manager.count.kind === "exact" ? manager.count.value : undefined;
+    const storedCount =
+      document.exactItemCount === undefined ? undefined : parseDecimalBytes(text(document.exactItemCount));
+    if (storedCount !== exact) {
+      return undefined;
+    }
+  }
   if (decodedEntries !== undefined) {
     const total = decodedEntries.reduce((sum, entry) => sum + entry.reviewedBytes, 0n);
     if (parseDecimalBytes(text(document.selectedBytes)) !== total) {
@@ -242,13 +338,20 @@ function decodePlan(document: unknown): ActionPlan | undefined {
     // Re-derived, never read: a stored claim that a permanent removal can be
     // undone would slip past the acknowledgement an irreversible plan needs.
     reversibility: reversibilityOf(operation, disposition),
-    permission: text(document.permission) === "manager-privilege" ? "manager-privilege" : "user",
+    permission: manager?.privilege === "root" ? "manager-privilege" : "user",
     ...(document.exactItemCount === undefined
       ? {}
       : { exactItemCount: parseDecimalBytes(text(document.exactItemCount)) }),
-    selectedBytes: parseDecimalBytes(text(document.selectedBytes)),
+    ...(document.selectedBytes === undefined
+      ? {}
+      : { selectedBytes: parseDecimalBytes(text(document.selectedBytes)) }),
     ...(decodedEntries === undefined ? {} : { entries: decodedEntries }),
-    ...(document.managerScope === undefined ? {} : { managerScope: text(document.managerScope) }),
+    ...(manager === undefined
+      ? {}
+      : {
+          managerScope: manager.commands.map((command) => describeCommand(command, manager.privilege)).join("; "),
+          manager,
+        }),
     ...(document.regenerationCost === undefined
       ? {}
       : { regenerationCost: text(document.regenerationCost) }),

@@ -1,3 +1,4 @@
+import { describeCommand, type ManagerScope } from "../domain/managers.js";
 import type { Alert, Capability, Filesystem, IndexedEntry, RawPath, ScanCompleteness, StorageDevice, Warning } from "../domain/models.js";
 import type { ScanTotals, TypeTotal } from "../ports/scan.js";
 import type { SnapshotSummary } from "../ports/snapshots.js";
@@ -267,6 +268,31 @@ export function encodeCategoryTotal(total: CategoryTotal): Record<string, unknow
   };
 }
 
+export function encodeManagerScope(scope: ManagerScope): Record<string, unknown> {
+  return {
+    action: scope.action,
+    adapter: scope.adapter,
+    privilege: scope.privilege,
+    parameters: { ...scope.parameters },
+    items: scope.items.map((item) => ({
+      id: item.id,
+      ...(item.bytes === undefined ? {} : { bytes: decimalBytes(item.bytes) }),
+    })),
+    commands: scope.commands.map((command) => ({
+      tool: command.tool,
+      arguments: [...command.arguments],
+      display: describeCommand(command, scope.privilege),
+    })),
+    perItem: scope.perItem,
+    count:
+      scope.count.kind === "unknown"
+        ? { kind: "unknown" }
+        : { kind: scope.count.kind, value: decimalBytes(scope.count.value) },
+    ...(scope.estimatedBytes === undefined ? {} : { estimatedBytes: decimalBytes(scope.estimatedBytes) }),
+    preview: scope.preview,
+  };
+}
+
 export function encodeActionPlan(plan: ActionPlan): Record<string, unknown> {
   return {
     id: plan.id,
@@ -279,7 +305,7 @@ export function encodeActionPlan(plan: ActionPlan): Record<string, unknown> {
     reversibility: plan.reversibility,
     permission: plan.permission,
     ...(plan.exactItemCount === undefined ? {} : { exactItemCount: decimalBytes(plan.exactItemCount) }),
-    selectedBytes: decimalBytes(plan.selectedBytes),
+    ...(plan.selectedBytes === undefined ? {} : { selectedBytes: decimalBytes(plan.selectedBytes) }),
     ...(plan.entries === undefined
       ? {}
       : {
@@ -300,6 +326,7 @@ export function encodeActionPlan(plan: ActionPlan): Record<string, unknown> {
           })),
         }),
     ...(plan.managerScope === undefined ? {} : { managerScope: plan.managerScope }),
+    ...(plan.manager === undefined ? {} : { manager: encodeManagerScope(plan.manager) }),
     ...(plan.regenerationCost === undefined ? {} : { regenerationCost: plan.regenerationCost }),
     ...(plan.destination === undefined ? {} : { destination: encodeRawPath(plan.destination) }),
     ...(plan.sourceDisposition === undefined

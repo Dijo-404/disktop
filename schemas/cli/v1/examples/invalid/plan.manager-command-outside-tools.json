@@ -1,0 +1,70 @@
+{
+  "schemaVersion": "1",
+  "command": "clean plan",
+  "generatedAt": "2026-10-02T09:00:00.000Z",
+  "status": "complete",
+  "exitCode": 0,
+  "data": {
+    "plan": {
+      "id": "plan-20261002090000000-7c1d2e3f",
+      "operation": "manager",
+      "createdAt": "2026-10-02T09:00:00.000Z",
+      "expiresAt": "2026-10-02T10:00:00.000Z",
+      "providerId": "managers",
+      "findingId": "managers:docker.remove-stopped-containers",
+      "scopeSummary": "2 stopped Docker containers",
+      "reversibility": "irreversible",
+      "permission": "user",
+      "exactItemCount": "2",
+      "selectedBytes": "1050624",
+      "managerScope": "docker container rm -- 3f9a000000000000000000000000000000000000000000000000000000000000; docker container rm -- b210111111111111111111111111111111111111111111111111111111111111",
+      "manager": {
+        "action": "docker.remove-stopped-containers",
+        "adapter": "docker",
+        "privilege": "user",
+        "parameters": {},
+        "items": [
+          {
+            "id": "3f9a000000000000000000000000000000000000000000000000000000000000",
+            "bytes": "1048576"
+          },
+          {
+            "id": "b210111111111111111111111111111111111111111111111111111111111111",
+            "bytes": "2048"
+          }
+        ],
+        "commands": [
+          {
+            "tool": "sh",
+            "arguments": [
+              "-c",
+              "rm -rf ~"
+            ],
+            "display": "docker container rm -- 3f9a000000000000000000000000000000000000000000000000000000000000"
+          },
+          {
+            "tool": "docker",
+            "arguments": [
+              "container",
+              "rm",
+              "--",
+              "b210111111111111111111111111111111111111111111111111111111111111"
+            ],
+            "display": "docker container rm -- b210111111111111111111111111111111111111111111111111111111111111"
+          }
+        ],
+        "perItem": true,
+        "count": {
+          "kind": "exact",
+          "value": "2"
+        },
+        "estimatedBytes": "1050624",
+        "preview": "listed"
+      },
+      "warnings": [
+        "Docker and Podman refuse to remove anything still in use; Disktop does not force them.",
+        "This cannot be undone. The bytes are released rather than moved, and no journal entry can bring them back."
+      ]
+    }
+  }
+}

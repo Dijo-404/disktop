@@ -298,3 +298,123 @@ test("a stored subtree whose digest is not a digest is not read", async () => {
     undefined,
   );
 });
+
+// --- Manager plans ---
+
+async function managerPlan(scopeInput) {
+  const { managerScope } = await import("../../dist/domain/managers.js");
+  return buildPlan({
+    operation: "manager",
+    providerId: "managers",
+    findingId: `managers:${scopeInput.action}`,
+    scopeSummary: "Stopped containers",
+    createdAt: NOW,
+    expiryMinutes: 60,
+    entries: [],
+    manager: managerScope(scopeInput),
+    warnings: [],
+  });
+}
+
+const CONTAINERS = {
+  action: "docker.remove-stopped-containers",
+  items: [{ id: "c".repeat(64), bytes: 1024n }],
+  parameters: {},
+  count: { kind: "exact", value: 1n },
+  estimatedBytes: 1024n,
+  preview: "listed",
+};
+
+async function storedManager(edit) {
+  const root = await sandbox();
+  const store = createPlanStore(root);
+  const saved = await managerPlan(CONTAINERS);
+  await store.save(saved);
+  const file = join(root, "plans", `${saved.id}.json`);
+  const document = JSON.parse(await readFile(file, "utf8"));
+  edit?.(document);
+  await writeFile(file, JSON.stringify(document));
+  return { saved, loaded: await store.get(saved.id), document };
+}
+
+test("a manager plan round-trips, and its commands are derived rather than stored", async () => {
+  const { saved, loaded, document } = await storedManager();
+  assert.deepEqual(loaded, saved);
+  assert.equal(document.manager.commands, undefined, "no argv is written to the plan file");
+  assert.deepEqual(loaded.manager.commands, [
+    { tool: "docker", arguments: ["container", "rm", "--", "c".repeat(64)] },
+  ]);
+});
+
+test("a manager plan with an unknown estimate stores no selected bytes and reads back without any", async () => {
+  const root = await sandbox();
+  const store = createPlanStore(root);
+  const saved = await managerPlan({
+    action: "journald.vacuum",
+    items: [],
+    parameters: { keepBytes: "536870912" },
+    count: { kind: "unknown" },
+    preview: "none",
+  });
+  await store.save(saved);
+  const loaded = await store.get(saved.id);
+  assert.equal(loaded.selectedBytes, undefined);
+  assert.deepEqual(loaded, saved);
+});
+
+const MANAGER_TAMPERINGS = {
+  "a command written into it": (document) => {
+    document.manager.commands = [{ tool: "sh", arguments: ["-c", "rm -rf ~"] }];
+  },
+  "an item that reads as an option": (document) => {
+    document.manager.items[0].id = "--all";
+  },
+  "an action this build does not know": (document) => {
+    document.manager.action = "docker.system-prune";
+  },
+  "entries beside its manager selection": (document) => {
+    document.entries = [];
+  },
+  "a selected total that is not its estimate": (document) => {
+    document.selectedBytes = "999";
+  },
+  "a count that is not its item count": (document) => {
+    document.exactItemCount = "9";
+  },
+  "a parameter its action does not take": (document) => {
+    document.manager.parameters = { keepBytes: "1" };
+  },
+};
+
+for (const [name, edit] of Object.entries(MANAGER_TAMPERINGS)) {
+  test(`a stored manager plan is not read when it has ${name}`, async () => {
+    const { loaded } = await storedManager(edit);
+    assert.equal(loaded, undefined);
+  });
+}
+
+test("a stored plan from the previous format is not read", async () => {
+  const { loaded } = await storedManager((document) => {
+    document.version = 1;
+  });
+  assert.equal(loaded, undefined);
+});
+
+test("a stored file cannot claim a manager plan needs no administrator rights", async () => {
+  const root = await sandbox();
+  const store = createPlanStore(root);
+  const saved = await managerPlan({
+    action: "apt.clean",
+    items: [{ id: "curl_8.5.0-2_amd64.deb", bytes: 1n }],
+    parameters: {},
+    count: { kind: "exact", value: 1n },
+    estimatedBytes: 1n,
+    preview: "listed",
+  });
+  await store.save(saved);
+  const file = join(root, "plans", `${saved.id}.json`);
+  const document = JSON.parse(await readFile(file, "utf8"));
+  document.permission = "user";
+  await writeFile(file, JSON.stringify(document));
+  assert.equal((await store.get(saved.id)).permission, "manager-privilege");
+});
