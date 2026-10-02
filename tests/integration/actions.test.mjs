@@ -1128,3 +1128,109 @@ test("a rule naming a protected root is reported when the configuration loads", 
   assert.ok(problem, `warnings were ${JSON.stringify(document.warnings)}`);
   assert.match(problem.message, /etc/);
 });
+
+test("an applied action reports what it checked, and a failed check keeps it off 'complete'", async () => {
+  const home = await disktopHome();
+  const tree = await createActionTree(home);
+
+  const { apply } = planAndApply(home, tree.cache);
+
+  const checks = apply.data.result.verification;
+  assert.ok(Array.isArray(checks) && checks.length > 0, "an apply says what it checked");
+  assert.ok(
+    checks.every((check) => ["passed", "failed", "unavailable"].includes(check.outcome)),
+    JSON.stringify(checks),
+  );
+  const reading = checks.find((check) => check.check === "free-space-read");
+  assert.ok(reading, "the free-space reading is one of the checks");
+  assert.notEqual(
+    reading.outcome,
+    "failed",
+    "reading free space on a real filesystem either works or is unavailable",
+  );
+
+  if (checks.some((check) => check.outcome === "failed")) {
+    assert.notEqual(apply.data.result.state, "complete");
+  }
+});
+
+test("a compress undo says the archive it published is still there", async () => {
+  const home = await disktopHome();
+  const tree = await createActionTree(home);
+
+  const planned = envelope(
+    disktop(home, [
+      "clean",
+      "plan",
+      "--path",
+      tree.artifacts,
+      "--operation",
+      "compress",
+      "--source",
+      "trash",
+      "--json",
+    ]),
+    "plan",
+  );
+  const applied = envelope(
+    disktop(home, ["clean", "apply", planned.data.plan.id, "--yes", "--json"]),
+    "apply",
+  );
+
+  const undone = envelope(
+    disktop(home, ["undo", applied.data.result.journalId, "--yes", "--json"]),
+    "undo",
+  );
+
+  assert.ok(existsSync(tree.artifacts), "the source came back");
+  assert.ok(
+    existsSync(`${tree.artifacts}.tar.zst`),
+    "the archive is left where it was put; an undo does not remove anything else",
+  );
+  assert.ok(
+    undone.data.result.notes?.some((note) => /archive/i.test(note)),
+    `notes were ${JSON.stringify(undone.data.result.notes)}`,
+  );
+});
+
+test("history marks a compress that trashed its source as undoable, and a permanent one not", async () => {
+  const home = await disktopHome();
+  const tree = await createActionTree(home);
+
+  for (const [path, disposition] of [
+    [tree.artifacts, "trash"],
+    [tree.single, "permanent"],
+  ]) {
+    const planned = envelope(
+      disktop(home, [
+        "clean",
+        "plan",
+        "--path",
+        path,
+        "--operation",
+        "compress",
+        "--source",
+        disposition,
+        "--json",
+      ]),
+      "plan",
+    );
+    disktop(home, [
+      "clean",
+      "apply",
+      planned.data.plan.id,
+      "--yes",
+      ...(disposition === "permanent" ? ["--permanent"] : []),
+      "--json",
+    ]);
+  }
+
+  const history = envelope(disktop(home, ["history", "--json"]), "history");
+  const records = history.data.records.filter((record) => record.operation === "compress");
+  assert.equal(records.length, 2);
+
+  const undoable = records.filter((record) =>
+    record.items.some((item) => item.outcome === "completed" && item.destination !== undefined),
+  );
+  assert.equal(undoable.length, 1, "only the one that trashed its source left anything to put back");
+});

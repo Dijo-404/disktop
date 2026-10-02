@@ -10,7 +10,7 @@ The user journey is: open a fast dashboard → identify a full filesystem → in
 
 ### Current implementation boundary
 
-The development package remains private at `0.0.0`. **Phases 0, 1, 2, 3, and 4 are complete**; Phase 5 is the next gate.
+The development package remains private at `0.0.0`. **Phases 0, 1, 2, 3, 4, and 5 are complete**; Phase 6 is the next gate.
 
 Phase 0 delivered the contracts, not features: normative JSON Schemas for CLI output (`schemas/cli/v1/`) and the helper protocol (`schemas/native/v1/`) with valid and invalid examples under contract test; byte-exact path handling and the protected-path refusal policy in `src/domain`; XDG locations, configuration defaults, and a strict TOML subset reader in `src/storage`; the source dependency rule enforced by `eslint.config.mjs` and proven by `tests/unit/dependency-rules.test.mjs`; the filesystem fixture generator in `tests/fixtures/generate.mjs`; the fixed kernel and architecture minimums in `docs/support-matrix.md`; the action threat model in `docs/threat-model.md`; and ADRs 0001 to 0005.
 
@@ -33,10 +33,29 @@ exclusive create and renaming with `RENAME_NOREPLACE`. `disktop clean plan`,
 index now records each directory's direct child count and whether each symlink
 resolves, so those two searches are a filter rather than a second walk.
 
-`report`, `timer`, `completion`, and `find duplicates|stale` are declared in the
-parser and refuse with `not-implemented`; the helper still refuses `copy-move`,
-`compress`, `dedup-hardlink`, `hash-candidates`, `inspect`, and every manager
-operation. Explore, Clean, Dev, Apps, and History appear as TUI tabs and say they have
+Phase 5 delivered the advanced analysis and the actions that publish something.
+`native/disktop-fs/src/content.rs` draws the line the rest of the phase rests on: a
+digest groups candidates and a byte compare authorises a mutation, and every operation
+that releases one copy because another exists re-reads both files in full immediately
+before the syscall. `hash-candidates` narrows a scan's size classes by an edge digest and
+then by a full digest, excluding second hardlinks, and `disktop find duplicates` applies
+a keep rule to what comes back — reporting the group undecided rather than guessing when
+the rule cannot separate them. `disktop find stale` measures modification time and
+carries the mount's own options as the confidence beside it. A plan now fixes a
+destination, a source disposition, the copy a hardlink replacement keeps, and the hash of
+the cleanup rule it came from; `classifyDestination` judges where output may be written,
+which is a different question from what may be removed. The helper gained
+`dedup-hardlink`, `copy-move`, and `compress`, each staging its output, verifying it —
+by reading the bytes back for a copy, by decompressing for an archive — publishing it
+without overwriting, and only then disposing of the source. `[[rules]]` blocks in
+`config.toml` become findings through a provider with no more power than any other, and
+an apply refuses a plan whose rule has been edited since it was reviewed. Every result
+now carries what the apply checked after the fact, and a failed check keeps it off
+`complete`.
+
+`report`, `timer`, and `completion` are declared in the parser and refuse with
+`not-implemented`; the helper still refuses `inspect` and every manager operation.
+Explore, Clean, Dev, Apps, and History appear as TUI tabs and say they have
 nothing to show yet; the work so far is reachable from the CLI, and wiring it into
 those tabs is Phase 7.
 
@@ -347,7 +366,7 @@ Each phase ends with a testable gate. No phase publishes to npm.
 | 2. Scanner, index, search, history **(complete)** | Build fd-relative walk, allocated/apparent/hardlink accounting, bounded SQLite index, query filters, file-type totals, cached scan view, snapshot comparison and pruning. | Million-entry memory gate, `du -x` comparison where semantics match, invalid-byte names, bind mounts, inaccessible dirs, cancel/restart, and snapshot compatibility tests pass. |
 | 3. Findings and application inventory **(complete)** | Implement every dev, language, AI, browser, Electron, game, VM, package, and per-user detector plus SMART, open-deleted, snapshot, log, crash, swap, and WSL diagnostics. | Each provider passes fixtures; optional tools and permissions show capability states; no duplicate findings or unlabelled size estimates. |
 | 4. Safe action engine **(complete)** | Implement immutable plans, native journal, Trash, undo, permanent erase, empty folders, broken symlinks, user caches/temp cleanup, Trash emptying, action history, interruption and restart recovery. | All mutations pass sandbox, symlink/bind-mount, collision, protected-root, invalid-byte, crash, and undo tests. Moved-to-Trash and observed free-space values are distinct. |
-| 5. Advanced analysis and actions | Implement staged duplicate hashes, stale evidence, keep rules, hardlink replacement, cross-disk move, compression, custom rules, and action verification. | Final byte compare, metadata compatibility, copy/hash/fsync, partial-failure recovery, rule limits, and explicit irreversible-action tests pass. |
+| 5. Advanced analysis and actions **(complete)** | Implement staged duplicate hashes, stale evidence, keep rules, hardlink replacement, cross-disk move, compression, custom rules, and action verification. | Final byte compare, metadata compatibility, copy/hash/fsync, partial-failure recovery, rule limits, and explicit irreversible-action tests pass. |
 | 6. Managed Linux cleanup and alerts | Implement apt/dnf/pacman, journald, Snap, Flatpak, Docker/Podman including volumes, old kernels, `/var/crash`/core policy, system tmpfiles, scoped privilege requests, per-user breakdown, `notify-send` and systemd timer. | Distro-specific adapter tests and host/VM checks pass; every manager action has bounded scope, live preflight, apply, verify, permission, and unsupported cases, with preview where the manager supports it. Timer install/uninstall changes only user units and never cleans automatically. |
 | 7. Complete surfaces | Finish all TUI views, themes, vim/mouse/help, search, config, JSON/CSV/HTML exports, all CLI commands, completions, readable help, README, demo GIF, and no-telemetry statement. | A user can complete every core journey at 80×24; all commands work with no TTY and valid stdout; exports survive malicious filenames. |
 | 8. Whole-product validation and sole release | Run Linux distro CI, native builds, PTY and recovery suites, package smoke tests, benchmarks, docs review, support-matrix checks, and guarded publish workflow. | All rows in the feature matrix below pass; no unresolved critical deletion or data-loss bug; packed tarball and `npx` work on clean accounts. Publish `1.0.0` once, then verify provenance and install from the registry. |

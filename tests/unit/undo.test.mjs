@@ -119,3 +119,61 @@ test("history reconciles before it is read, so an abandoned action never reads a
   assert.equal(page.reconciled, 2n);
   assert.equal(page.records.length, 1);
 });
+
+// --- Undoing the shapes that publish an output ---
+
+test("undoing a move that trashed its source restores it and says the copy is still there", async () => {
+  const moved = { ...TRASHED, id: "act-move", operation: "copy-move" };
+  const { service: undo, calls } = service([moved]);
+
+  const outcome = await undo.restore("act-move", SIGNAL);
+
+  assert.equal(outcome.kind, "restored");
+  assert.ok(calls.some((call) => call.kind === "restore"));
+  assert.ok(
+    outcome.notes.some((note) => /copy|destination|published/i.test(note)),
+    `notes were ${JSON.stringify(outcome.notes)}`,
+  );
+});
+
+test("undoing a compress says the archive it published is still where it was put", async () => {
+  const compressed = { ...TRASHED, id: "act-zst", operation: "compress" };
+  const { service: undo } = service([compressed]);
+
+  const outcome = await undo.restore("act-zst", SIGNAL);
+
+  assert.equal(outcome.kind, "restored");
+  assert.ok(
+    outcome.notes.some((note) => /archive/i.test(note)),
+    `notes were ${JSON.stringify(outcome.notes)}`,
+  );
+});
+
+test("undoing a move whose source was removed permanently refuses", async () => {
+  const permanent = {
+    ...TRASHED,
+    id: "act-permanent",
+    operation: "copy-move",
+    bytesMovedToTrash: 0n,
+    items: [{ ...TRASHED.items[0], destination: undefined }],
+  };
+  const { service: undo, calls } = service([permanent]);
+
+  const outcome = await undo.restore("act-permanent", SIGNAL);
+
+  assert.equal(outcome.kind, "refused");
+  assert.match(outcome.failure.message, /permanently|nothing to put back/i);
+  assert.equal(calls.some((call) => call.kind === "restore"), false);
+});
+
+test("a plain Trash undo says nothing about a destination it never had", async () => {
+  const { service: undo } = service([TRASHED]);
+
+  const outcome = await undo.restore(TRASHED.id, SIGNAL);
+
+  assert.equal(outcome.kind, "restored");
+  assert.equal(
+    outcome.notes.some((note) => /archive|copy at the destination/i.test(note)),
+    false,
+  );
+});

@@ -1133,8 +1133,17 @@ fn dispose_of_source(
                 }
             }
         }
-        SourceDisposition::Permanent => remove_entry(parent.descriptor(), &parent.name, live.kind)
-            .map_err(|error| error.to_string()),
+        SourceDisposition::Permanent => {
+            // The item's destination is where the source went such that it can
+            // be put back, and a permanent removal has nowhere. Clearing it is
+            // what makes `undo` refuse this record rather than try to rename
+            // the published output back over the original's path.
+            if let Err(error) = journal.record_intent(journal_id, position, &target.path, None) {
+                return published_but_kept(target, &error.to_string());
+            }
+            remove_entry(parent.descriptor(), &parent.name, live.kind)
+                .map_err(|error| error.to_string())
+        }
     };
 
     match removed {

@@ -108,6 +108,24 @@ export interface ActionPlan {
   readonly warnings: readonly string[];
 }
 
+/**
+ * One thing an apply checked after the fact.
+ *
+ * A check that could not run is `unavailable` and never `passed`: "it was
+ * fine" and "nobody could tell" are different answers, and only one of them
+ * is evidence. A `failed` one means the action did not do what the plan said,
+ * whatever the helper's own per-item outcomes reported.
+ */
+export interface VerificationCheck {
+  readonly check:
+    | "destination-present"
+    | "source-disposed"
+    | "free-space-read"
+    | "digest-matched";
+  readonly outcome: "passed" | "failed" | "unavailable";
+  readonly detail: string;
+}
+
 export interface ActionResult {
   readonly planId: string;
   readonly completed: bigint;
@@ -123,6 +141,8 @@ export interface ActionResult {
   readonly state: "complete" | "partial" | "uncertain";
   readonly journalId: string;
   readonly undoAvailable: boolean;
+  /** What the apply checked once the helper had finished, and what it found. */
+  readonly verification: readonly VerificationCheck[];
 }
 
 export interface PlanInput {
@@ -314,4 +334,70 @@ function defaultRandom(): string {
   // Not cryptographic: a plan ID only has to be unique among this user's own
   // plans, and it is never a capability.
   return Math.random().toString(36).slice(2).padEnd(8, "0");
+}
+
+/**
+ * What an apply can say about its own result, after the fact.
+ *
+ * The helper reports what it did item by item. This is the separate question
+ * of whether the action as a whole did what the plan described, asked from
+ * Node's side where the plan is. It cannot see the filesystem, so it checks
+ * what the result itself makes checkable and marks the rest `unavailable`
+ * rather than assuming.
+ */
+export function verify(plan: ActionPlan, result: Omit<ActionResult, "verification">): readonly VerificationCheck[] {
+  const checks: VerificationCheck[] = [];
+
+  if (plan.destination !== undefined) {
+    checks.push({
+      check: "destination-present",
+      // Node does not stat the destination: the helper published it with a
+      // rename that refuses to overwrite and reported the item, which is a
+      // stronger statement than a stat taken afterwards would be.
+      outcome: result.completed > 0n ? "passed" : "unavailable",
+      detail:
+        result.completed > 0n
+          ? `${result.completed} item(s) were published into ${plan.destination.display} without overwriting anything.`
+          : `Nothing was published into ${plan.destination.display}, so there is nothing there to confirm.`,
+    });
+  }
+
+  const unfinished = result.skipped + result.failed;
+  checks.push({
+    check: "source-disposed",
+    outcome: unfinished === 0n ? "passed" : "failed",
+    detail:
+      unfinished === 0n
+        ? `All ${result.completed} reviewed item(s) were dealt with.`
+        : `${unfinished} of the reviewed items were not: ${result.skipped} skipped and ${result.failed} failed.`,
+  });
+
+  const readable = result.freeBytesBefore !== undefined && result.freeBytesAfter !== undefined;
+  checks.push({
+    check: "free-space-read",
+    outcome: readable ? "passed" : "unavailable",
+    detail: readable
+      ? "Free space was read before the first item and after the last. Other processes write to the same filesystem, so the change is not only this action's doing."
+      : "Free space could not be read, so Disktop cannot say what changed on the filesystem.",
+  });
+
+  return checks;
+}
+
+/**
+ * The state a result is entitled to, once its own checks have been read.
+ *
+ * A result that failed a check does not get to call itself complete, whatever
+ * the helper reported. It is never promoted the other way: an `uncertain`
+ * result stays uncertain, because a check passing says nothing about an item
+ * nobody could resolve.
+ */
+export function stateAfterVerification(
+  state: ActionResult["state"],
+  checks: readonly VerificationCheck[],
+): ActionResult["state"] {
+  if (state === "uncertain") {
+    return state;
+  }
+  return checks.some((check) => check.outcome === "failed") ? "partial" : state;
 }

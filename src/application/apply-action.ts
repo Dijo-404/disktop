@@ -1,6 +1,8 @@
 import {
   isExpired,
   requiresAcknowledgement,
+  stateAfterVerification,
+  verify,
   type ActionPlan,
   type ActionResult,
 } from "../domain/actions.js";
@@ -118,9 +120,9 @@ export function createApplyService(dependencies: ApplyDependencies): ApplyServic
         );
       }
 
-      let result: ActionResult;
+      let applied: ActionResult;
       try {
-        result = await dependencies.actions.apply(plan, signal);
+        applied = await dependencies.actions.apply(plan, signal);
       } catch (error) {
         if (error instanceof CapabilityUnavailable) {
           return { kind: "unavailable", capability: error.capability };
@@ -131,6 +133,15 @@ export function createApplyService(dependencies: ApplyDependencies): ApplyServic
         }
         throw error;
       }
+
+      // What the helper did, and then the separate question of whether the
+      // action as a whole did what the plan described.
+      const verification = verify(plan, applied);
+      const result: ActionResult = {
+        ...applied,
+        verification,
+        state: stateAfterVerification(applied.state, verification),
+      };
 
       const change =
         result.freeBytesBefore === undefined || result.freeBytesAfter === undefined

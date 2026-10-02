@@ -254,3 +254,87 @@ test("a plan from a rule is applied when nothing can say what the rules are now"
   );
   assert.equal(applied.length, 1);
 });
+
+// --- What an apply checked after the fact ---
+
+test("an apply reports what it verified, with the free-space reading among it", async () => {
+  const stored = plan();
+  const { service: apply } = service(stored);
+
+  const outcome = await apply.apply({ planId: stored.id, confirmed: true }, SIGNAL);
+
+  assert.equal(outcome.kind, "applied");
+  const reading = outcome.result.verification.find((check) => check.check === "free-space-read");
+  assert.ok(reading, `verification was ${JSON.stringify(outcome.result.verification)}`);
+  assert.equal(reading.outcome, "passed");
+});
+
+test("a check that could not run is unavailable, never passed", async () => {
+  const stored = plan();
+  const { service: apply } = service(stored, {
+    result: { ...RESULT, planId: "", freeBytesBefore: undefined, freeBytesAfter: undefined },
+  });
+
+  const outcome = await apply.apply({ planId: stored.id, confirmed: true }, SIGNAL);
+
+  const reading = outcome.result.verification.find((check) => check.check === "free-space-read");
+  assert.equal(reading.outcome, "unavailable");
+  assert.notEqual(reading.outcome, "passed");
+});
+
+test("an action that skipped or failed an item is verified as not having disposed of everything", async () => {
+  const stored = plan();
+  const { service: apply } = service(stored, {
+    result: { ...RESULT, planId: "", completed: 0n, failed: 1n, state: "partial" },
+  });
+
+  const outcome = await apply.apply({ planId: stored.id, confirmed: true }, SIGNAL);
+
+  const disposed = outcome.result.verification.find((check) => check.check === "source-disposed");
+  assert.equal(disposed.outcome, "failed");
+  assert.match(disposed.detail, /1/);
+});
+
+test("a failed verification makes the action partial at best, never complete", async () => {
+  const stored = plan();
+  const { service: apply } = service(stored, {
+    result: { ...RESULT, planId: "", completed: 0n, failed: 1n, state: "complete" },
+  });
+
+  const outcome = await apply.apply({ planId: stored.id, confirmed: true }, SIGNAL);
+
+  assert.notEqual(
+    outcome.result.state,
+    "complete",
+    "a result that failed its own check does not get to call itself complete",
+  );
+});
+
+test("a move's destination is among the checks, and a copy nobody could confirm is unavailable", async () => {
+  const stored = plan({
+    operation: "move",
+    destination: rawPathFromUtf8("/mnt/archive"),
+    sourceDisposition: "trash",
+  });
+  const { service: apply } = service(stored);
+
+  const outcome = await apply.apply({ planId: stored.id, confirmed: true }, SIGNAL);
+
+  const destination = outcome.result.verification.find(
+    (check) => check.check === "destination-present",
+  );
+  assert.ok(destination, `verification was ${JSON.stringify(outcome.result.verification)}`);
+  assert.match(destination.detail, /\/mnt\/archive/);
+});
+
+test("a plan that publishes nothing is not checked for a destination it never had", async () => {
+  const stored = plan();
+  const { service: apply } = service(stored);
+
+  const outcome = await apply.apply({ planId: stored.id, confirmed: true }, SIGNAL);
+
+  assert.equal(
+    outcome.result.verification.some((check) => check.check === "destination-present"),
+    false,
+  );
+});

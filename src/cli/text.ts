@@ -367,6 +367,14 @@ export function resultLines(
   if (result.undoAvailable) {
     lines.push(`  Undo it with: disktop undo ${result.journalId} --yes`);
   }
+  // Only the checks that did not pass are printed. A reader does not need to
+  // be told what was fine; they need to be told what was not, and what nobody
+  // could tell either way.
+  for (const check of result.verification) {
+    if (check.outcome !== "passed") {
+      lines.push(`  ${check.outcome === "failed" ? "!" : "?"} ${check.detail}`);
+    }
+  }
   for (const note of notes) {
     lines.push(`  note: ${note}`);
   }
@@ -378,7 +386,13 @@ export function historyLines(records: readonly JournalRecord[], units: Units): s
     return ["Disktop has not changed anything on this machine."];
   }
   return records.map((record) => {
-    const undo = record.operation === "trash" && record.state !== "uncertain" ? "  undo available" : "";
+    // A move or a compress that trashed its source is undoable in exactly the
+    // way a Trash action is; one that removed the source permanently left no
+    // item with a destination, which is what says so.
+    const restorable =
+      ["trash", "copy-move", "compress"].includes(record.operation) &&
+      record.items.some((item) => item.outcome === "completed" && item.destination !== undefined);
+    const undo = restorable && record.state !== "uncertain" ? "  undo available" : "";
     return `${record.startedAt}  ${record.operation.padEnd(12)} ${record.state.padEnd(10)} ${formatBytes(
       record.bytesMovedToTrash,
       units,

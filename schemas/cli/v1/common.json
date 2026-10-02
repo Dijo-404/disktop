@@ -1123,7 +1123,8 @@
         "failed",
         "selectedBytes",
         "bytesMovedToTrash",
-        "undoAvailable"
+        "undoAvailable",
+        "verification"
       ],
       "properties": {
         "planId": {
@@ -1170,8 +1171,78 @@
           "items": {
             "type": "string"
           }
+        },
+        "verification": {
+          "description": "What the apply checked once the helper had finished, and what it found. A check that could not run is 'unavailable' and never 'passed': \"it was fine\" and \"nobody could tell\" are different answers, and only one of them is evidence. A failed check means the action did not do what the plan described, and the result's state is never 'complete' when one is present.",
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "check",
+              "outcome",
+              "detail"
+            ],
+            "properties": {
+              "check": {
+                "type": "string",
+                "enum": [
+                  "destination-present",
+                  "source-disposed",
+                  "free-space-read",
+                  "digest-matched"
+                ]
+              },
+              "outcome": {
+                "type": "string",
+                "enum": [
+                  "passed",
+                  "failed",
+                  "unavailable"
+                ]
+              },
+              "detail": {
+                "type": "string",
+                "minLength": 1
+              }
+            }
+          }
         }
-      }
+      },
+      "allOf": [
+        {
+          "description": "A result that failed one of its own checks does not get to call itself complete.",
+          "if": {
+            "type": "object",
+            "properties": {
+              "state": {
+                "const": "complete"
+              }
+            },
+            "required": [
+              "state"
+            ]
+          },
+          "then": {
+            "properties": {
+              "verification": {
+                "type": "array",
+                "items": {
+                  "type": "object",
+                  "properties": {
+                    "outcome": {
+                      "type": "string",
+                      "not": {
+                        "const": "failed"
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      ]
     },
     "journalItem": {
       "type": "object",
