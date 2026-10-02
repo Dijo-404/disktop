@@ -47,6 +47,7 @@ export const COMMANDS: readonly CommandSpec[] = [
       JSON_OPTION,
       UNITS_OPTION,
       { name: "threshold", summary: "Used percentage that raises an alert", kind: "value", placeholder: "PERCENT" },
+      { name: "notify", summary: "Also notify the desktop when one is reached", kind: "flag" },
     ],
     implemented: true,
   },

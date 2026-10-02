@@ -10,7 +10,10 @@ import { createPlanService, type PlanService } from "../application/plan-action.
 import { createUndoService, type UndoService } from "../application/undo.js";
 import { createScanService, type ScanService } from "../application/scan.js";
 import { createSnapshotService, type SnapshotService } from "../application/snapshots.js";
-import type { RawPath, Warning } from "../domain/models.js";
+import type { Alert, RawPath, Warning } from "../domain/models.js";
+import { notifyAlerts } from "../application/alert-notifier.js";
+import { createNotifySend } from "../platform/linux/notifications/notify-send.js";
+import type { NotificationOutcome } from "../ports/notifications.js";
 import { rawPathFromUtf8 } from "../domain/paths.js";
 import { createLinuxInventory } from "../platform/linux/inventory/index.js";
 import { createAccountNames } from "../platform/linux/accounts.js";
@@ -71,6 +74,10 @@ export interface Services {
   };
   readonly settings: DashboardSettings;
   readonly startupWarnings: readonly Warning[];
+  readonly alertNotifications: {
+    readonly enabled: boolean;
+    notify(alerts: readonly Alert[]): Promise<NotificationOutcome | undefined>;
+  };
 }
 
 export interface CompositionOptions {
@@ -191,6 +198,7 @@ export async function createServices(options: CompositionOptions = {}): Promise<
   };
 
   const explore = createExploreService(scanner, createAccountNames());
+  const notifier = createNotifySend({ environment });
   const footprint = createFootprintService(
     createBuiltInProviders({ packages: createPackageInventory(tools), managers }),
     discovery,
@@ -252,5 +260,9 @@ export async function createServices(options: CompositionOptions = {}): Promise<
     findDefaults: { staleAfterDays: config.find.staleAfterDays },
     settings,
     startupWarnings,
+    alertNotifications: {
+      enabled: config.alerts.notify,
+      notify: (alerts) => notifyAlerts(notifier, alerts),
+    },
   };
 }

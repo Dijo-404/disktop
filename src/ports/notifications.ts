@@ -1,5 +1,9 @@
+export interface NotificationOutcome {
+  readonly sent: boolean;
+  readonly explanation: string;
+}
+
 export interface NotificationPort {
   readonly id: string;
-  available(): Promise<boolean>;
-  send(title: string, body: string): Promise<void>;
+  send(title: string, body: string): Promise<NotificationOutcome>;
 }

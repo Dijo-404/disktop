@@ -6,6 +6,7 @@ import { alertLines, warningLines } from "../text.js";
 export interface AlertsOptions {
   readonly asJson: boolean;
   readonly thresholdPercent?: number;
+  readonly notify?: boolean;
 }
 
 /**
@@ -21,6 +22,19 @@ export async function runAlertsCheck(context: CliContext, options: AlertsOptions
       : { spacePercent: options.thresholdPercent, inodePercent: options.thresholdPercent };
 
   const alerts = evaluateAlerts(view.filesystems, thresholds, { units: context.settings.units });
+  const requested = options.notify === true || context.notifications?.enabled === true;
+  const notification = requested
+    ? (await context.notifications?.notify(alerts)) ??
+      (context.notifications === undefined
+        ? { sent: false, explanation: "Nothing on this machine can show a notification." }
+        : { sent: false, explanation: "No threshold was reached, so nothing was sent." })
+    : undefined;
+  const warnings = [
+    ...view.warnings,
+    ...(notification !== undefined && !notification.sent && alerts.length > 0
+      ? [{ code: "notification-failed", message: notification.explanation }]
+      : []),
+  ];
   const status = view.complete ? "complete" : "incomplete";
   const exitCode = !view.complete ? EXIT.incomplete : alerts.length > 0 ? EXIT.alertThresholdReached : EXIT.complete;
 
@@ -32,13 +46,14 @@ export async function runAlertsCheck(context: CliContext, options: AlertsOptions
         generatedAt: context.now(),
         status,
         exitCode,
-        warnings: view.warnings,
+        warnings,
         data: {
           capability: encodeCapability(view.capability),
           thresholdPercent: thresholds.spacePercent,
           inodeThresholdPercent: thresholds.inodePercent,
           alerts: alerts.map(encodeAlert),
           filesystems: view.filesystems.map(encodeFilesystem),
+          ...(notification === undefined ? {} : { notification: { requested: true, ...notification } }),
         },
       }),
     );
@@ -51,7 +66,7 @@ export async function runAlertsCheck(context: CliContext, options: AlertsOptions
   for (const line of alertLines(alerts)) {
     context.output.stdout(`${line}\n`);
   }
-  for (const line of warningLines(view.warnings)) {
+  for (const line of warningLines(warnings)) {
     context.output.stderr(`${line}\n`);
   }
   return exitCode;
