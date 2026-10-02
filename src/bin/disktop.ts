@@ -44,7 +44,7 @@ async function buildContext(): Promise<CliContext> {
       apply: (request, signal) => services.apply.apply(request, signal),
       history: (cursor, limit) => services.undo.history(cursor, limit),
       restore: (journalId, signal) => services.undo.restore(journalId, signal),
-      find: (request) => services.find.find(request),
+      find: (request, signal) => services.find.find(request, signal),
     },
     // Ctrl+C asks a running command to stop at a safe boundary; it does not
     // tear the process down and leave the work unreported.

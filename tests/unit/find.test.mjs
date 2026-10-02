@@ -181,3 +181,17 @@ test("an index that cannot be read is a capability state, not an empty answer", 
   assert.equal(outcome.kind, "unavailable");
   assert.equal(outcome.capability.status, "unsupported-kernel");
 });
+
+test("a duplicate search receives the caller's signal, so Ctrl+C reaches it", async () => {
+  let received;
+  const { service: find } = service({ kind: "page", page: { entries: [] } }, {
+    async find(_request, signal) {
+      received = signal;
+      return { kind: "found", groups: [], reclaimableBytes: 0n, complete: true, warnings: [], candidatesRead: 0n, filesHashed: 0n };
+    },
+  });
+  const controller = new AbortController();
+  await find.find({ kind: "duplicates", scanId: "scan-1", path: rawPathFromUtf8("/home/example") }, controller.signal);
+  controller.abort();
+  assert.equal(received.aborted, true);
+});
