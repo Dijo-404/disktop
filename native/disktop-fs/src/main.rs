@@ -1,4 +1,5 @@
 mod actions;
+mod archive;
 mod base64;
 mod content;
 mod duplicates;

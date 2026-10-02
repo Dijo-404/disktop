@@ -146,6 +146,11 @@ one inode has one set of those, and linking would silently change the replaced f
 says so, because publishing a copy and then releasing the original's bytes is a
 permanent removal with an extra step.
 
+`--operation compress` writes `<name>.zst` for a file and `<name>.tar.zst` for a
+directory, beside the source unless `--destination` says otherwise. The archive is
+verified by decompressing it and comparing what comes out against what went in, before
+it is published and before the source is touched.
+
 A move is carried out as a staged copy, not a rename: the bytes are written under a
 partial name in the destination, read back off the device and compared against what was
 read from the source, and only then published with a rename that refuses to overwrite.

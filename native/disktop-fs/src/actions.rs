@@ -15,6 +15,7 @@
 //! numbers: on one filesystem the first is large and the second is zero, and
 //! presenting either as the other would be a lie about reclaimed space.
 
+use crate::archive;
 use crate::content;
 use crate::guard::{self, Fingerprint, Guard, GuardContext};
 use crate::journal::{Counts, Identity, Journal, Outcome, State};
@@ -105,6 +106,20 @@ pub struct CopyMoveRequest {
     pub journal_directory: PathBuf,
     /// Needed only for the `trash` disposition, but carried either way so the
     /// helper never has to ask for it halfway through.
+    pub home_trash_directory: Vec<u8>,
+    pub destination_directory: Vec<u8>,
+    pub source_disposition: SourceDisposition,
+    pub targets: Vec<Target>,
+}
+
+/// Compressing every reviewed target, then disposing of the source.
+///
+/// `destination_directory` may be empty, which means "beside the source": an
+/// archive goes where somebody would put one by hand unless they said
+/// otherwise.
+pub struct CompressRequest {
+    pub plan_id: String,
+    pub journal_directory: PathBuf,
     pub home_trash_directory: Vec<u8>,
     pub destination_directory: Vec<u8>,
     pub source_disposition: SourceDisposition,
@@ -576,6 +591,281 @@ pub fn run_copy_move(
     outcome
 }
 
+/// Compress every reviewed target, then dispose of the source as the plan said.
+///
+/// The shape is the move's shape, and deliberately so: stage, verify, publish
+/// without overwriting, and only then touch the source. What differs is the
+/// verification. A copy is checked by reading the written bytes back; an
+/// archive is checked by *decompressing* it, the way anybody recovering from
+/// it would, and comparing what comes out against what went in. An archive
+/// that cannot be read back is not an archive, however well the write went.
+pub fn run_compress(
+    request: &CompressRequest,
+    report: &mut dyn FnMut(ItemReport),
+    cancelled: &AtomicBool,
+) -> Result<ActionSummary, ActionRefusal> {
+    // An empty destination means "beside the source", which is resolved per
+    // item because each item has its own parent.
+    let named = if request.destination_directory.is_empty() {
+        None
+    } else {
+        let parent = guard::resolve_parent(&request.destination_directory)
+            .map_err(|refusal| ActionRefusal::new(refusal.code, refusal.message))?;
+        let descriptor = sys::open_directory_no_symlinks(parent.descriptor(), &parent.name)
+            .map_err(|error| {
+                ActionRefusal::new(
+                    "invalid-arguments",
+                    format!(
+                        "{} is not a directory this user can open: {error}",
+                        String::from_utf8_lossy(&request.destination_directory),
+                    ),
+                )
+            })?;
+        Some(descriptor)
+    };
+
+    let home_trash = request.home_trash_directory.clone();
+    let destination_path = request.destination_directory.clone();
+    let disposition = request.source_disposition;
+
+    let outcome = run_action(
+        Operation::Compress(disposition),
+        &request.plan_id,
+        &request.journal_directory,
+        &request.targets,
+        report,
+        cancelled,
+        |guard, journal, journal_id, position, target| {
+            compress_one(
+                guard,
+                named,
+                &destination_path,
+                &home_trash,
+                disposition,
+                journal,
+                journal_id,
+                position,
+                target,
+            )
+        },
+    );
+    if let Some(descriptor) = named {
+        sys::close(descriptor);
+    }
+    outcome
+}
+
+#[allow(clippy::too_many_arguments)]
+fn compress_one(
+    guard: &Guard,
+    named_destination: Option<libc::c_int>,
+    named_destination_path: &[u8],
+    home_trash: &[u8],
+    disposition: SourceDisposition,
+    journal: &Journal,
+    journal_id: &str,
+    position: u64,
+    target: &Target,
+) -> ItemReport {
+    let refuse = |code: &'static str, message: String, outcome: Outcome| ItemReport {
+        path: target.path.clone(),
+        outcome,
+        reason: Some(code),
+        message: Some(message),
+        bytes: 0,
+    };
+
+    if let Err(refusal) = guard.classify(&target.path) {
+        return refuse(refusal.code, refusal.message, Outcome::Failed);
+    }
+    let parent = match guard::resolve_parent(&target.path) {
+        Ok(parent) => parent,
+        Err(refusal) => {
+            let outcome = outcome_for(refusal.code);
+            return refuse(refusal.code, refusal.message, outcome);
+        }
+    };
+    let live = match guard::revalidate(&parent, &target.expected) {
+        Ok(live) => live,
+        Err(refusal) => {
+            let outcome = outcome_for(refusal.code);
+            return refuse(refusal.code, refusal.message, outcome);
+        }
+    };
+    if live.kind != EntryKind::File && live.kind != EntryKind::Directory {
+        return refuse(
+            "invalid-arguments",
+            "Only a file or a directory can be compressed.".to_owned(),
+            Outcome::Failed,
+        );
+    }
+
+    // Beside the source unless somebody named somewhere else. The parent's own
+    // descriptor is already open and already resolved without symlinks.
+    let destination = named_destination.unwrap_or_else(|| parent.descriptor());
+    let destination_path: Vec<u8> = if named_destination.is_some() {
+        named_destination_path.to_vec()
+    } else {
+        parent_path(&target.path)
+    };
+
+    let mut archive_name = parent.name.clone();
+    archive_name.extend_from_slice(archive::suffix(live.kind));
+
+    if sys::target_exists(destination, &archive_name) {
+        return refuse(
+            "destination-exists",
+            format!(
+                "{} already holds something called '{}', and Disktop never publishes over \
+                 anything.",
+                String::from_utf8_lossy(&destination_path),
+                String::from_utf8_lossy(&archive_name),
+            ),
+            Outcome::Failed,
+        );
+    }
+
+    let mut published = destination_path.clone();
+    published.push(b'/');
+    published.extend_from_slice(&archive_name);
+
+    if let Err(error) = journal.record_intent(journal_id, position, &target.path, Some(&published))
+    {
+        return refuse(
+            "journal-write-failed",
+            format!("This item's intent could not be recorded, so it was not compressed: {error}"),
+            Outcome::Failed,
+        );
+    }
+
+    let staged = match stage_archive(&parent, destination, &live, &archive_name) {
+        Ok(staged) => staged,
+        Err((code, message)) => {
+            return settle(
+                journal,
+                journal_id,
+                position,
+                target,
+                refuse(code, message, Outcome::Failed),
+            );
+        }
+    };
+
+    if let Err(error) = sys::renameat_no_replace(destination, &staged, destination, &archive_name) {
+        let _ = sys::unlinkat(destination, &staged, false);
+        let (code, message) = match error.raw_os_error() {
+            Some(libc::EEXIST) => (
+                "destination-exists",
+                "Something was created at the destination while the archive was being written, \
+                 so the archive was discarded and the source left alone."
+                    .to_owned(),
+            ),
+            Some(libc::EACCES) | Some(libc::EPERM) => (
+                "permission-denied",
+                format!("This user may not publish into the destination: {error}"),
+            ),
+            _ => (
+                "internal-error",
+                format!("The archive could not be published: {error}"),
+            ),
+        };
+        return settle(
+            journal,
+            journal_id,
+            position,
+            target,
+            refuse(code, message, Outcome::Failed),
+        );
+    }
+
+    dispose_of_source(
+        guard,
+        &MoveContext {
+            destination,
+            destination_path: &destination_path,
+            home_trash,
+            disposition,
+        },
+        journal,
+        journal_id,
+        position,
+        target,
+        &live,
+    )
+}
+
+/// Write the archive under a staging name and read it back before returning.
+fn stage_archive(
+    parent: &guard::ResolvedParent,
+    destination: libc::c_int,
+    live: &sys::Metadata,
+    archive_name: &[u8],
+) -> Result<Vec<u8>, (&'static str, String)> {
+    for attempt in 0..64u32 {
+        let mut staging = archive_name.to_vec();
+        staging.extend_from_slice(
+            format!(".disktop-partial-{}-{attempt}", std::process::id()).as_bytes(),
+        );
+        if sys::target_exists(destination, &staging) {
+            continue;
+        }
+
+        let outcome = if live.kind == EntryKind::Directory {
+            let source = sys::open_directory_no_symlinks(parent.descriptor(), &parent.name)
+                .map_err(describe_copy)?;
+            let result = archive::compress_tree(
+                source,
+                &parent.name,
+                destination,
+                &staging,
+                live.permissions,
+            )
+            .and_then(|written| {
+                // Read back the way somebody recovering from it would. An
+                // archive that will not decompress is not an archive.
+                let recovered = archive::verify_tree(destination, &staging)?;
+                if recovered != written {
+                    return Err(std::io::Error::new(
+                        std::io::ErrorKind::InvalidData,
+                        "the archive did not read back with every entry that went into it",
+                    ));
+                }
+                Ok(())
+            });
+            sys::close(source);
+            result
+        } else {
+            let source = sys::openat_read_no_symlinks(parent.descriptor(), &parent.name)
+                .map_err(describe_copy)?;
+            let result = archive::compress_file(source, destination, &staging, live.permissions)
+                .and_then(|written| {
+                    let recovered = archive::verify_file(destination, &staging)?;
+                    if recovered != written {
+                        return Err(std::io::Error::new(
+                            std::io::ErrorKind::InvalidData,
+                            "the archive did not read back as the bytes that went into it",
+                        ));
+                    }
+                    Ok(())
+                });
+            sys::close(source);
+            result
+        };
+
+        return match outcome {
+            Ok(()) => Ok(staging),
+            Err(error) => {
+                let _ = sys::unlinkat(destination, &staging, false);
+                Err(describe_copy(error))
+            }
+        };
+    }
+    Err((
+        "internal-error",
+        "No staging name was free in the destination directory.".to_owned(),
+    ))
+}
+
 struct MoveContext<'a> {
     destination: libc::c_int,
     destination_path: &'a [u8],
@@ -816,6 +1106,20 @@ fn dispose_of_source(
                 Ok(reserved) => reserved,
                 Err(refusal) => return published_but_kept(target, &refusal.message),
             };
+
+            // The item's destination becomes where the *source* went, not
+            // where the output was published. It is what an undo reads to find
+            // the original again, and the original is in Trash.
+            let mut trashed = destination.files_path.clone();
+            trashed.push(b'/');
+            trashed.extend_from_slice(&reserved.name);
+            if let Err(error) =
+                journal.record_intent(journal_id, position, &target.path, Some(&trashed))
+            {
+                reserved.discard(&destination);
+                return published_but_kept(target, &error.to_string());
+            }
+
             match sys::renameat_no_replace(
                 parent.descriptor(),
                 &parent.name,
@@ -877,6 +1181,8 @@ enum Operation {
     /// Carries its disposition, because whether a move leaves anything to put
     /// back is decided by what it does to the source and by nothing else.
     CopyMove(SourceDisposition),
+    /// The same, for the same reason.
+    Compress(SourceDisposition),
 }
 
 impl Operation {
@@ -888,6 +1194,7 @@ impl Operation {
             Operation::Restore => "restore",
             Operation::DedupHardlink => "dedup-hardlink",
             Operation::CopyMove(_) => "copy-move",
+            Operation::Compress(_) => "compress",
         }
     }
 
@@ -895,7 +1202,9 @@ impl Operation {
     fn reversible(self) -> bool {
         matches!(
             self,
-            Operation::Trash | Operation::CopyMove(SourceDisposition::Trash)
+            Operation::Trash
+                | Operation::CopyMove(SourceDisposition::Trash)
+                | Operation::Compress(SourceDisposition::Trash)
         )
     }
 }
@@ -1231,7 +1540,14 @@ pub fn run_restore(
             )
         })?;
 
-    if record.operation != "trash" {
+    // A move or a compress that trashed its source left the original
+    // recoverable in exactly the way a Trash action did, and recorded where it
+    // went. One that removed the source permanently recorded no destination,
+    // so its items find nothing to come back from and say so item by item.
+    if !matches!(
+        record.operation.as_str(),
+        "trash" | "copy-move" | "compress"
+    ) {
         return Err(ActionRefusal::new(
             "invalid-arguments",
             format!(

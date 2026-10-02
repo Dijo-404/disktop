@@ -37,6 +37,15 @@ export interface UndoDependencies {
  * and an action reconciliation could not judge is refused until it has been:
  * undoing something that may not have happened is its own way of losing data.
  */
+/**
+ * The journalled operations that left something in Trash to put back.
+ *
+ * A move or a compress is here only when its plan's disposition was `trash`;
+ * the helper records a `permanent` one with no Trash destination, so a restore
+ * of it finds nothing and says so rather than inventing a path.
+ */
+const RESTORABLE: ReadonlySet<string> = new Set(["trash", "copy-move", "compress"]);
+
 export function createUndoService(dependencies: UndoDependencies): UndoService {
   return {
     async history(cursor, limit) {
@@ -60,7 +69,11 @@ export function createUndoService(dependencies: UndoDependencies): UndoService {
           `No action called '${journalId}' is in the journal. Run 'disktop history' to see what is there.`,
         );
       }
-      if (record.operation !== "trash") {
+      // A move or a compress that trashed its source left the original
+      // recoverable in exactly the same way a Trash action did, and the
+      // journal records where it went. One that removed it permanently did
+      // not, and the journal's own operation name is what tells them apart.
+      if (!RESTORABLE.has(record.operation)) {
         return refuse(
           "unsupported",
           `That action ${record.operation === "erase" ? "removed its targets permanently" : `was a '${record.operation}'`}, so it cannot be undone.`,
