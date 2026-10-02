@@ -1,5 +1,10 @@
 mod actions;
 mod base64;
+// Consumed from Task 2 onwards by the duplicate finder, the copier, and the
+// archiver. Until the first of those lands nothing calls it, and CI treats a
+// clippy warning as an error.
+#[allow(dead_code)]
+mod content;
 mod guard;
 mod index;
 mod journal;

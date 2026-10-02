@@ -9,6 +9,7 @@ Architecture decision records (ADRs) explain choices that affect multiple module
 | [0003](0003-prebuilt-binary-packaging.md) | Prebuilt helper binaries in one npm tarball, with no install script | accepted |
 | [0004](0004-reviewed-action-pipeline.md) | One reviewed action pipeline and one durable journal | accepted |
 | [0005](0005-lossless-values-in-contracts.md) | Decimal strings and base64 path bytes in every contract | accepted |
+| [0006](0006-content-identity-and-archive-dependencies.md) | A digest groups candidates, a byte compare authorises a mutation | accepted |
 
 Create one numbered Markdown file per decision, for example `0001-terminal-renderer.md`. Use this structure:
 
