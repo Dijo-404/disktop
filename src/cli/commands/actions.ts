@@ -66,8 +66,8 @@ export interface FindOptions {
   readonly olderThan?: string;
 }
 
-/** The operations `clean plan` can fix today. Manager cleanup is Phase 6. */
 const PLANNABLE: readonly ActionOperation[] = [
+  "manager",
   "trash",
   "permanent",
   "empty-trash",
@@ -86,7 +86,8 @@ export async function runPlan(context: CliContext, options: PlanOptions): Promis
   // a plan file; this is the single place they are translated.
   const operation = (options.operation === "hardlink"
     ? "dedup-hardlink"
-    : (options.operation ?? "trash")) as ActionOperation;
+    : (options.operation ??
+      (options.findingId?.startsWith("managers:") === true ? "manager" : "trash"))) as ActionOperation;
   // Emptying Trash needs no subject: Disktop already knows where Trash is.
   if (operation !== "empty-trash" && options.findingId === undefined && options.path === undefined) {
     return refuse(context, "clean plan", options.asJson, {

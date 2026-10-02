@@ -1,3 +1,4 @@
+import type { ManagerInventoryPort } from "../ports/managers.js";
 import type { PackageInventoryPort } from "../ports/packages.js";
 import type { FindingProvider } from "../ports/providers.js";
 import { createInstalledAppsProvider } from "./apps/index.js";
@@ -23,6 +24,7 @@ import {
   createVirtualMachineProvider,
   createWineProvider,
 } from "./storage/index.js";
+import { createManagerProvider } from "./managers/index.js";
 import { createRulesProvider } from "./rules/index.js";
 import {
   createCrashProvider,
@@ -42,6 +44,7 @@ import {
  */
 export interface BuiltInProviderPorts {
   readonly packages: PackageInventoryPort;
+  readonly managers?: ManagerInventoryPort;
 }
 
 export function createBuiltInProviders(ports: BuiltInProviderPorts): readonly FindingProvider[] {
@@ -72,5 +75,6 @@ export function createBuiltInProviders(ports: BuiltInProviderPorts): readonly Fi
     createSmartProvider(),
     createWindowsSubsystemProvider(),
     createPerUserProvider(),
+    ...(ports.managers === undefined ? [] : [createManagerProvider(ports.managers)]),
   ];
 }
