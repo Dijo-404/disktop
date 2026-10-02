@@ -618,3 +618,23 @@ test("a finding that did not come from a rule carries no rule hash", async () =>
   assert.equal(outcome.kind, "planned");
   assert.equal(outcome.plan.ruleHash, undefined);
 });
+
+test("a hardlink pair on two filesystems is refused before anything is stored", async () => {
+  const { service: planner, saved } = service({
+    facts: (path) => facts({ kind: "file", device: path.display.endsWith("a.bin") ? 1n : 2n }),
+  });
+
+  const outcome = await planner.plan(
+    {
+      operation: "dedup-hardlink",
+      path: rawPathFromUtf8("/home/example/a.bin"),
+      replacePath: rawPathFromUtf8("/home/example/b.bin"),
+    },
+    SIGNAL,
+  );
+
+  assert.equal(outcome.kind, "refused");
+  assert.equal(outcome.failure.code, "invalid-plan");
+  assert.match(outcome.failure.message, /same filesystem/);
+  assert.equal(saved.length, 0);
+});

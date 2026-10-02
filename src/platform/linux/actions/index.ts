@@ -310,6 +310,7 @@ const FAILURE_CODES: Readonly<Record<string, OperationFailureCode>> = {
   "changed-target": "changed-target",
   "unsafe-parent": "protected-path",
   "expired-plan": "invalid-plan",
+  "different-filesystem": "invalid-plan",
   "no-safe-trash": "unsupported",
   "invalid-arguments": "invalid-plan",
   "unknown-request": "invalid-plan",

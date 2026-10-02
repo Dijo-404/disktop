@@ -2590,6 +2590,40 @@ mod tests {
     }
 
     #[test]
+    fn a_hardlink_group_on_two_filesystems_is_refused_before_any_item() {
+        let sandbox = Sandbox::new("hardlink-devices");
+        sandbox.directory(b"state");
+        let content = vec![4u8; 4096];
+        std::fs::write(sandbox.path().join("keep.bin"), &content).unwrap();
+        std::fs::write(sandbox.path().join("copy.bin"), &content).unwrap();
+        let mut keep = sandbox.bytes();
+        keep.extend_from_slice(b"/keep.bin");
+        let mut copy = sandbox.bytes();
+        copy.extend_from_slice(b"/copy.bin");
+
+        let device = {
+            use std::os::unix::fs::MetadataExt;
+            std::fs::metadata(sandbox.path().join("copy.bin"))
+                .unwrap()
+                .dev()
+        };
+        let elsewhere = target(&copy, 4096).replace(
+            &format!("\"device\":\"{device}\""),
+            &format!("\"device\":\"{}\"", device + 1),
+        );
+
+        let events = run_hardlink("link-devices", &sandbox, &keep, &[elsewhere]);
+        let last = events.last().expect("a terminal event");
+        assert_eq!(last["event"], "error");
+        assert_eq!(last["error"]["code"], "different-filesystem");
+        assert!(item_results(&events, "link-devices").is_empty());
+        assert!(!same_inode(
+            &sandbox.path().join("keep.bin"),
+            &sandbox.path().join("copy.bin")
+        ));
+    }
+
+    #[test]
     fn a_duplicate_is_replaced_by_a_link_to_the_file_being_kept() {
         let sandbox = Sandbox::new("hardlink-happy");
         sandbox.directory(b"state");
