@@ -1,0 +1,38 @@
+{
+  "schemaVersion": "1",
+  "command": "find",
+  "generatedAt": "2026-10-02T09:30:00.000Z",
+  "status": "complete",
+  "exitCode": 0,
+  "data": {
+    "kind": "stale",
+    "scanId": "scan-1759190400-0a1b2c3d",
+    "entries": [
+      {
+        "id": "41",
+        "parentId": "7",
+        "path": {
+          "bytesBase64": "L2hvbWUvZXhhbXBsZS9wcm9qZWN0cy9vbGQ=",
+          "display": "/home/example/projects/old",
+          "utf8": "/home/example/projects/old"
+        },
+        "kind": "file",
+        "device": "66306",
+        "inode": "1179699",
+        "mountId": "29",
+        "linkCount": "2",
+        "apparentBytes": "4096",
+        "allocatedBytes": "4096",
+        "ownerId": "1000",
+        "modifiedNanoseconds": "1758000000123456789",
+        "shared": false,
+        "childEntries": "0"
+      }
+    ],
+    "basis": {
+      "field": "modified",
+      "confidence": "coarse",
+      "label": "not modified since this date. This mount is relatime, so its access times are updated at most once a day and are not evidence of when a file was last used."
+    }
+  }
+}

@@ -298,6 +298,12 @@ export function encodeActionPlan(plan: ActionPlan): Record<string, unknown> {
         }),
     ...(plan.managerScope === undefined ? {} : { managerScope: plan.managerScope }),
     ...(plan.regenerationCost === undefined ? {} : { regenerationCost: plan.regenerationCost }),
+    ...(plan.destination === undefined ? {} : { destination: encodeRawPath(plan.destination) }),
+    ...(plan.sourceDisposition === undefined
+      ? {}
+      : { sourceDisposition: plan.sourceDisposition }),
+    ...(plan.keepPath === undefined ? {} : { keepPath: encodeRawPath(plan.keepPath) }),
+    ...(plan.ruleHash === undefined ? {} : { ruleHash: plan.ruleHash }),
     warnings: [...plan.warnings],
   };
 }
@@ -327,6 +333,14 @@ export function encodeActionResult(
       ? {}
       : { observedFreeSpaceChange: observedFreeSpaceChange.toString(10) }),
     undoAvailable: result.undoAvailable,
+    // What the apply checked once the helper had finished. A check that could
+    // not run is listed as unavailable rather than left out, so a reader can
+    // tell "it was fine" from "nobody could tell".
+    verification: result.verification.map((check) => ({
+      check: check.check,
+      outcome: check.outcome,
+      detail: check.detail,
+    })),
     ...(notes.length === 0 ? {} : { notes: [...notes] }),
   };
 }

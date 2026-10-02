@@ -48,3 +48,22 @@ Keep a change focused on an owning module and its contracts. Include the relevan
 Configure a GitHub `npm-publish` environment with required reviewer approval, restrict it to the release branch, and put a one-time granular npm publish token in its `NPM_TOKEN` secret. The token needs **Read and write (publish and stage)** and **Bypass two-factor authentication** for non-interactive CI publishing; give it the shortest practical expiration and revoke it after publication. [npm's token setup guide](https://docs.npmjs.com/creating-and-viewing-access-tokens/) explains these controls. Dispatch `.github/workflows/publish.yml` from the default branch while its tip is still the exact tagged commit, supplying that full SHA and the confirmation text. The workflow checks the workflow event SHA against the tag so provenance identifies the reviewed source. It also checks package metadata, tests, executable checksums, and the packed artifact before publishing that artifact with `--provenance --access public`. The token is supplied only to the final publication step and its presence check.
 
 This one-time token is necessary because npm currently [requires the package to exist](https://github.com/npm/cli/issues/8544) before a trusted publisher can be registered. [npm's first-publication guidance](https://docs.npmjs.com/generating-provenance-statements/) supports token-backed GitHub Actions publishing with provenance. A placeholder public package would violate the one-release contract. After `1.0.0` exists, configure npm trusted publishing for `publish.yml` and restrict token publishing for any later maintenance release; no second public release is planned here.
+
+## Tests that need a second filesystem
+
+`disktop clean plan --operation move` refuses a destination on the source's own
+filesystem, so the end-to-end move tests in `tests/integration/actions.test.mjs` need two.
+Most development hosts have only one that Disktop is willing to publish into: `/dev/shm`
+and `/run/user` are usually the other writable mounts and both sit below a protected
+root. Those tests skip out loud rather than passing silently.
+
+Set `DISKTOP_TEST_DESTINATION_FS` to a writable directory on a second filesystem to run
+them:
+
+~~~bash
+DISKTOP_TEST_DESTINATION_FS=/mnt/scratch npm run test:integration
+~~~
+
+The copy, verification, publication, and source-disposal sequence itself is covered
+without this by the helper's own tests in `native/disktop-fs/src/protocol.rs`, which run
+within one filesystem; what the variable adds is the real cross-device path end to end.

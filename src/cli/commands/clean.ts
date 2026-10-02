@@ -58,17 +58,23 @@ export async function runClean(context: CliContext, options: CleanOptions): Prom
   const limit = options.limit === undefined ? summary.findings.length : Number(options.limit);
   const listed = summary.findings.slice(0, limit);
   const truncated = listed.length < summary.findings.length;
-  const warnings = truncated
-    ? [
-        ...summary.warnings,
-        {
-          code: "findings-truncated",
-          message: `${summary.findings.length} findings were discovered; --limit showed the first ${listed.length}.`,
-        },
-      ]
-    : summary.warnings;
+  // A configuration that could not be applied belongs at the top of this
+  // list: somebody whose own cleanup rules were dropped is reading a listing
+  // that is missing exactly the thing they wrote.
+  const warnings = [
+    ...context.startupWarnings,
+    ...summary.warnings,
+    ...(truncated
+      ? [
+          {
+            code: "findings-truncated",
+            message: `${summary.findings.length} findings were discovered; --limit showed the first ${listed.length}.`,
+          },
+        ]
+      : []),
+  ];
 
-  const complete = summary.complete && !truncated;
+  const complete = summary.complete && !truncated && context.startupWarnings.length === 0;
   const exitCode = complete ? EXIT.complete : EXIT.incomplete;
 
   if (options.asJson) {

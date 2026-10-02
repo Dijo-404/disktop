@@ -157,3 +157,45 @@ test("--units changes presentation without changing a byte value", async () => {
   await runCli(["devices", "--units", "si", "--json"], json);
   assert.equal(JSON.parse(json.captured.stdout).data.filesystems[0].totalBytes, "1000000000000");
 });
+
+test("text Disktop did not write cannot command the terminal on its way out", async () => {
+  const { warningLines, findingLines } = await import("../../dist/cli/text.js");
+
+  const hostile = "report\u001b[2J\u001b[3J\u001b[H\u0007 and ‮evil";
+  const lines = [
+    ...warningLines([{ code: "incomplete-search", message: `${hostile} could not be read` }]),
+    ...findingLines(
+      {
+        findings: [{
+          id: "rules:x",
+          providerId: "rules",
+          providerVersion: 1,
+          category: "temporary",
+          title: `Cleanup rule: ${hostile}`,
+          evidence: [`It covers '${hostile}'.`],
+          paths: [],
+          size: { basis: "unknown", explanation: "nothing measured it" },
+          confidence: "observed",
+          capability: { status: "available", explanation: "read" },
+          availableActionIds: [],
+          active: false,
+        }],
+        providers: [],
+        warnings: [],
+        complete: true,
+        categoryTotals: [],
+        measured: false,
+        capability: { status: "available", explanation: "read" },
+      },
+      "iec",
+    ),
+  ];
+
+  for (const line of lines) {
+    assert.doesNotMatch(
+      line,
+      /[\u0000-\u0008\u000B-\u001F\u007F-\u009F‪-‮⁦-⁩]/,
+      `a line reached the terminal with a control or bidi character: ${JSON.stringify(line)}`,
+    );
+  }
+});

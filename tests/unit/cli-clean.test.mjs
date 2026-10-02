@@ -80,7 +80,7 @@ function summary(overrides = {}) {
 
 function cleanContext(overrides = {}) {
   const recorded = {};
-  const context = fakeContext();
+  const context = fakeContext(overrides.context ?? {});
   context.footprint = {
     async discover(request) {
       recorded.request = request;
@@ -210,4 +210,27 @@ test("--limit refuses a number above the documented maximum", async () => {
 test("--limit accepts the documented maximum", async () => {
   const context = cleanContext();
   assert.equal(await runCli(["clean", "--limit", "1000", "--json"], context), 0);
+});
+
+test("a configuration Disktop could not apply is reported by clean, not swallowed", async () => {
+  const context = cleanContext({
+    context: {
+      startupWarnings: [
+        {
+          code: "config-not-applied",
+          message: "config.toml was not applied: rule 'bad' names /etc. Built-in defaults are in use.",
+        },
+      ],
+    },
+  });
+
+  const status = await runCli(["clean", "--json"], context);
+  const envelope = envelopeOf(context, "clean");
+
+  assert.equal(status, 3, "a listing built without somebody's own rules is not the whole answer");
+  assert.equal(envelope.status, "incomplete");
+  assert.ok(
+    envelope.warnings.some((warning) => warning.code === "config-not-applied"),
+    `warnings were ${JSON.stringify(envelope.warnings)}`,
+  );
 });

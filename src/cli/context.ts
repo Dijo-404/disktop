@@ -7,7 +7,7 @@ import type { PlanService } from "../application/plan-action.js";
 import type { UndoService } from "../application/undo.js";
 import type { ScanService } from "../application/scan.js";
 import type { SnapshotService } from "../application/snapshots.js";
-import type { RawPath } from "../domain/models.js";
+import type { RawPath, Warning } from "../domain/models.js";
 import type { Accounting } from "../ports/scan.js";
 import type { RetentionLimits } from "../ports/snapshots.js";
 import type { CliOutput } from "./parser.js";
@@ -31,6 +31,12 @@ export interface StorageServices {
   readonly explore: ExploreService;
   readonly snapshots: SnapshotService;
   readonly defaults: ScanDefaults;
+  readonly find: FindDefaults;
+}
+
+/** What a search assumes when the command line does not say. */
+export interface FindDefaults {
+  readonly staleAfterDays: number;
 }
 
 /**
@@ -74,6 +80,13 @@ export interface CliContext {
   /** Reviewing, applying, undoing, and finding. The only path to a mutation. */
   readonly actions: ActionServices;
   readonly signals: InterruptSource;
+  /**
+   * What went wrong before any command ran — a configuration file that could
+   * not be applied, most of all. A command that lists findings has to say so:
+   * somebody whose own cleanup rules were dropped is reading a list that is
+   * missing exactly the thing they wrote.
+   */
+  readonly startupWarnings: readonly Warning[];
   readonly now: () => Date;
   /** Resolve a path the user typed against the working directory. */
   resolvePath(path: string): string;

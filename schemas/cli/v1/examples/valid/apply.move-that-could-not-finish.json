@@ -1,0 +1,47 @@
+{
+  "schemaVersion": "1",
+  "command": "clean apply",
+  "generatedAt": "2026-10-02T13:00:00.000Z",
+  "status": "incomplete",
+  "exitCode": 3,
+  "data": {
+    "result": {
+      "planId": "plan-20261001T084119004Z-9f2c1ab0",
+      "journalId": "act-1759305679004-9f2c1ab07d4e5610",
+      "state": "partial",
+      "completed": "1",
+      "skipped": "0",
+      "failed": "1",
+      "selectedBytes": "7314112512",
+      "bytesMovedToTrash": "7314112512",
+      "undoAvailable": true,
+      "notes": [
+        "A Trash move on the same filesystem usually frees nothing until Trash is emptied.",
+        "Other processes write to the same filesystem, so the observed free-space change is not only this action's doing."
+      ],
+      "verification": [
+        {
+          "check": "destination-present",
+          "outcome": "passed",
+          "detail": "1 item(s) were published into /mnt/archive without overwriting anything."
+        },
+        {
+          "check": "source-disposed",
+          "outcome": "failed",
+          "detail": "1 of the reviewed items were not: 0 skipped and 1 failed."
+        },
+        {
+          "check": "free-space-read",
+          "outcome": "unavailable",
+          "detail": "Free space could not be read, so Disktop cannot say what changed on the filesystem."
+        }
+      ]
+    }
+  },
+  "warnings": [
+    {
+      "code": "action-partial",
+      "message": "1 item could not be published, so its source was left where it was."
+    }
+  ]
+}

@@ -1,6 +1,7 @@
 import type { ActionPlan } from "../domain/actions.js";
 import type { Finding, FindingCategory, SizeBasis } from "../domain/findings.js";
-import type { Bytes, Capability, RawPath, Warning } from "../domain/models.js";
+import type { CleanupRule } from "../domain/rules.js";
+import type { Bytes, Capability, IndexedEntry, RawPath, Warning } from "../domain/models.js";
 
 export interface PathFacts {
   readonly kind: "file" | "directory" | "symlink" | "other";
@@ -88,9 +89,27 @@ export interface OwnerUsageReading {
   readonly complete: boolean;
 }
 
+/** Entries under one path, as a stored scan recorded them. */
+export interface IndexEntries {
+  readonly entries: readonly IndexedEntry[];
+  /** False when no stored scan covers the root, which is not "nothing is there". */
+  readonly searched: boolean;
+  /** True when more matched than the budget allowed. */
+  readonly truncated: boolean;
+}
+
 export interface IndexSearchPort {
   directoriesNamed(names: readonly string[], limit: number): Promise<IndexSearch>;
   ownerTotals(limit: number): Promise<OwnerUsageReading>;
+  /**
+   * Everything a stored scan recorded under one path.
+   *
+   * A declarative rule needs this: it matches on names, ages, and sizes that
+   * no fixed detector knows in advance. It is still a page of an index and
+   * never a traversal — a provider that could walk a tree would be measuring
+   * rather than detecting.
+   */
+  entriesUnder(root: RawPath, limit: number): Promise<IndexEntries>;
 }
 
 /**
@@ -110,6 +129,8 @@ export interface DiscoveryEnvironment {
   readonly largeLogBytes: Bytes;
   /** The cap that keeps one noisy detector from flooding the list. */
   readonly maxFindingsPerProvider: number;
+  /** Cleanup somebody wrote down themselves, already validated. */
+  readonly rules: readonly CleanupRule[];
   readonly paths: PathProbe;
   readonly tools: ToolPort;
   readonly index: IndexSearchPort;

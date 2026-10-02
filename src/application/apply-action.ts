@@ -1,6 +1,8 @@
 import {
   isExpired,
   requiresAcknowledgement,
+  stateAfterVerification,
+  verify,
   type ActionPlan,
   type ActionResult,
 } from "../domain/actions.js";
@@ -40,6 +42,14 @@ export interface ApplyDependencies {
   readonly store: Pick<PlanStore, "get">;
   readonly actions: ActionPort;
   readonly now: () => Date;
+  /**
+   * The hashes of the cleanup rules as the configuration file holds them now.
+   *
+   * Absent when the caller has no rules to compare against, which is not the
+   * same as a rule having been removed: a surface that never loaded any is a
+   * surface with nothing to contradict the plan, and the plan stands.
+   */
+  readonly currentRuleHashes?: () => ReadonlySet<string>;
 }
 
 const CONCURRENCY_NOTE =
@@ -81,6 +91,19 @@ export function createApplyService(dependencies: ApplyDependencies): ApplyServic
         );
       }
 
+      // A plan from a rule was reviewed against that rule. If the rule has
+      // been edited or removed since, the confirmation somebody gave was for a
+      // different selection than the one the file now describes, and carrying
+      // it over would apply a rule nobody agreed to.
+      if (plan.ruleHash !== undefined && dependencies.currentRuleHashes !== undefined) {
+        if (!dependencies.currentRuleHashes().has(plan.ruleHash)) {
+          return refuse(
+            "invalid-plan",
+            `${plan.id} was reviewed against a cleanup rule that has since been changed or removed from config.toml. Plan it again so you can see what the rule selects now.`,
+          );
+        }
+      }
+
       const irreversible = requiresAcknowledgement(plan);
       if (irreversible && request.acknowledgePermanent !== true) {
         return refuse(
@@ -97,9 +120,9 @@ export function createApplyService(dependencies: ApplyDependencies): ApplyServic
         );
       }
 
-      let result: ActionResult;
+      let applied: ActionResult;
       try {
-        result = await dependencies.actions.apply(plan, signal);
+        applied = await dependencies.actions.apply(plan, signal);
       } catch (error) {
         if (error instanceof CapabilityUnavailable) {
           return { kind: "unavailable", capability: error.capability };
@@ -111,13 +134,25 @@ export function createApplyService(dependencies: ApplyDependencies): ApplyServic
         throw error;
       }
 
+      // What the helper did, and then the separate question of whether the
+      // action as a whole did what the plan described.
+      const verification = verify(plan, applied);
+      const result: ActionResult = {
+        ...applied,
+        verification,
+        state: stateAfterVerification(applied.state, verification),
+      };
+
       const change =
         result.freeBytesBefore === undefined || result.freeBytesAfter === undefined
           ? undefined
           : result.freeBytesAfter - result.freeBytesBefore;
 
       const notes = [CONCURRENCY_NOTE];
-      if (plan.operation === "trash") {
+      // Anything that puts the originals in Trash has this property, not only
+      // the operation called "trash": a move or a compress that trashed its
+      // source has freed nothing on that filesystem either.
+      if (plan.operation === "trash" || plan.sourceDisposition === "trash") {
         notes.unshift(TRASH_NOTE);
       }
 
@@ -132,14 +167,35 @@ export function createApplyService(dependencies: ApplyDependencies): ApplyServic
   };
 }
 
+/**
+ * What this plan would do, for the prompt somebody confirms.
+ *
+ * Every operation is named, because a prompt that misdescribes the action is
+ * worse than no prompt: somebody who is told a move to another disk would
+ * "remove their files permanently" either refuses something safe or stops
+ * reading these sentences.
+ */
 function describe(plan: ActionPlan): string {
   const scope = plan.scopeSummary;
-  if (plan.operation === "trash") {
-    return `move ${scope} to Trash`;
+  const afterwards =
+    plan.sourceDisposition === "permanent"
+      ? ", then remove the originals permanently"
+      : ", then move the originals to Trash";
+
+  switch (plan.operation) {
+    case "trash":
+      return `move ${scope} to Trash`;
+    case "empty-trash":
+      return `empty ${scope}, which releases everything Disktop has moved there`;
+    case "move":
+      return `copy ${scope} to ${plan.destination?.display ?? "another disk"}${afterwards}`;
+    case "compress":
+      return `compress ${scope} into ${plan.destination?.display ?? "an archive beside it"}${afterwards}`;
+    case "dedup-hardlink":
+      return `replace ${scope} with links to ${plan.keepPath?.display ?? "the copy being kept"}, which cannot be undone`;
+    default:
+      return `remove ${scope} permanently`;
   }
-  return plan.operation === "empty-trash"
-    ? `empty ${scope}, which releases everything Disktop has moved there`
-    : `remove ${scope} permanently`;
 }
 
 function refuse(code: OperationFailure["code"], message: string): ApplyOutcome {

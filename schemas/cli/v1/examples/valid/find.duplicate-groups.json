@@ -1,0 +1,106 @@
+{
+  "schemaVersion": "1",
+  "command": "find",
+  "generatedAt": "2026-10-02T09:12:00.000Z",
+  "status": "incomplete",
+  "exitCode": 3,
+  "warnings": [
+    {
+      "code": "incomplete-search",
+      "message": "/home/example/Pictures/locked.jpg could not be opened, so it was left out: Permission denied (os error 13)"
+    }
+  ],
+  "data": {
+    "kind": "duplicates",
+    "scanId": "scan-1759190400-0a1b2c3d",
+    "groups": [
+      {
+        "apparentBytes": "4194304",
+        "digest": "9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08",
+        "reclaimableBytes": "4194304",
+        "files": [
+          {
+            "path": {
+              "bytesBase64": "L2hvbWUvZXhhbXBsZS9QaWN0dXJlcy90cmlwLmpwZw==",
+              "display": "/home/example/Pictures/trip.jpg",
+              "utf8": "/home/example/Pictures/trip.jpg"
+            },
+            "device": "66306",
+            "inode": "1180429",
+            "apparentBytes": "4194304",
+            "modifiedNanoseconds": "1759190400000000000",
+            "ownerId": "1000",
+            "groupId": "1000",
+            "permissions": 420
+          },
+          {
+            "path": {
+              "bytesBase64": "L2hvbWUvZXhhbXBsZS9Eb3dubG9hZHMvdHJpcC5qcGc=",
+              "display": "/home/example/Downloads/trip.jpg",
+              "utf8": "/home/example/Downloads/trip.jpg"
+            },
+            "device": "66306",
+            "inode": "1180512",
+            "apparentBytes": "4194304",
+            "modifiedNanoseconds": "1759276800000000000",
+            "ownerId": "1000",
+            "groupId": "1000",
+            "permissions": 420
+          }
+        ],
+        "decision": {
+          "kind": "decided",
+          "keep": {
+            "bytesBase64": "L2hvbWUvZXhhbXBsZS9QaWN0dXJlcy90cmlwLmpwZw==",
+            "display": "/home/example/Pictures/trip.jpg",
+            "utf8": "/home/example/Pictures/trip.jpg"
+          },
+          "basis": "the earliest modification time, which is when the file's contents last changed",
+          "arbitrary": false
+        }
+      },
+      {
+        "apparentBytes": "2097152",
+        "digest": "60303ae22b998861bce3b28f33eec1be758a213c86c93c076dbe9f558c11c752",
+        "reclaimableBytes": "0",
+        "files": [
+          {
+            "path": {
+              "bytesBase64": "L2hvbWUvZXhhbXBsZS9Eb3dubG9hZHMvbG9nby5wbmc=",
+              "display": "/home/example/Downloads/logo.png",
+              "utf8": "/home/example/Downloads/logo.png"
+            },
+            "device": "66306",
+            "inode": "1180600",
+            "apparentBytes": "2097152",
+            "modifiedNanoseconds": "1756598400000000000",
+            "ownerId": "1000",
+            "groupId": "1000",
+            "permissions": 420
+          },
+          {
+            "path": {
+              "bytesBase64": "L2hvbWUvZXhhbXBsZS9EZXNrdG9wL2xvZ28ucG5n",
+              "display": "/home/example/Desktop/logo.png",
+              "utf8": "/home/example/Desktop/logo.png"
+            },
+            "device": "66306",
+            "inode": "1180601",
+            "apparentBytes": "2097152",
+            "modifiedNanoseconds": "1756598400000000000",
+            "ownerId": "1000",
+            "groupId": "1000",
+            "permissions": 384
+          }
+        ],
+        "decision": {
+          "kind": "undecidable",
+          "reason": "No copy of this file is under /home/example/Pictures, so there is nothing there to keep."
+        }
+      }
+    ],
+    "reclaimableBytes": "4194304",
+    "candidatesRead": "4821",
+    "filesHashed": "96"
+  }
+}

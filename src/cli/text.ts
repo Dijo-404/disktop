@@ -1,4 +1,5 @@
 import type { Alert, Filesystem, IndexedEntry, StorageDevice, Warning } from "../domain/models.js";
+import type { DecidedGroup } from "../application/duplicates.js";
 import type { ScanSummary } from "../application/scan.js";
 import type { SnapshotDiff } from "../application/snapshots.js";
 import type { FootprintSummary, ProviderReport } from "../application/footprint.js";
@@ -6,6 +7,7 @@ import type { TypeTotal } from "../ports/scan.js";
 import type { ActionPlan, ActionResult } from "../domain/actions.js";
 import type { JournalRecord } from "../ports/actions.js";
 import type { SnapshotSummary } from "../ports/snapshots.js";
+import { sanitizeForDisplay } from "../domain/paths.js";
 import { formatBytes, usedPercentOfInodes, usedPercentOfSpace } from "../domain/sizes.js";
 
 export type Units = "iec" | "si";
@@ -66,8 +68,23 @@ export function alertLines(alerts: readonly Alert[]): string[] {
 }
 
 /** Warnings go to stderr so a redirected stdout still holds only the answer. */
+/**
+ * Text that did not come from Disktop, made safe to print.
+ *
+ * Most of what reaches this file is already a `RawPath.display`, which is
+ * sanitized where the bytes are decoded. The exceptions are the places a
+ * filename or a line of configuration gets interpolated into a sentence —
+ * a warning the helper wrote about a file it could not open, a finding's title
+ * built from a rule's name. A terminal reading an escape sequence out of one of
+ * those does what the sequence says, which for `ESC[2J` is to erase everything
+ * the person was reading.
+ */
+function safeLine(value: string): string {
+  return sanitizeForDisplay(new Uint8Array(Buffer.from(value, "utf8")));
+}
+
 export function warningLines(warnings: readonly Warning[]): string[] {
-  return warnings.map((warning) => `warning: ${warning.code}: ${warning.message}`);
+  return warnings.map((warning) => `warning: ${warning.code}: ${safeLine(warning.message)}`);
 }
 
 /** What one finished or partial scan measured, at 80 columns. */
@@ -110,6 +127,45 @@ export function entryLines(entries: readonly IndexedEntry[], units: Units, accou
     `${`Size (${accounting})`.padStart(sizeWidth)}  Kind  Path`,
     ...rows.map((row) => `${row.size.padStart(sizeWidth)}  ${row.kind.padEnd(4)}  ${row.path}${row.note}`),
   ];
+}
+
+/**
+ * Duplicate groups as a person reads them.
+ *
+ * Each group names the copy that would survive and why, then the copies the
+ * rule would act on. A group the rule could not decide shows its reason and no
+ * keeper: there is nothing to act on there and pretending otherwise is how the
+ * wrong file goes.
+ */
+export function duplicateLines(
+  groups: readonly DecidedGroup[],
+  reclaimableBytes: bigint,
+  units: Units,
+): string[] {
+  if (groups.length === 0) {
+    return ["No duplicate files matched."];
+  }
+
+  const lines: string[] = [
+    `${groups.length} ${groups.length === 1 ? "group" : "groups"} of identical files; removing the copies below would free ${formatBytes(reclaimableBytes, units)}.`,
+  ];
+  for (const [position, decided] of groups.entries()) {
+    const size = formatBytes(decided.group.apparentBytes, units);
+    lines.push(`${position + 1}. ${size} each, ${decided.group.files.length} copies`);
+    if (decided.decision.kind === "undecidable") {
+      lines.push(`     undecided: ${decided.decision.reason}`);
+      for (const file of decided.group.files) {
+        lines.push(`       ?  ${file.path.display}`);
+      }
+      continue;
+    }
+    lines.push(`     keep: ${decided.decision.kept.path.display}`);
+    lines.push(`     because ${decided.decision.basis}`);
+    for (const other of decided.decision.others) {
+      lines.push(`       -  ${other.path.display}`);
+    }
+  }
+  return lines;
 }
 
 export function typeTotalLines(totals: readonly TypeTotal[], units: Units): string[] {
@@ -193,7 +249,7 @@ export function findingLines(summary: FootprintSummary, units: Units): string[] 
   const rows = summary.findings.map((finding) => ({
     size: finding.size.bytes === undefined ? "unknown" : formatBytes(finding.size.bytes, units),
     category: finding.category,
-    title: finding.title,
+    title: safeLine(finding.title),
     note: [
       finding.active ? "in use" : undefined,
       finding.confidence === "observed" ? undefined : finding.confidence,
@@ -241,10 +297,22 @@ export function providerLines(reports: readonly ProviderReport[]): string[] {
  * would carry it out, because somebody skimming this has to be able to stop.
  */
 function operationVerb(operation: ActionPlan["operation"]): string {
-  if (operation === "trash") {
-    return "Move to Trash";
+  switch (operation) {
+    case "trash":
+      return "Move to Trash";
+    case "empty-trash":
+      return "Empty Trash";
+    case "move":
+      return "Copy to another disk";
+    case "compress":
+      return "Compress";
+    case "dedup-hardlink":
+      return "Replace with a hardlink";
+    case "manager":
+      return "Ask the package manager to clean up";
+    default:
+      return "Remove permanently";
   }
-  return operation === "empty-trash" ? "Empty Trash" : "Remove permanently";
 }
 
 export function planLines(plan: ActionPlan, units: Units): string[] {
@@ -257,11 +325,27 @@ export function planLines(plan: ActionPlan, units: Units): string[] {
     `  Reversible: ${plan.reversibility === "undo-from-trash" ? "yes, with 'disktop undo'" : "no"}`,
     `  Expires: ${plan.expiresAt}`,
   ];
+  if (plan.keepPath !== undefined) {
+    lines.push(`  Keeps: ${plan.keepPath.display}`);
+    lines.push("  Every other file listed becomes a second name for that one.");
+  }
+  if (plan.destination !== undefined) {
+    lines.push(`  Publishes into: ${plan.destination.display}`);
+  }
+  if (plan.sourceDisposition !== undefined) {
+    lines.push(
+      `  Then the source: ${
+        plan.sourceDisposition === "trash"
+          ? "goes to Trash, so it can be put back"
+          : "is removed permanently, so it cannot"
+      }`,
+    );
+  }
   if (plan.regenerationCost !== undefined) {
     lines.push(`  If you need it back: ${plan.regenerationCost}`);
   }
   for (const warning of plan.warnings) {
-    lines.push(`  ! ${warning}`);
+    lines.push(`  ! ${safeLine(warning)}`);
   }
   lines.push(
     "",
@@ -299,6 +383,14 @@ export function resultLines(
   if (result.undoAvailable) {
     lines.push(`  Undo it with: disktop undo ${result.journalId} --yes`);
   }
+  // Only the checks that did not pass are printed. A reader does not need to
+  // be told what was fine; they need to be told what was not, and what nobody
+  // could tell either way.
+  for (const check of result.verification) {
+    if (check.outcome !== "passed") {
+      lines.push(`  ${check.outcome === "failed" ? "!" : "?"} ${check.detail}`);
+    }
+  }
   for (const note of notes) {
     lines.push(`  note: ${note}`);
   }
@@ -310,7 +402,13 @@ export function historyLines(records: readonly JournalRecord[], units: Units): s
     return ["Disktop has not changed anything on this machine."];
   }
   return records.map((record) => {
-    const undo = record.operation === "trash" && record.state !== "uncertain" ? "  undo available" : "";
+    // A move or a compress that trashed its source is undoable in exactly the
+    // way a Trash action is; one that removed the source permanently left no
+    // item with a destination, which is what says so.
+    const restorable =
+      ["trash", "copy-move", "compress"].includes(record.operation) &&
+      record.items.some((item) => item.outcome === "completed" && item.destination !== undefined);
+    const undo = restorable && record.state !== "uncertain" ? "  undo available" : "";
     return `${record.startedAt}  ${record.operation.padEnd(12)} ${record.state.padEnd(10)} ${formatBytes(
       record.bytesMovedToTrash,
       units,

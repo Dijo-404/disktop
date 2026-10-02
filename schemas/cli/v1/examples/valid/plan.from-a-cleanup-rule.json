@@ -1,0 +1,45 @@
+{
+  "schemaVersion": "1",
+  "command": "clean plan",
+  "generatedAt": "2026-10-02T12:00:00.000Z",
+  "status": "complete",
+  "exitCode": 0,
+  "data": {
+    "plan": {
+      "id": "plan-20261001T084119004Z-9f2c1ab0",
+      "operation": "trash",
+      "createdAt": "2026-10-01T08:41:19.004Z",
+      "expiresAt": "2026-10-01T09:41:19.004Z",
+      "providerId": "rules",
+      "findingId": "rules:old-downloads",
+      "scopeSummary": "2 entries, selected by the cleanup rule \"old downloads\"",
+      "reversibility": "undo-from-trash",
+      "permission": "user",
+      "exactItemCount": "1",
+      "selectedBytes": "7314112512",
+      "entries": [
+        {
+          "path": {
+            "bytesBase64": "L2hvbWUvZXhhbXBsZS8uY2FyZ28vcmVnaXN0cnk=",
+            "display": "/home/example/.cargo/registry",
+            "utf8": "/home/example/.cargo/registry"
+          },
+          "expected": {
+            "device": "66306",
+            "inode": "1179651",
+            "mountId": "29",
+            "kind": "directory",
+            "apparentBytes": "4096",
+            "modifiedNanoseconds": "1758000000123456789"
+          },
+          "reviewedBytes": "7314112512"
+        }
+      ],
+      "regenerationCost": "Re-downloaded on the next build that needs a crate.",
+      "warnings": [
+        "~/.cargo/registry holds downloaded crate sources and their index."
+      ],
+      "ruleHash": "5d41402abc4b2a76b9719d911017c5925d41402abc4b2a76b9719d911017c592"
+    }
+  }
+}

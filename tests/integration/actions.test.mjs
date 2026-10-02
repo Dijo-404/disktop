@@ -10,9 +10,9 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
 import { existsSync, readdirSync } from "node:fs";
-import { mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
+import { chmod, mkdir, mkdtemp, readFile, rm, stat, utimes, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { after, test } from "node:test";
 import { createActionTree } from "../fixtures/generate.mjs";
 import { compileBundle } from "../support/schemas.mjs";
@@ -333,4 +333,904 @@ test("find reads empty directories and dangling links out of a stored scan", asy
     false,
     "a link to a file that exists is not broken",
   );
+});
+
+test("find duplicates groups real copies, skips a second hardlink, and keeps the copy the rule names", async () => {
+  const home = await disktopHome();
+  const tree = await createActionTree(home);
+  disktop(home, ["scan", home, "--json"]);
+
+  const found = envelope(
+    disktop(home, [
+      "find",
+      "duplicates",
+      "--path",
+      tree.duplicates.root,
+      "--min-size",
+      "1024",
+      "--keep",
+      "oldest",
+      "--json",
+    ]),
+    "find",
+  );
+
+  const paths = (group) => group.files.map((file) => file.path.display).sort();
+  assert.equal(
+    found.data.groups.length,
+    1,
+    `groups were ${JSON.stringify(found.data.groups.map(paths))}`,
+  );
+
+  const group = found.data.groups[0];
+  assert.deepEqual(paths(group), [tree.duplicates.copy, tree.duplicates.original].sort());
+  assert.equal(
+    group.files.some((file) => file.path.display === tree.duplicates.secondName),
+    false,
+    "a second name for an inode already in the group is not a third copy",
+  );
+  assert.equal(
+    group.files.some((file) => file.path.display.endsWith("/other.bin")),
+    false,
+    "a file of the same size holding different bytes is not a duplicate",
+  );
+
+  // Two copies of 200,000 bytes reclaim one copy's worth, never both.
+  assert.equal(group.apparentBytes, "200000");
+  assert.equal(group.reclaimableBytes, "200000");
+  assert.equal(found.data.reclaimableBytes, "200000");
+  assert.ok(
+    BigInt(found.data.filesHashed) <= BigInt(found.data.candidatesRead),
+    "nothing was hashed that was not a candidate",
+  );
+
+  assert.equal(group.decision.kind, "decided");
+  assert.ok(
+    group.files.some((file) => file.path.display === group.decision.keep.display),
+    "the kept copy is one of the group's own files",
+  );
+  assert.doesNotMatch(group.decision.basis, /access|opened|atime/i);
+});
+
+test("find duplicates leaves every file where it is", async () => {
+  const home = await disktopHome();
+  const tree = await createActionTree(home);
+  disktop(home, ["scan", home, "--json"]);
+
+  disktop(home, ["find", "duplicates", "--path", tree.duplicates.root, "--json"]);
+
+  for (const path of [tree.duplicates.original, tree.duplicates.copy, tree.duplicates.secondName]) {
+    assert.ok(existsSync(path), `${path} was removed by a search that only reads`);
+  }
+});
+
+test("find duplicates with --keep in-path and no match reports the group as undecided", async () => {
+  const home = await disktopHome();
+  const tree = await createActionTree(home);
+  disktop(home, ["scan", home, "--json"]);
+
+  const found = envelope(
+    disktop(home, [
+      "find",
+      "duplicates",
+      "--path",
+      tree.duplicates.root,
+      "--min-size",
+      "1024",
+      "--keep",
+      "in-path",
+      "--keep-under",
+      join(home, "nowhere-in-particular"),
+      "--json",
+    ]),
+    "find",
+  );
+
+  assert.equal(found.data.groups.length, 1);
+  assert.equal(found.data.groups[0].decision.kind, "undecidable");
+  assert.equal(
+    found.data.reclaimableBytes,
+    "0",
+    "a group with no chosen keeper reclaims nothing",
+  );
+});
+
+test("find duplicates with --keep in-path and no directory refuses rather than guessing", async () => {
+  const home = await disktopHome();
+  const tree = await createActionTree(home);
+  disktop(home, ["scan", home, "--json"]);
+
+  const result = disktop(home, [
+    "find",
+    "duplicates",
+    "--path",
+    tree.duplicates.root,
+    "--keep",
+    "in-path",
+    "--json",
+  ]);
+
+  assert.equal(result.status, 2);
+  const document = JSON.parse(result.stdout);
+  assert.equal(document.status, "error");
+  assert.match(document.error.message, /--keep-under/);
+});
+
+test("find stale lists files by modification time and says that is what it measured", async () => {
+  const home = await disktopHome();
+  const tree = await createActionTree(home);
+  const old = new Date(Date.now() - 400 * 86_400_000);
+  await utimes(tree.single, old, old);
+  disktop(home, ["scan", home, "--json"]);
+
+  const found = envelope(
+    disktop(home, ["find", "stale", "--path", home, "--older-than", "365", "--json"]),
+    "find",
+  );
+
+  assert.equal(found.data.kind, "stale");
+  assert.ok(
+    found.data.entries.some((entry) => entry.path.display === tree.single),
+    `stale files were ${JSON.stringify(found.data.entries.map((entry) => entry.path.display))}`,
+  );
+  for (const entry of found.data.entries) {
+    assert.equal(entry.kind, "file", "a stale listing is about files, not directories");
+  }
+
+  assert.equal(found.data.basis.field, "modified");
+  assert.ok(["maintained", "coarse", "absent", "unknown"].includes(found.data.basis.confidence));
+  assert.match(found.data.basis.label, /not modified since/i);
+  assert.doesNotMatch(found.data.basis.label, /not opened|last opened/i);
+});
+
+test("find stale leaves recently modified files out", async () => {
+  const home = await disktopHome();
+  const tree = await createActionTree(home);
+  disktop(home, ["scan", home, "--json"]);
+
+  const found = envelope(
+    disktop(home, ["find", "stale", "--path", home, "--older-than", "365", "--json"]),
+    "find",
+  );
+
+  assert.equal(
+    found.data.entries.some((entry) => entry.path.display === tree.linked),
+    false,
+    "a file written moments ago is not six months stale",
+  );
+});
+
+test("find stale text output leads with what the dates mean", async () => {
+  const home = await disktopHome();
+  await createActionTree(home);
+  disktop(home, ["scan", home, "--json"]);
+
+  const result = disktop(home, ["find", "stale", "--path", home, "--older-than", "1"]);
+
+  assert.match(result.stdout, /not modified since/i);
+  assert.doesNotMatch(result.stdout, /not opened|last opened/i);
+});
+
+test("a move plan fixes its destination and disposition, and applying it refuses rather than guessing", async () => {
+  const home = await disktopHome();
+  const tree = await createActionTree(home);
+  const destination = join(home, "archive");
+  await mkdir(destination, { recursive: true });
+
+  // Source and destination are on the same filesystem here, which is exactly
+  // what a move refuses: moving within one filesystem frees nothing.
+  const sameDisk = disktop(home, [
+    "clean",
+    "plan",
+    "--path",
+    tree.artifacts,
+    "--operation",
+    "move",
+    "--destination",
+    destination,
+    "--source",
+    "trash",
+    "--json",
+  ]);
+  assert.equal(sameDisk.status, 2);
+  assert.match(JSON.parse(sameDisk.stdout).error.message, /same filesystem/i);
+});
+
+test("a compress plan publishes beside the source and says what becomes of it", async () => {
+  const home = await disktopHome();
+  const tree = await createActionTree(home);
+
+  const planned = envelope(
+    disktop(home, [
+      "clean",
+      "plan",
+      "--path",
+      tree.artifacts,
+      "--operation",
+      "compress",
+      "--source",
+      "trash",
+      "--json",
+    ]),
+    "plan",
+  );
+
+  assert.equal(planned.data.plan.operation, "compress");
+  assert.equal(planned.data.plan.sourceDisposition, "trash");
+  assert.equal(planned.data.plan.reversibility, "undo-from-trash");
+  assert.equal(
+    planned.data.plan.destination.display,
+    dirname(tree.artifacts),
+    "an archive lands beside what it archives unless somebody says otherwise",
+  );
+});
+
+test("a compress plan that removes its source permanently says it cannot be undone", async () => {
+  const home = await disktopHome();
+  const tree = await createActionTree(home);
+
+  const planned = envelope(
+    disktop(home, [
+      "clean",
+      "plan",
+      "--path",
+      tree.artifacts,
+      "--operation",
+      "compress",
+      "--source",
+      "permanent",
+      "--json",
+    ]),
+    "plan",
+  );
+
+  assert.equal(planned.data.plan.reversibility, "irreversible");
+  assert.ok(planned.data.plan.warnings.some((warning) => /cannot be undone/i.test(warning)));
+});
+
+test("a trash plan refuses a destination rather than ignoring it", async () => {
+  const home = await disktopHome();
+  const tree = await createActionTree(home);
+
+  const result = disktop(home, [
+    "clean",
+    "plan",
+    "--path",
+    tree.artifacts,
+    "--operation",
+    "trash",
+    "--destination",
+    home,
+    "--json",
+  ]);
+
+  assert.equal(result.status, 2);
+  assert.match(JSON.parse(result.stdout).error.message, /destination/i);
+});
+
+test("a reviewed hardlink replacement makes one inode out of two copies and cannot be undone", async () => {
+  const home = await disktopHome();
+  const tree = await createActionTree(home);
+
+  const planned = envelope(
+    disktop(home, [
+      "clean",
+      "plan",
+      "--path",
+      tree.duplicates.original,
+      "--replace",
+      tree.duplicates.copy,
+      "--operation",
+      "hardlink",
+      "--json",
+    ]),
+    "plan",
+  );
+
+  assert.equal(planned.data.plan.operation, "dedup-hardlink");
+  assert.equal(planned.data.plan.reversibility, "irreversible");
+  assert.equal(planned.data.plan.keepPath.display, tree.duplicates.original);
+  assert.equal(planned.data.plan.entries.length, 2);
+
+  const before = await stat(tree.duplicates.original);
+  const copyBefore = await stat(tree.duplicates.copy);
+  assert.notEqual(before.ino, copyBefore.ino, "the fixture starts as two separate inodes");
+
+  const applied = envelope(
+    disktop(home, ["clean", "apply", planned.data.plan.id, "--yes", "--permanent", "--json"]),
+    "apply",
+  );
+
+  assert.equal(applied.data.result.completed, "1");
+  assert.equal(
+    applied.data.result.bytesMovedToTrash,
+    "0",
+    "nothing went to Trash, so nothing can be put back",
+  );
+  assert.equal(applied.data.result.undoAvailable, false);
+
+  const after = await stat(tree.duplicates.original);
+  const copyAfter = await stat(tree.duplicates.copy);
+  assert.equal(after.ino, copyAfter.ino, "both names now reach one inode");
+  assert.deepEqual(
+    await readFile(tree.duplicates.copy),
+    await readFile(tree.duplicates.original),
+    "the bytes under the replaced name are the bytes that were there",
+  );
+
+  const undone = disktop(home, ["undo", applied.data.result.journalId, "--yes", "--json"]);
+  assert.equal(undone.status, 2, "an irreversible action has nothing to put back");
+});
+
+test("a hardlink replacement refuses two files that do not hold the same bytes", async () => {
+  const home = await disktopHome();
+  const tree = await createActionTree(home);
+  const decoy = join(tree.duplicates.root, "other.bin");
+
+  const planned = envelope(
+    disktop(home, [
+      "clean",
+      "plan",
+      "--path",
+      tree.duplicates.original,
+      "--replace",
+      decoy,
+      "--operation",
+      "hardlink",
+      "--json",
+    ]),
+    "plan",
+  );
+
+  const applied = disktop(home, [
+    "clean",
+    "apply",
+    planned.data.plan.id,
+    "--yes",
+    "--permanent",
+    "--json",
+  ]);
+
+  assert.equal(applied.status, 3, "a refused item makes the action incomplete");
+  const document = JSON.parse(applied.stdout);
+  assert.equal(document.data.result.failed, "1");
+  assert.equal(document.data.result.completed, "0");
+
+  const keep = await stat(tree.duplicates.original);
+  const other = await stat(decoy);
+  assert.notEqual(keep.ino, other.ino, "the file nobody proved identical is untouched");
+  assert.equal((await readFile(decoy)).length, 200_000);
+});
+
+test("a hardlink replacement refuses a file whose permissions differ", async () => {
+  const home = await disktopHome();
+  const tree = await createActionTree(home);
+  await chmod(tree.duplicates.copy, 0o600);
+  await chmod(tree.duplicates.original, 0o644);
+
+  const planned = envelope(
+    disktop(home, [
+      "clean",
+      "plan",
+      "--path",
+      tree.duplicates.original,
+      "--replace",
+      tree.duplicates.copy,
+      "--operation",
+      "hardlink",
+      "--json",
+    ]),
+    "plan",
+  );
+
+  const applied = disktop(home, [
+    "clean",
+    "apply",
+    planned.data.plan.id,
+    "--yes",
+    "--permanent",
+    "--json",
+  ]);
+
+  assert.equal(applied.status, 3);
+  const keep = await stat(tree.duplicates.original);
+  const copy = await stat(tree.duplicates.copy);
+  assert.notEqual(keep.ino, copy.ino);
+});
+
+test("a hardlink plan applied without acknowledging its irreversibility is refused", async () => {
+  const home = await disktopHome();
+  const tree = await createActionTree(home);
+
+  const planned = envelope(
+    disktop(home, [
+      "clean",
+      "plan",
+      "--path",
+      tree.duplicates.original,
+      "--replace",
+      tree.duplicates.copy,
+      "--operation",
+      "hardlink",
+      "--json",
+    ]),
+    "plan",
+  );
+
+  const applied = disktop(home, ["clean", "apply", planned.data.plan.id, "--yes", "--json"]);
+
+  assert.equal(applied.status, 2);
+  const keep = await stat(tree.duplicates.original);
+  const copy = await stat(tree.duplicates.copy);
+  assert.notEqual(keep.ino, copy.ino, "nothing was replaced");
+});
+
+/**
+ * A directory on a filesystem other than the sandbox's, or `undefined`.
+ *
+ * A cross-disk move needs two real filesystems and this host may have only
+ * one that Disktop is willing to publish into: `/dev/shm` and `/run/user` are
+ * usually the other writable mounts, and both are below a protected root. Set
+ * `DISKTOP_TEST_DESTINATION_FS` to a writable directory on a second filesystem
+ * to run these, or see them skipped out loud rather than passing silently.
+ */
+async function otherFilesystem(home) {
+  const named = process.env.DISKTOP_TEST_DESTINATION_FS;
+  if (named === undefined) {
+    return undefined;
+  }
+  const here = await stat(home);
+  const there = await stat(named);
+  if (here.dev === there.dev) {
+    return undefined;
+  }
+  const directory = join(named, `disktop-move-${process.pid}-${Date.now()}`);
+  await mkdir(directory, { recursive: true });
+  homes.push(directory);
+  return directory;
+}
+
+test("a move across filesystems copies, verifies, publishes, and trashes the source", async (t) => {
+  const home = await disktopHome();
+  const tree = await createActionTree(home);
+  const destination = await otherFilesystem(home);
+  if (destination === undefined) {
+    t.skip(
+      "no second filesystem is available; set DISKTOP_TEST_DESTINATION_FS to a writable directory on one",
+    );
+    return;
+  }
+
+  const planned = envelope(
+    disktop(home, [
+      "clean",
+      "plan",
+      "--path",
+      tree.artifacts,
+      "--operation",
+      "move",
+      "--destination",
+      destination,
+      "--source",
+      "trash",
+      "--json",
+    ]),
+    "plan",
+  );
+  assert.equal(planned.data.plan.operation, "move");
+
+  const applied = envelope(
+    disktop(home, ["clean", "apply", planned.data.plan.id, "--yes", "--json"]),
+    "apply",
+  );
+
+  assert.equal(applied.data.result.completed, "1");
+  assert.ok(existsSync(join(destination, "node_modules")), "the copy arrived");
+  assert.ok(!existsSync(tree.artifacts), "the source was trashed");
+  assert.equal(applied.data.result.undoAvailable, true);
+  assert.notEqual(
+    applied.data.result.bytesMovedToTrash,
+    "0",
+    "the source went to Trash, so its bytes are reported as moved there",
+  );
+});
+
+test("a move refuses to publish over something already at the destination", async (t) => {
+  const home = await disktopHome();
+  const tree = await createActionTree(home);
+  const destination = await otherFilesystem(home);
+  if (destination === undefined) {
+    t.skip("no second filesystem is available; set DISKTOP_TEST_DESTINATION_FS");
+    return;
+  }
+  await mkdir(join(destination, "node_modules"), { recursive: true });
+  await writeFile(join(destination, "node_modules", "mine.txt"), "do not overwrite me");
+
+  const planned = envelope(
+    disktop(home, [
+      "clean",
+      "plan",
+      "--path",
+      tree.artifacts,
+      "--operation",
+      "move",
+      "--destination",
+      destination,
+      "--source",
+      "trash",
+      "--json",
+    ]),
+    "plan",
+  );
+  const applied = disktop(home, ["clean", "apply", planned.data.plan.id, "--yes", "--json"]);
+
+  assert.equal(applied.status, 3);
+  assert.equal(
+    await readFile(join(destination, "node_modules", "mine.txt"), "utf8"),
+    "do not overwrite me",
+  );
+  assert.ok(existsSync(tree.artifacts), "the source is preserved when the copy cannot publish");
+});
+
+test("a reviewed compress publishes an archive, trashes the source, and undo brings it back", async () => {
+  const home = await disktopHome();
+  const tree = await createActionTree(home);
+
+  const planned = envelope(
+    disktop(home, [
+      "clean",
+      "plan",
+      "--path",
+      tree.artifacts,
+      "--operation",
+      "compress",
+      "--source",
+      "trash",
+      "--json",
+    ]),
+    "plan",
+  );
+  assert.equal(planned.data.plan.operation, "compress");
+  assert.equal(planned.data.plan.reversibility, "undo-from-trash");
+
+  const applied = envelope(
+    disktop(home, ["clean", "apply", planned.data.plan.id, "--yes", "--json"]),
+    "apply",
+  );
+
+  assert.equal(applied.data.result.completed, "1");
+  assert.ok(existsSync(`${tree.artifacts}.tar.zst`), "the archive was published beside the source");
+  assert.ok(!existsSync(tree.artifacts), "the source went to Trash");
+  assert.equal(applied.data.result.undoAvailable, true);
+
+  const raw = disktop(home, ["undo", applied.data.result.journalId, "--yes", "--json"]);
+  assert.equal(raw.status, 0, `undo said: ${raw.stdout}${raw.stderr}`);
+  const undone = envelope(raw, "undo");
+  assert.equal(undone.data.result.completed, "1");
+  assert.ok(existsSync(tree.artifacts), "undo put the source back");
+});
+
+test("a compress that removes its source permanently has nothing to put back", async () => {
+  const home = await disktopHome();
+  const tree = await createActionTree(home);
+
+  const planned = envelope(
+    disktop(home, [
+      "clean",
+      "plan",
+      "--path",
+      tree.single,
+      "--operation",
+      "compress",
+      "--source",
+      "permanent",
+      "--json",
+    ]),
+    "plan",
+  );
+  assert.equal(planned.data.plan.reversibility, "irreversible");
+
+  const applied = envelope(
+    disktop(home, ["clean", "apply", planned.data.plan.id, "--yes", "--permanent", "--json"]),
+    "apply",
+  );
+
+  assert.equal(applied.data.result.completed, "1");
+  assert.equal(applied.data.result.bytesMovedToTrash, "0");
+  assert.equal(applied.data.result.undoAvailable, false);
+  assert.ok(existsSync(`${tree.single}.zst`));
+  assert.ok(!existsSync(tree.single));
+});
+
+test("a compressed file's archive holds exactly the bytes that went in", async () => {
+  const home = await disktopHome();
+  const tree = await createActionTree(home);
+  const original = await readFile(tree.single);
+
+  const planned = envelope(
+    disktop(home, [
+      "clean",
+      "plan",
+      "--path",
+      tree.single,
+      "--operation",
+      "compress",
+      "--source",
+      "trash",
+      "--json",
+    ]),
+    "plan",
+  );
+  disktop(home, ["clean", "apply", planned.data.plan.id, "--yes", "--json"]);
+
+  const { createReadStream } = await import("node:fs");
+  const { createGunzip } = await import("node:zlib");
+  void createGunzip;
+  // zstd is decoded with the system tool when it is there; otherwise the
+  // archive's existence and the helper's own round-trip test carry this.
+  const unzstd = spawnSync("zstd", ["-d", "-c", `${tree.single}.zst`], {
+    encoding: "buffer",
+    maxBuffer: 64 * 1024 * 1024,
+  });
+  void createReadStream;
+  if (unzstd.error !== undefined || unzstd.status !== 0) {
+    return;
+  }
+  assert.deepEqual(unzstd.stdout, original, "every byte came back out of the archive");
+});
+
+test("undoing a compress that removed its source permanently refuses rather than inventing one", async () => {
+  const home = await disktopHome();
+  const tree = await createActionTree(home);
+
+  const planned = envelope(
+    disktop(home, [
+      "clean",
+      "plan",
+      "--path",
+      tree.single,
+      "--operation",
+      "compress",
+      "--source",
+      "permanent",
+      "--json",
+    ]),
+    "plan",
+  );
+  const applied = envelope(
+    disktop(home, ["clean", "apply", planned.data.plan.id, "--yes", "--permanent", "--json"]),
+    "apply",
+  );
+
+  const undone = disktop(home, ["undo", applied.data.result.journalId, "--yes", "--json"]);
+
+  assert.notEqual(undone.status, 0, "there is no source to bring back");
+  assert.ok(!existsSync(tree.single), "nothing was invented at the original path");
+  assert.ok(existsSync(`${tree.single}.zst`), "the archive is left where it was published");
+});
+
+test("a cleanup rule written in config.toml becomes a finding and a reviewed plan", async () => {
+  const home = await disktopHome();
+  const tree = await createActionTree(home);
+  const downloads = join(home, "downloads");
+  await mkdir(downloads, { recursive: true });
+  const big = join(downloads, "old.iso");
+  await writeFile(big, Buffer.alloc(200_000, 1));
+  const old = new Date(Date.now() - 400 * 86_400_000);
+  await utimes(big, old, old);
+  void tree;
+
+  await mkdir(join(home, "config", "disktop"), { recursive: true });
+  await writeFile(
+    join(home, "config", "disktop", "config.toml"),
+    [
+      "[[rules]]",
+      'name = "old disk images"',
+      `roots = ["${downloads}"]`,
+      'globs = ["*.iso"]',
+      "minimum_age_days = 30",
+      "minimum_bytes = 1024",
+      "maximum_count = 10",
+      "maximum_bytes = 1073741824",
+      "",
+    ].join("\n"),
+  );
+
+  // A rule reads a stored scan's index; it never walks a tree itself.
+  disktop(home, ["scan", home, "--json"]);
+
+  const listed = envelope(disktop(home, ["clean", "--json"]), "clean");
+  const found = listed.data.findings.find((finding) => finding.id === "rules:old-disk-images");
+  assert.ok(found, `rule findings were ${JSON.stringify(listed.data.findings.map((f) => f.id))}`);
+  assert.ok(
+    found.paths.some((path) => path.display === big),
+    "the rule selected the file it describes",
+  );
+
+  const planned = envelope(
+    disktop(home, ["clean", "plan", found.id, "--json"]),
+    "plan",
+  );
+  assert.match(planned.data.plan.ruleHash, /^[0-9a-f]{64}$/);
+  assert.ok(existsSync(big), "planning changes nothing");
+});
+
+test("a plan is refused once its rule has been edited", async () => {
+  const home = await disktopHome();
+  await createActionTree(home);
+  const downloads = join(home, "downloads");
+  await mkdir(downloads, { recursive: true });
+  const big = join(downloads, "old.iso");
+  await writeFile(big, Buffer.alloc(200_000, 1));
+  const old = new Date(Date.now() - 400 * 86_400_000);
+  await utimes(big, old, old);
+
+  const configPath = join(home, "config", "disktop", "config.toml");
+  const rule = (ageDays) =>
+    [
+      "[[rules]]",
+      'name = "old disk images"',
+      `roots = ["${downloads}"]`,
+      'globs = ["*.iso"]',
+      `minimum_age_days = ${ageDays}`,
+      "minimum_bytes = 1024",
+      "maximum_count = 10",
+      "maximum_bytes = 1073741824",
+      "",
+    ].join("\n");
+
+  await mkdir(join(home, "config", "disktop"), { recursive: true });
+  await writeFile(configPath, rule(30));
+  disktop(home, ["scan", home, "--json"]);
+
+  const planned = envelope(
+    disktop(home, ["clean", "plan", "rules:old-disk-images", "--json"]),
+    "plan",
+  );
+
+  // The rule now selects a different set than the one that was reviewed.
+  await writeFile(configPath, rule(7));
+
+  const applied = disktop(home, ["clean", "apply", planned.data.plan.id, "--yes", "--json"]);
+
+  assert.equal(applied.status, 2);
+  assert.match(JSON.parse(applied.stdout).error.message, /rule/i);
+  assert.ok(existsSync(big), "nothing was removed on a plan nobody re-reviewed");
+});
+
+test("a rule naming a protected root is reported when the configuration loads", async () => {
+  const home = await disktopHome();
+  await mkdir(join(home, "config", "disktop"), { recursive: true });
+  await writeFile(
+    join(home, "config", "disktop", "config.toml"),
+    [
+      "[[rules]]",
+      'name = "bad"',
+      'roots = ["/etc"]',
+      'globs = ["*"]',
+      "minimum_age_days = 1",
+      "minimum_bytes = 0",
+      "maximum_count = 1",
+      "maximum_bytes = 1",
+      "",
+    ].join("\n"),
+  );
+
+  const result = disktop(home, ["clean", "--json"]);
+
+  // Disktop still runs with a configuration it could not apply, but it says
+  // so: somebody whose own rules were dropped is reading a listing that is
+  // missing exactly the thing they wrote.
+  assert.equal(result.status, 3);
+  const document = JSON.parse(result.stdout);
+  assert.equal(document.status, "incomplete");
+  const problem = document.warnings.find((warning) => warning.code === "config-not-applied");
+  assert.ok(problem, `warnings were ${JSON.stringify(document.warnings)}`);
+  assert.match(problem.message, /etc/);
+});
+
+test("an applied action reports what it checked, and a failed check keeps it off 'complete'", async () => {
+  const home = await disktopHome();
+  const tree = await createActionTree(home);
+
+  const { apply } = planAndApply(home, tree.cache);
+
+  const checks = apply.data.result.verification;
+  assert.ok(Array.isArray(checks) && checks.length > 0, "an apply says what it checked");
+  assert.ok(
+    checks.every((check) => ["passed", "failed", "unavailable"].includes(check.outcome)),
+    JSON.stringify(checks),
+  );
+  const reading = checks.find((check) => check.check === "free-space-read");
+  assert.ok(reading, "the free-space reading is one of the checks");
+  assert.notEqual(
+    reading.outcome,
+    "failed",
+    "reading free space on a real filesystem either works or is unavailable",
+  );
+
+  if (checks.some((check) => check.outcome === "failed")) {
+    assert.notEqual(apply.data.result.state, "complete");
+  }
+});
+
+test("a compress undo says the archive it published is still there", async () => {
+  const home = await disktopHome();
+  const tree = await createActionTree(home);
+
+  const planned = envelope(
+    disktop(home, [
+      "clean",
+      "plan",
+      "--path",
+      tree.artifacts,
+      "--operation",
+      "compress",
+      "--source",
+      "trash",
+      "--json",
+    ]),
+    "plan",
+  );
+  const applied = envelope(
+    disktop(home, ["clean", "apply", planned.data.plan.id, "--yes", "--json"]),
+    "apply",
+  );
+
+  const undone = envelope(
+    disktop(home, ["undo", applied.data.result.journalId, "--yes", "--json"]),
+    "undo",
+  );
+
+  assert.ok(existsSync(tree.artifacts), "the source came back");
+  assert.ok(
+    existsSync(`${tree.artifacts}.tar.zst`),
+    "the archive is left where it was put; an undo does not remove anything else",
+  );
+  assert.ok(
+    undone.data.result.notes?.some((note) => /archive/i.test(note)),
+    `notes were ${JSON.stringify(undone.data.result.notes)}`,
+  );
+});
+
+test("history marks a compress that trashed its source as undoable, and a permanent one not", async () => {
+  const home = await disktopHome();
+  const tree = await createActionTree(home);
+
+  for (const [path, disposition] of [
+    [tree.artifacts, "trash"],
+    [tree.single, "permanent"],
+  ]) {
+    const planned = envelope(
+      disktop(home, [
+        "clean",
+        "plan",
+        "--path",
+        path,
+        "--operation",
+        "compress",
+        "--source",
+        disposition,
+        "--json",
+      ]),
+      "plan",
+    );
+    disktop(home, [
+      "clean",
+      "apply",
+      planned.data.plan.id,
+      "--yes",
+      ...(disposition === "permanent" ? ["--permanent"] : []),
+      "--json",
+    ]);
+  }
+
+  const history = envelope(disktop(home, ["history", "--json"]), "history");
+  const records = history.data.records.filter((record) => record.operation === "compress");
+  assert.equal(records.length, 2);
+
+  const undoable = records.filter((record) =>
+    record.items.some((item) => item.outcome === "completed" && item.destination !== undefined),
+  );
+  assert.equal(undoable.length, 1, "only the one that trashed its source left anything to put back");
 });

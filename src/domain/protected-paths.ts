@@ -140,3 +140,72 @@ export function classifyGenericTarget(target: RawPath, context: ProtectedPathCon
 function refuse(code: OperationFailureCode, reason: string): TargetVerdict {
   return { allowed: false, code, reason };
 }
+
+/**
+ * Whether a move or a compress may publish into this directory.
+ *
+ * This is deliberately a different question from `classifyGenericTarget`, and
+ * getting it wrong in either direction is a real failure. A target is
+ * something Disktop removes, so it has to be inside a root the user said
+ * Disktop may clean. A destination is somewhere Disktop writes, and the whole
+ * point of a cross-disk move is that the other disk is not inside the home
+ * directory — `/mnt/archive` is a correct answer here and an incorrect one
+ * there.
+ *
+ * So the allowlist does not apply, and neither does the mount-root rule: the
+ * second disk's mount point is exactly where somebody means to publish. What
+ * does apply is everything that says "this is not yours to write into": the
+ * protected system roots, the shared container roots themselves, and Trash and
+ * Disktop's own state, where an archive would be mistaken for rubbish or for
+ * Disktop's own records.
+ *
+ * Like the rest of this module it reads bytes and cannot see the filesystem.
+ * It does not prove the directory exists, that it is a directory, or that this
+ * user may write in it; the planner stats it and the helper repeats every
+ * check against a live descriptor.
+ */
+export function classifyDestination(
+  destination: RawPath,
+  context: ProtectedPathContext,
+): TargetVerdict {
+  const bytes = pathBytes(destination);
+
+  if (context.mountRoots.length === 0 || context.excludedRoots.length === 0) {
+    return refuse(
+      "invalid-plan",
+      "The mount and excluded-root context is incomplete, so no destination can be approved",
+    );
+  }
+
+  if (!isAbsoluteNormalized(bytes)) {
+    return refuse(
+      "invalid-plan",
+      "A destination must be an absolute path with no empty, '.', or '..' segment",
+    );
+  }
+
+  if (containerRootBytes.some((root) => bytesEqual(root, bytes))) {
+    return refuse(
+      "protected-path",
+      "The destination is a shared container root holding other accounts' or programs' data; publish into a directory inside it instead",
+    );
+  }
+
+  for (const root of protectedRootBytes) {
+    const hit = bytesEqual(root, ROOT) ? bytesEqual(bytes, ROOT) : isWithin(root, bytes);
+    if (hit) {
+      return refuse("protected-path", "The destination is a protected system root or below one");
+    }
+  }
+
+  for (const excluded of context.excludedRoots) {
+    if (isWithin(pathBytes(excluded), bytes)) {
+      return refuse(
+        "protected-path",
+        "The destination is inside Trash, Disktop state, or another excluded root",
+      );
+    }
+  }
+
+  return { allowed: true };
+}

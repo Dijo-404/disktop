@@ -190,6 +190,7 @@ export function fakeContext(overrides = {}) {
       },
     },
     recorded,
+    startupWarnings: overrides.startupWarnings ?? [],
     signals: { listen() {}, stop() {} },
     resolvePath: (path) => (path === "." ? "/home/example/projects" : path),
     now: () => new Date("2026-09-29T08:15:04.117Z"),

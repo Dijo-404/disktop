@@ -1,0 +1,12 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/Dijo-404/disktop/schemas/native/v1/duplicate-result.json",
+  "title": "disktop-fs duplicate groups",
+  "description": "The groups of identical files one hash-candidates request found, with what it read to find them and what it could not.",
+  "type": "object",
+  "allOf": [{ "$ref": "event.json" }],
+  "properties": {
+    "event": { "const": "complete" },
+    "result": { "$ref": "common.json#/$defs/duplicateResult" }
+  }
+}

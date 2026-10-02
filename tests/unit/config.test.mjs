@@ -112,3 +112,102 @@ test("an artifact directory name cannot be a path, so a detector cannot be point
 test("an unknown key in the providers table is still refused", () => {
   assert.throws(() => parseConfigDocument("[providers]\nmax_finding = 1\n"), /providers\.max_finding/);
 });
+
+// --- Declarative cleanup rules ---
+
+test("rules are read in order, with their limits, from [[rules]] blocks", () => {
+  const config = parseConfigDocument(`
+[[rules]]
+name = "old downloads"
+roots = ["/home/example/Downloads"]
+globs = ["*.iso"]
+minimum_age_days = 30
+minimum_bytes = 1048576
+maximum_count = 50
+maximum_bytes = 10737418240
+
+[[rules]]
+name = "build output"
+roots = ["/home/example/projects"]
+globs = ["**/target"]
+kinds = ["directory"]
+minimum_age_days = 14
+minimum_bytes = 0
+maximum_count = 20
+maximum_bytes = 1073741824
+`);
+
+  assert.equal(config.rules.length, 2);
+  assert.equal(config.rules[0].name, "old downloads");
+  assert.equal(config.rules[0].maximumCount, 50);
+  assert.deepEqual(config.rules[1].kinds, ["directory"]);
+});
+
+test("no rules at all is an empty list, not an error", () => {
+  assert.deepEqual(parseConfigDocument('units = "si"\n').rules, []);
+});
+
+test("a rule naming a protected root is reported rather than dropped", () => {
+  assert.throws(
+    () =>
+      parseConfigDocument(`
+[[rules]]
+name = "bad"
+roots = ["/etc"]
+globs = ["*"]
+minimum_age_days = 1
+minimum_bytes = 0
+maximum_count = 1
+maximum_bytes = 1
+`),
+    /etc/,
+  );
+});
+
+test("a rule that tries to name a command is refused by name", () => {
+  assert.throws(
+    () =>
+      parseConfigDocument(`
+[[rules]]
+name = "sneaky"
+roots = ["/home/example/Downloads"]
+globs = ["*"]
+command = "rm -rf /"
+minimum_age_days = 1
+minimum_bytes = 0
+maximum_count = 1
+maximum_bytes = 1
+`),
+    /command/,
+  );
+});
+
+test("an unknown top-level section is still refused now that one array of tables is known", () => {
+  assert.throws(() => parseConfigDocument('[[policies]]\nname = "x"\n'), /policies/);
+});
+
+test("two rules whose names reduce to one identifier are refused, not silently merged", () => {
+  assert.throws(
+    () =>
+      parseConfigDocument(`
+[[rules]]
+name = "My rule"
+roots = ["/home/example/Downloads"]
+globs = ["*.a"]
+minimum_age_days = 1
+minimum_bytes = 0
+maximum_count = 1
+maximum_bytes = 1
+
+[[rules]]
+name = "my-rule"
+roots = ["/home/example/Downloads"]
+globs = ["*.b"]
+minimum_age_days = 1
+minimum_bytes = 0
+maximum_count = 1
+maximum_bytes = 1
+`),
+    /name/i,
+  );
+});

@@ -112,6 +112,27 @@ export function createIndexFootprint(options: IndexFootprintOptions): FootprintP
      * larger of the two. A name that had more matches than its share sets
      * `truncated`, so the caller says so instead of listing fewer in silence.
      */
+    async entriesUnder(root, limit) {
+      const covering = await newestCovering(options.snapshots, root);
+      if (covering === undefined) {
+        // No stored scan reaches this path. "Nothing is there" and "nobody
+        // looked" must not read the same, so the caller is told which it is.
+        return { entries: [], searched: false, truncated: false };
+      }
+      const page = await options.index.query({
+        scanId: covering,
+        filter: { underPath: root },
+        sort: "allocated",
+        order: "descending",
+        limit: Math.min(Math.max(1, limit), 1000),
+      });
+      return {
+        entries: page.entries,
+        searched: true,
+        truncated: page.nextCursor !== undefined,
+      };
+    },
+
     async directoriesNamed(names, limit) {
       const home = options.home;
       if (home === undefined) {
