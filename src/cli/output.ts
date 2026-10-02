@@ -333,6 +333,14 @@ export function encodeActionResult(
       ? {}
       : { observedFreeSpaceChange: observedFreeSpaceChange.toString(10) }),
     undoAvailable: result.undoAvailable,
+    // What the apply checked once the helper had finished. A check that could
+    // not run is listed as unavailable rather than left out, so a reader can
+    // tell "it was fine" from "nobody could tell".
+    verification: result.verification.map((check) => ({
+      check: check.check,
+      outcome: check.outcome,
+      detail: check.detail,
+    })),
     ...(notes.length === 0 ? {} : { notes: [...notes] }),
   };
 }

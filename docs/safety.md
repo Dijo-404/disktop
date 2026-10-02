@@ -93,6 +93,23 @@ Where a move or compress publishes is judged by `classifyDestination`, which is 
 
 Manager-owned state is changed only through scoped, fixed-argument manager adapters with probe, preview where supported, live preflight, apply, verification, permission mapping, and journal records. A manager may not provide exact item counts or byte savings; the UI must say so. An adapter never substitutes `rm -rf` for a missing manager.
 
+## What an action checked afterwards
+
+Every result carries a list of checks the apply made once the helper had finished. They
+answer a different question from the helper's per-item outcomes: the helper says what it
+did to each target, and this says whether the action as a whole did what the plan
+described, asked from the side the plan is on.
+
+A check that could not run is `unavailable` and never `passed`. "It was fine" and "nobody
+could tell" are different answers and only one of them is evidence, which is the same
+rule the free-space readings and the size bases follow. A `failed` check keeps the result
+off `complete` whatever the helper reported, and `disktop clean apply` exits `3`.
+
+An undo restores the source and stops there. A move or a compression also published
+something, and that output is named in the result and left exactly where it was put:
+removing it is a plan somebody reviews and confirms, not a side effect of undoing
+something else.
+
 ## Privileges and recovery
 
 Normal UI, scans, and user cleanup run unprivileged. A privileged manager action escalates only the reviewed adapter through a scoped `sudo` or `pkexec` invocation. The npm process is not run as root for cleanup. Explicit administrator scans may be read-only from a root-owned global install; EUID 0 disables generic mutation. Authentication failure is a permission result.

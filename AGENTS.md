@@ -1,6 +1,6 @@
 # Agent guide for Disktop
 
-Read [PLAN.md](PLAN.md) before implementation. It is the product scope, target folder structure, interface map, phase gates, and acceptance checklist. **Phases 0, 1, 2, 3, and 4 are complete; Phase 5 is the next gate.** The contracts are normative and enforced:
+Read [PLAN.md](PLAN.md) before implementation. It is the product scope, target folder structure, interface map, phase gates, and acceptance checklist. **Phases 0, 1, 2, 3, 4, and 5 are complete; Phase 6 is the next gate.** The contracts are normative and enforced:
 `schemas/cli/v1/` and `schemas/native/v1/` define public JSON and the helper protocol,
 `src/domain/paths.ts` and `src/domain/protected-paths.ts` define path bytes and the refusal
 policy, `src/storage/` defines configuration, `eslint.config.mjs` enforces the dependency rule,
@@ -10,14 +10,13 @@ in the same commit.
 
 The TypeScript CLI implements `devices`, the `--json` dashboard, `alerts check`, the 80×24
 dashboard TUI, `scan`, `explore`, `snapshots list|diff`, `clean`, `clean plan`, `clean apply`,
-`history`, `undo`, and `find empty|broken` against real `lsblk`, `/proc/self/mountinfo`,
-`statfs`, and helper readings. `report`, `timer`, `completion`, and `find duplicates|stale` are
+`history`, `undo`, and `find duplicates|stale|empty|broken` against real `lsblk`,
+`/proc/self/mountinfo`, `statfs`, and helper readings. `report`, `timer`, and `completion` are
 declared in `src/cli/parser.ts` and refuse with `not-implemented`. The Rust helper implements
-`hello`, `probe`, `scan`, `query-index`, `cancel`, `trash`, `erase`, `empty-trash`, `restore`,
-and `journal-reconcile`; it refuses `copy-move`, `compress`, `dedup-hardlink`,
-`hash-candidates`, `inspect`, and every manager operation, so there is no export, move,
-compression, or manager capability yet. Use the package scripts for checks and the phase gates
-in the plan for feature completion.
+`hello`, `probe`, `scan`, `query-index`, `hash-candidates`, `cancel`, `trash`, `erase`,
+`empty-trash`, `restore`, `dedup-hardlink`, `copy-move`, `compress`, and `journal-reconcile`;
+it refuses `inspect` and every manager operation, so there is no manager capability yet. Use
+the package scripts for checks and the phase gates in the plan for feature completion.
 
 Phase 4's contracts: a plan is the authority an apply runs on. `src/domain/actions.ts`
 builds it, fixes its operation, and gives it an expiry; `src/storage/plans.ts` stores it
@@ -33,6 +32,43 @@ is `uncertain`, and so is the action holding it. A result keeps selected bytes, 
 Trash, and the two free-space readings apart, and never folds them into one number. A new
 mutation extends `run_action` in `native/disktop-fs/src/actions.rs`; it does not add a path
 around it.
+
+Phase 5's contracts: a digest groups candidates and a byte compare authorises a
+mutation, and the two are different functions in `native/disktop-fs/src/content.rs`
+for that reason. Every operation that releases one copy of something because
+another copy exists re-opens both files and compares them in full immediately
+before the syscall; no flag, size, or configuration skips it. See
+[adr/0006](docs/adr/0006-content-identity-and-archive-dependencies.md).
+
+A plan fixes everything apply time may not choose. `destination` and
+`sourceDisposition` belong to `move` and `compress` and to nothing else;
+`keepPath` belongs to `dedup-hardlink` and names the copy that survives rather
+than leaving it to entry order; `ruleHash` identifies the cleanup rule a plan
+came from, and an apply refuses a plan whose rule has since been edited.
+A move or compress is exactly as reversible as what it does to its source, and
+`src/domain/actions.ts` derives that rather than believing a stored file.
+A destination is judged by `classifyDestination`, which is deliberately not
+`classifyGenericTarget`: the allowlist bounds what Disktop may remove and cannot
+bound where it may write, because a cross-disk move means writing outside it.
+
+Anything that publishes an output stages it, verifies it, publishes it with a
+rename that refuses to overwrite, and only then touches the source. A move is
+verified by reading the written bytes back off the device after an `fsync`; a
+compression is verified by decompressing it. The journal item's `destination` is
+where the **source** went, never where the output was published, which is what
+makes `undo` work and what makes a permanent disposition record nothing to come
+back from. An undo restores the source and leaves the published output where it
+is, because removing it is a plan somebody reviews.
+
+`find stale` measures modification time and says so: no index column holds an
+access time, and on a `relatime` or `noatime` mount one would not mean what a
+reader would take it to mean. Options nobody could read are `unknown`, never
+`maintained`.
+
+A `[[rules]]` block is data and only data. There is no field for a command and
+no combination of fields that becomes one, because `config.toml` is a file other
+programs can write to. A rule's limits are enforced during selection, not checked
+afterwards.
 
 Phase 3's contracts: a `Finding` lives in `src/domain/findings.ts` with the policy that
 merges two of them. `size.basis` is mandatory and there is no basis meaning "zero because

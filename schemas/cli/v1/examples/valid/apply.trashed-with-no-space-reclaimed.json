@@ -21,6 +21,18 @@
       "notes": [
         "A Trash move on the same filesystem usually frees nothing until Trash is emptied.",
         "Other processes write to the same filesystem, so the observed free-space change is not only this action's doing."
+      ],
+      "verification": [
+        {
+          "check": "source-disposed",
+          "outcome": "passed",
+          "detail": "All reviewed items were dealt with."
+        },
+        {
+          "check": "free-space-read",
+          "outcome": "passed",
+          "detail": "Free space was read before the first item and after the last. Other processes write to the same filesystem, so the change is not only this action's doing."
+        }
       ]
     }
   }

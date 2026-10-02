@@ -337,14 +337,14 @@ export async function runUndo(context: CliContext, options: UndoOptions): Promis
         warnings,
         data: {
           record: encodeJournalRecord(outcome.record),
-          result: encodeActionResult(outcome.result, undefined, []),
+          result: encodeActionResult(outcome.result, undefined, outcome.notes),
         },
       }),
     );
     return exitCode;
   }
 
-  for (const line of resultLines(outcome.result, undefined, [], context.settings.units)) {
+  for (const line of resultLines(outcome.result, undefined, outcome.notes, context.settings.units)) {
     context.output.stdout(`${line}\n`);
   }
   for (const line of warningLines(warnings)) {

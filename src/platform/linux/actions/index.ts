@@ -234,9 +234,17 @@ function encodeTarget(entry: PlannedEntry): Record<string, unknown> {
   };
 }
 
+/**
+ * What the helper reported, as a result.
+ *
+ * The verification list is empty here on purpose: the helper says what it did,
+ * and whether that matched the plan is a question `apply-action.ts` asks from
+ * the side the plan is on.
+ */
 function toResult(result: ReturnType<typeof parseActionResult>): ActionResult {
   return {
     planId: "",
+    verification: [],
     completed: result.completed,
     skipped: result.skipped,
     failed: result.failed,

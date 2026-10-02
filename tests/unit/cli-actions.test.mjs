@@ -56,6 +56,18 @@ const RESULT = {
   state: "complete",
   journalId: "act-1759305679004-9f2c1ab07d4e5610",
   undoAvailable: true,
+  verification: [
+    {
+      check: "source-disposed",
+      outcome: "passed",
+      detail: "All 1 reviewed item(s) were dealt with.",
+    },
+    {
+      check: "free-space-read",
+      outcome: "passed",
+      detail: "Free space was read before the first item and after the last.",
+    },
+  ],
 };
 
 const RECORD = {
@@ -112,6 +124,7 @@ function actionContext(overrides = {}) {
           kind: "restored",
           record: RECORD,
           result: { ...RESULT, journalId: "act-restore", undoAvailable: false, bytesMovedToTrash: 0n },
+          notes: [],
         }
       );
     },
