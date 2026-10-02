@@ -26,3 +26,32 @@ test("a root command with no terminal to ask for a password is denied, and nothi
   assert.equal(run.status, "denied");
   assert.match(run.explanation, /password/);
 });
+
+async function hostPorts() {
+  const { createToolPort } = await import("../../dist/platform/linux/tools.js");
+  const { createPathProbe } = await import("../../dist/platform/linux/probe.js");
+  const { resolveTrustedExecutable } = await import("../../dist/platform/linux/process.js");
+  return {
+    tools: createToolPort(),
+    paths: createPathProbe(),
+    installed: async (tool) => (await resolveTrustedExecutable(tool)) !== undefined,
+  };
+}
+
+test("pacman's cache on this host is read, and every offered item is a name Disktop would hand it", async (t) => {
+  const { createPackageCacheAdapters } = await import("../../dist/platform/linux/managers/package-cache.js");
+  const { MANAGER_ACTIONS } = await import("../../dist/domain/managers.js");
+  const pacman = createPackageCacheAdapters(await hostPorts()).find((adapter) => adapter.id === "pacman");
+  const discovery = await pacman.discover();
+  if (discovery.capability.status === "missing-tool") {
+    t.skip("pacman is not installed here");
+    return;
+  }
+  assert.equal(discovery.capability.status, "available");
+  const pattern = MANAGER_ACTIONS["pacman.clean-uninstalled"].itemPattern;
+  for (const proposal of discovery.proposals) {
+    for (const item of proposal.items) {
+      assert.match(item.id, pattern);
+    }
+  }
+});

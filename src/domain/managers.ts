@@ -200,7 +200,7 @@ const SPECS: readonly ManagerActionSpec[] = [
     privilege: "root",
     perItem: false,
     needsItems: false,
-    itemPattern: /^[A-Za-z0-9@_+][A-Za-z0-9@._+-]{0,254}\.pkg\.tar(\.[a-z0-9]+)?$/,
+    itemPattern: /^[A-Za-z0-9@_+][A-Za-z0-9@._+:-]{0,254}\.pkg\.tar(\.[a-z0-9]+)?$/,
     maxItems: 10_000,
     parameterPatterns: NOTHING,
     summary: "Remove cached pacman packages that are not installed",
