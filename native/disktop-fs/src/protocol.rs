@@ -1567,6 +1567,13 @@ fn journal_reconcile(responder: &Responder, arguments: Map<String, Value>) {
             );
         }
     };
+    if let Err(error) = actions::release_abandoned_staging(&journal) {
+        return fail(
+            responder,
+            "journal-write-failed",
+            &format!("What interrupted actions staged could not be resolved: {error}"),
+        );
+    }
     let page = match journal.page(arguments.cursor.as_deref(), limit) {
         Ok(page) => page,
         Err(error) => {
@@ -2553,6 +2560,135 @@ mod tests {
         assert_eq!(record["items"].as_array().unwrap().len(), 1);
         assert_eq!(record["items"][0]["outcome"], "completed");
         assert!(record["items"][0]["destination"].is_string());
+    }
+
+    // --- What a crash left staged ------------------------------------------
+
+    fn staged_leftover(
+        sandbox: &Sandbox,
+        name: &[u8],
+    ) -> (crate::journal::Journal, String, Vec<u8>) {
+        use std::os::unix::fs::MetadataExt;
+        let mut state = sandbox.path().to_path_buf();
+        state.push("state");
+        let journal = crate::journal::Journal::open(&state).unwrap();
+        let mut staged = sandbox.bytes();
+        staged.push(b'/');
+        staged.extend_from_slice(name);
+        let id = journal
+            .begin("plan-0123456789ab", "copy-move", None)
+            .unwrap();
+        journal
+            .record_intent(&id, 0, b"/somewhere/else", Some(&staged))
+            .unwrap();
+        let metadata = std::fs::symlink_metadata(std::ffi::OsStr::from_bytes(&staged)).unwrap();
+        journal
+            .record_staging(
+                &id,
+                0,
+                &staged,
+                &crate::journal::Identity {
+                    device: metadata.dev(),
+                    inode: metadata.ino(),
+                },
+            )
+            .unwrap();
+        crate::journal::tests_support::abandon(&journal, &id);
+        journal.reconcile().unwrap();
+        (journal, id, staged)
+    }
+
+    #[test]
+    fn a_staged_copy_a_crash_left_behind_is_released_when_it_is_still_what_was_staged() {
+        let sandbox = Sandbox::new("staging-released");
+        sandbox.file(b"big.bin.disktop-partial-999999-0", 4096);
+        let (journal, id, staged) = staged_leftover(&sandbox, b"big.bin.disktop-partial-999999-0");
+
+        assert_eq!(
+            crate::actions::release_abandoned_staging(&journal).unwrap(),
+            1
+        );
+        assert!(!std::path::Path::new(std::ffi::OsStr::from_bytes(&staged)).exists());
+        let record = journal.get(&id).unwrap().unwrap();
+        assert!(
+            record.items[0]
+                .reason
+                .as_deref()
+                .unwrap()
+                .contains("removed")
+        );
+        assert_eq!(
+            crate::actions::release_abandoned_staging(&journal).unwrap(),
+            0,
+            "a second pass changes nothing"
+        );
+    }
+
+    #[test]
+    fn a_staged_name_that_now_holds_something_else_is_left_alone() {
+        let sandbox = Sandbox::new("staging-kept");
+        sandbox.directory(b"tree.disktop-partial-999999-0");
+        let (journal, id, staged) = staged_leftover(&sandbox, b"tree.disktop-partial-999999-0");
+        std::fs::remove_dir(std::ffi::OsStr::from_bytes(&staged)).unwrap();
+        std::fs::write(std::ffi::OsStr::from_bytes(&staged), b"somebody else's").unwrap();
+
+        crate::actions::release_abandoned_staging(&journal).unwrap();
+        assert_eq!(
+            std::fs::read(std::ffi::OsStr::from_bytes(&staged)).unwrap(),
+            b"somebody else's"
+        );
+        let record = journal.get(&id).unwrap().unwrap();
+        assert!(
+            record.items[0]
+                .reason
+                .as_deref()
+                .unwrap()
+                .contains("left in place")
+        );
+    }
+
+    #[test]
+    fn a_move_forgets_what_it_staged_once_published() {
+        let sandbox = Sandbox::new("staging-recorded");
+        sandbox.directory(b"state");
+        sandbox.directory(b"from");
+        sandbox.directory(b"to");
+        sandbox.file(b"from/data.bin", 8192);
+        let mut source = sandbox.bytes();
+        source.extend_from_slice(b"/from/data.bin");
+        let mut destination = sandbox.bytes();
+        destination.extend_from_slice(b"/to");
+        let mut state = sandbox.bytes();
+        state.extend_from_slice(b"/state");
+        let request = format!(
+            "{{\"protocolVersion\":1,\"requestId\":\"move-staging\",\"operation\":\"copy-move\",\
+               \"arguments\":{{\"planId\":\"plan-0123456789abcd\",\"journalDirectory\":\"{}\",\
+               \"homeTrashDirectory\":\"{}\",\"destinationDirectory\":\"{}\",\
+               \"sourceDisposition\":\"permanent\",\"targets\":[{}]}}}}\n",
+            crate::base64::encode(&state),
+            crate::base64::encode(b"/nonexistent-trash"),
+            crate::base64::encode(&destination),
+            target(&source, 8192),
+        );
+        let events = session(&[request], |events| terminal(events, "move-staging"));
+        assert_eq!(
+            completion(&events, "move-staging")["result"]["completed"],
+            "1"
+        );
+
+        let journal = crate::journal::Journal::open(std::path::Path::new(
+            std::ffi::OsStr::from_bytes(&state),
+        ))
+        .unwrap();
+        let staged: i64 = journal
+            .connection_for_tests()
+            .query_row(
+                "SELECT count(*) FROM action_item WHERE staging IS NOT NULL",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(staged, 0, "a published item holds no staging name");
     }
 
     // --- Replacing a duplicate with a hardlink ------------------------------

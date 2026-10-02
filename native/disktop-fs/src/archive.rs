@@ -41,8 +41,13 @@ pub fn compress_file(
     destination_parent: RawFd,
     name: &[u8],
     permissions: u32,
+    on_created: &mut dyn FnMut(RawFd) -> io::Result<()>,
 ) -> io::Result<[u8; 32]> {
     let staged = sys::openat_create_exclusive(destination_parent, name, permissions)?;
+    if let Err(error) = on_created(staged) {
+        sys::close(staged);
+        return Err(error);
+    }
     let outcome = (|| -> io::Result<[u8; 32]> {
         sys::fchmod(staged, permissions)?;
         let mut writer = zstd::stream::write::Encoder::new(Sink(staged), COMPRESSION_LEVEL)?;
@@ -97,8 +102,13 @@ pub fn compress_tree(
     destination_parent: RawFd,
     name: &[u8],
     permissions: u32,
+    on_created: &mut dyn FnMut(RawFd) -> io::Result<()>,
 ) -> io::Result<[u8; 32]> {
     let staged = sys::openat_create_exclusive(destination_parent, name, permissions)?;
+    if let Err(error) = on_created(staged) {
+        sys::close(staged);
+        return Err(error);
+    }
     let outcome = (|| -> io::Result<[u8; 32]> {
         sys::fchmod(staged, permissions)?;
         // The digest is taken over the tar stream itself, before compression,
@@ -378,6 +388,7 @@ mod tests {
             destination.as_raw_fd(),
             b"first.tar.zst",
             0o600,
+            &mut |_| Ok(()),
         )
         .expect("the archive is written");
 
@@ -390,6 +401,7 @@ mod tests {
             destination.as_raw_fd(),
             b"second.tar.zst",
             0o600,
+            &mut |_| Ok(()),
         )
         .expect("the second archive is written");
 
@@ -424,6 +436,7 @@ mod tests {
             destination.as_raw_fd(),
             b"a.tar.zst",
             0o600,
+            &mut |_| Ok(()),
         )
         .unwrap();
 
