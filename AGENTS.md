@@ -1,6 +1,6 @@
 # Agent guide for Disktop
 
-Read [PLAN.md](PLAN.md) before implementation. It is the product scope, target folder structure, interface map, phase gates, and acceptance checklist. **Phases 0, 1, 2, 3, 4, and 5 are complete; Phase 6 is the next gate.** The contracts are normative and enforced:
+Read [PLAN.md](PLAN.md) before implementation. It is the product scope, target folder structure, interface map, phase gates, and acceptance checklist. **Phases 0 through 6 are complete; Phase 7 is the next gate.** The contracts are normative and enforced:
 `schemas/cli/v1/` and `schemas/native/v1/` define public JSON and the helper protocol,
 `src/domain/paths.ts` and `src/domain/protected-paths.ts` define path bytes and the refusal
 policy, `src/storage/` defines configuration, `eslint.config.mjs` enforces the dependency rule,
@@ -10,13 +10,26 @@ in the same commit.
 
 The TypeScript CLI implements `devices`, the `--json` dashboard, `alerts check`, the 80×24
 dashboard TUI, `scan`, `explore`, `snapshots list|diff`, `clean`, `clean plan`, `clean apply`,
-`history`, `undo`, and `find duplicates|stale|empty|broken` against real `lsblk`,
-`/proc/self/mountinfo`, `statfs`, and helper readings. `report`, `timer`, and `completion` are
-declared in `src/cli/parser.ts` and refuse with `not-implemented`. The Rust helper implements
-`hello`, `probe`, `scan`, `query-index`, `hash-candidates`, `cancel`, `trash`, `erase`,
-`empty-trash`, `restore`, `dedup-hardlink`, `copy-move`, `compress`, and `journal-reconcile`;
-it refuses `inspect` and every manager operation, so there is no manager capability yet. Use
-the package scripts for checks and the phase gates in the plan for feature completion.
+`history`, `undo`, `find duplicates|stale|empty|broken`, and `timer install|uninstall` against
+real `lsblk`, `/proc/self/mountinfo`, `statfs`, manager, and helper readings. `report` and
+`completion` are declared in `src/cli/parser.ts` and refuse with `not-implemented`. The Rust
+helper implements every operation in `schemas/native/v1/request.json`. Use the package scripts
+for checks and the phase gates in the plan for feature completion.
+
+Phase 6's contracts: a manager plan holds an action id, its items, and its parameters, and
+its argv is derived from them by the fixed templates in `src/domain/managers.ts` every time
+it is read; no command is ever stored or read back from a plan file. Adding a manager action
+means a template, an item pattern, and an adapter in `src/platform/linux/managers/` that
+discovers and previews through the `ToolPort`, preflights live, and verifies by asking the
+manager again. The `ToolPort` allowlist matches whole argument vectors, because a prefix
+lets a question become a change. The executor journals a manager action through one helper
+session — `manager-begin`, `manager-append started` before each spawn and `finished` after,
+`manager-finish` — and a command that started and never finished is `uncertain`. Only a
+root-privilege command is escalated, by `src/platform/linux/privilege.ts`; under EUID 0
+Disktop changes no file itself. A named container volume is never offered. A reviewed
+directory carries a digest of its whole subtree (`inspect`), checked again before it is
+touched, and a directory with a mount below it is never a target. See
+[adr/0007](docs/adr/0007-manager-adapters-and-scoped-privilege.md).
 
 Phase 4's contracts: a plan is the authority an apply runs on. `src/domain/actions.ts`
 builds it, fixes its operation, and gives it an expiry; `src/storage/plans.ts` stores it

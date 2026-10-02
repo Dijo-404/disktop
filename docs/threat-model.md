@@ -104,7 +104,9 @@ validates every event before acting on it and never treats a missing final event
 success.
 
 **Escalate a privileged action.** Only a specific adapter escalates, with fixed
-arguments, an absolute trusted executable path, and after plan confirmation. The npm
+arguments, an absolute trusted executable path, and after plan confirmation. The argv is
+derived from the plan's validated items by a fixed template on every read and never
+stored, so an edited plan cannot choose the program or its options. The npm
 process is never run as root for cleanup; under EUID 0 generic mutation is disabled and
 administrator scans are read-only. A failed authentication is a permission result, never
 a fallback to unprivileged deletion.
