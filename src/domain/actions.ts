@@ -380,6 +380,17 @@ function defaultRandom(): string {
  */
 export function verify(plan: ActionPlan, result: Omit<ActionResult, "verification">): readonly VerificationCheck[] {
   const checks: VerificationCheck[] = [];
+  const readable = result.freeBytesBefore !== undefined && result.freeBytesAfter !== undefined;
+  const freeSpace: VerificationCheck = {
+    check: "free-space-read",
+    outcome: readable ? "passed" : "unavailable",
+    detail: readable
+      ? "Free space was read before the first item and after the last. Other processes write to the same filesystem, so the change is not only this action's doing."
+      : "Free space could not be read, so Disktop cannot say what changed on the filesystem.",
+  };
+  if (plan.operation === "manager") {
+    return [freeSpace];
+  }
 
   if (plan.destination !== undefined) {
     // Node does not stat the destination: the helper published each item with
@@ -414,14 +425,7 @@ export function verify(plan: ActionPlan, result: Omit<ActionResult, "verificatio
         : `${unfinished} of the reviewed items were not: ${result.skipped} skipped and ${result.failed} failed.`,
   });
 
-  const readable = result.freeBytesBefore !== undefined && result.freeBytesAfter !== undefined;
-  checks.push({
-    check: "free-space-read",
-    outcome: readable ? "passed" : "unavailable",
-    detail: readable
-      ? "Free space was read before the first item and after the last. Other processes write to the same filesystem, so the change is not only this action's doing."
-      : "Free space could not be read, so Disktop cannot say what changed on the filesystem.",
-  });
+  checks.push(freeSpace);
 
   return checks;
 }

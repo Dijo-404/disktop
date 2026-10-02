@@ -186,6 +186,7 @@ export async function runApply(context: CliContext, options: ApplyOptions): Prom
         planId: options.planId,
         confirmed: options.confirmed,
         acknowledgePermanent: options.acknowledgePermanent,
+        interactive: context.interactive && !options.asJson,
       },
       controller.signal,
     );
@@ -199,7 +200,7 @@ export async function runApply(context: CliContext, options: ApplyOptions): Prom
   if (outcome.kind === "unavailable") {
     return refuse(context, "clean apply", options.asJson, {
       code: "unsupported",
-      message: `Disktop cannot change files on this machine: ${outcome.capability.explanation}`,
+      message: `Disktop cannot carry this out on this machine: ${outcome.capability.explanation}`,
     });
   }
 
