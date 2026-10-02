@@ -143,6 +143,7 @@ function encodePlan(plan: ActionPlan): Record<string, unknown> {
     ...(plan.sourceDisposition === undefined
       ? {}
       : { sourceDisposition: plan.sourceDisposition }),
+    ...(plan.keepPath === undefined ? {} : { keepPath: plan.keepPath.bytesBase64 }),
     warnings: [...plan.warnings],
   };
 }
@@ -191,6 +192,12 @@ function decodePlan(document: unknown): ActionPlan | undefined {
   if (publishesOutput(operation) !== (document.destination !== undefined)) {
     return undefined;
   }
+  // The same rule for the copy a hardlink replacement keeps: a stored plan
+  // that lost it is a plan that would have to pick one, and picking one is
+  // exactly what this build refuses to do.
+  if ((operation === "dedup-hardlink") !== (document.keepPath !== undefined)) {
+    return undefined;
+  }
 
   const plan: ActionPlan = {
     id: text(document.id),
@@ -217,6 +224,9 @@ function decodePlan(document: unknown): ActionPlan | undefined {
       ? {}
       : { destination: decodePath(text(document.destination)) }),
     ...(disposition === undefined ? {} : { sourceDisposition: disposition }),
+    ...(document.keepPath === undefined
+      ? {}
+      : { keepPath: decodePath(text(document.keepPath)) }),
     warnings: Array.isArray(document.warnings) ? document.warnings.map(text) : [],
   };
   return plan;

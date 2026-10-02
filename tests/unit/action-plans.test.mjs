@@ -166,6 +166,7 @@ test("replacing a duplicate with a hardlink stays irreversible whatever else is 
       destination: undefined,
       sourceDisposition: undefined,
       entries: [entry("/home/example/a.bin"), entry("/home/example/b.bin")],
+      keepPath: rawPathFromUtf8("/home/example/a.bin"),
     }),
   );
 
@@ -185,6 +186,59 @@ test("a hardlink plan needs at least two entries: there is nothing to link one f
           entries: [],
         }),
       ),
+    RangeError,
+  );
+});
+
+test("a hardlink plan names the copy that is kept, and it is one of the plan's own entries", () => {
+  const keep = entry("/home/example/a.bin");
+  const plan = buildPlan(
+    movable({
+      operation: "dedup-hardlink",
+      destination: undefined,
+      sourceDisposition: undefined,
+      entries: [keep, entry("/home/example/b.bin")],
+      keepPath: keep.path,
+    }),
+  );
+
+  assert.equal(plan.keepPath.display, "/home/example/a.bin");
+});
+
+test("a hardlink plan without a kept copy is refused rather than picking one", () => {
+  assert.throws(
+    () =>
+      buildPlan(
+        movable({
+          operation: "dedup-hardlink",
+          destination: undefined,
+          sourceDisposition: undefined,
+          entries: [entry("/home/example/a.bin"), entry("/home/example/b.bin")],
+        }),
+      ),
+    RangeError,
+  );
+});
+
+test("a kept copy that is not one of the plan's entries is refused", () => {
+  assert.throws(
+    () =>
+      buildPlan(
+        movable({
+          operation: "dedup-hardlink",
+          destination: undefined,
+          sourceDisposition: undefined,
+          entries: [entry("/home/example/a.bin"), entry("/home/example/b.bin")],
+          keepPath: rawPathFromUtf8("/home/example/somewhere-else.bin"),
+        }),
+      ),
+    RangeError,
+  );
+});
+
+test("an operation that keeps nothing may not name a kept copy", () => {
+  assert.throws(
+    () => buildPlan(movable({ operation: "trash", destination: undefined, sourceDisposition: undefined, keepPath: rawPathFromUtf8("/home/example/a.bin") })),
     RangeError,
   );
 });

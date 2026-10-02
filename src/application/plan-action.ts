@@ -32,6 +32,14 @@ export interface PlanRequest {
   readonly destination?: RawPath;
   /** Required for a move or a compress. Nothing else accepts it. */
   readonly sourceDisposition?: SourceDisposition;
+  /** The copy a hardlink replacement keeps. Nothing else accepts it. */
+  readonly keepPath?: RawPath;
+  /**
+   * A second explicit path for a hardlink replacement: the copy that becomes
+   * a name for `path`. A single path cannot describe a pair, and nothing here
+   * goes looking for a duplicate on somebody's behalf.
+   */
+  readonly replacePath?: RawPath;
 }
 
 export interface PlanSettings {
@@ -191,10 +199,28 @@ export function createPlanService(dependencies: PlanDependencies): PlanService {
         );
       }
 
-      if (request.operation === "dedup-hardlink" && subject.paths.length < 2) {
+      let keepPath: RawPath | undefined;
+      if (request.operation === "dedup-hardlink") {
+        if (subject.paths.length < 2) {
+          return refuse(
+            "invalid-plan",
+            "Replacing a duplicate with a hardlink needs at least two files: the one to keep and the one to replace.",
+          );
+        }
+        // The copy that survives is named, never inferred from order. When the
+        // request does not say, the first path of the group is kept and the
+        // plan records that choice so the person reviewing it can see it.
+        keepPath = request.keepPath ?? (subject.paths[0] as RawPath);
+        if (!subject.paths.some((path) => path.bytesBase64 === keepPath?.bytesBase64)) {
+          return refuse(
+            "invalid-plan",
+            `${keepPath.display} is not one of the files this plan covers, so it cannot be the copy that is kept.`,
+          );
+        }
+      } else if (request.keepPath !== undefined) {
         return refuse(
-          "invalid-plan",
-          "Replacing a duplicate with a hardlink needs at least two files: the one to keep and the one to replace.",
+          "invalid-input",
+          `A '${request.operation}' plan keeps nothing, so '--keep-path' does not apply to it.`,
         );
       }
 
@@ -244,6 +270,7 @@ export function createPlanService(dependencies: PlanDependencies): PlanService {
         ...(request.sourceDisposition === undefined
           ? {}
           : { sourceDisposition: request.sourceDisposition }),
+        ...(keepPath === undefined ? {} : { keepPath }),
         warnings,
       });
 
@@ -304,6 +331,31 @@ async function resolveSubject(
   }
 
   if (request.path !== undefined) {
+    if (request.replacePath !== undefined) {
+      if (request.operation !== "dedup-hardlink") {
+        return {
+          failure: failure(
+            "invalid-input",
+            `A '${request.operation}' plan replaces nothing with a link, so '--replace' does not apply to it.`,
+          ),
+        };
+      }
+      if (request.replacePath.bytesBase64 === request.path.bytesBase64) {
+        return {
+          failure: failure(
+            "invalid-input",
+            "A file cannot be replaced by a link to itself. '--path' is the copy kept and '--replace' is the copy that becomes a name for it.",
+          ),
+        };
+      }
+      return {
+        paths: [request.path, request.replacePath],
+        providerId: "explicit-path",
+        warnings: [
+          "These paths were selected directly, so no detector vouched for them holding the same bytes. The helper compares them in full before it replaces either.",
+        ],
+      };
+    }
     return {
       paths: [request.path],
       providerId: "explicit-path",
@@ -313,6 +365,14 @@ async function resolveSubject(
     };
   }
 
+  if (request.replacePath !== undefined) {
+    return {
+      failure: failure(
+        "invalid-input",
+        "'--replace' names a second path, so it goes with '--path' rather than with a finding.",
+      ),
+    };
+  }
   if (request.findingId === undefined) {
     return { failure: failure("invalid-input", "Planning needs a finding ID or a --path.") };
   }

@@ -253,6 +253,69 @@ pub fn renameat_no_replace(
     Ok(())
 }
 
+/// Give an existing file a second name under `new_parent`.
+///
+/// `flags` is zero, so the old name is never followed through a symlink: a link
+/// is made to the link object itself, which is what a caller that already
+/// validated the file it opened means. The new name must not exist; `EEXIST` is
+/// what makes a staging name exclusive without a separate check.
+pub fn linkat(
+    old_parent: RawFd,
+    old_name: &[u8],
+    new_parent: RawFd,
+    new_name: &[u8],
+) -> io::Result<()> {
+    let old = cstring(old_name)?;
+    let new = cstring(new_name)?;
+    let result = unsafe {
+        libc::linkat(
+            old_parent,
+            old.as_ptr(),
+            new_parent,
+            new.as_ptr(),
+            // Deliberately not AT_SYMLINK_FOLLOW: following here would link to
+            // whatever a symlink points at, outside everything that was checked.
+            0,
+        )
+    };
+    if result < 0 {
+        return Err(io::Error::last_os_error());
+    }
+    Ok(())
+}
+
+/// Swap two names atomically. Both must exist.
+///
+/// This is how a file is replaced without the name ever pointing at nothing:
+/// after the exchange the reviewed name holds the new inode and the staging
+/// name holds the old one, and removing the staging name is what releases it.
+/// `RENAME_EXCHANGE` needs Linux 3.15 and a filesystem that supports it; one
+/// that does not refuses with `EINVAL` and the caller reports that rather than
+/// falling back to a sequence that has a window where the name is gone.
+pub fn renameat_exchange(
+    first_parent: RawFd,
+    first_name: &[u8],
+    second_parent: RawFd,
+    second_name: &[u8],
+) -> io::Result<()> {
+    let first = cstring(first_name)?;
+    let second = cstring(second_name)?;
+    let result = unsafe {
+        libc::syscall(
+            libc::SYS_renameat2,
+            first_parent,
+            first.as_ptr(),
+            second_parent,
+            second.as_ptr(),
+            libc::RENAME_EXCHANGE,
+        )
+    };
+    if result < 0 {
+        return Err(io::Error::last_os_error());
+    }
+    Ok(())
+}
+
 /// Space an unprivileged process can still use on the filesystem holding
 /// `path`: what `df` calls available and what a person means by free space.
 /// The blocks reserved for root are left out, because they are not space this

@@ -148,6 +148,8 @@ export const COMMANDS: readonly CommandSpec[] = [
         choices: ["trash", "permanent", "empty-trash", "move", "compress", "hardlink"],
       },
       { name: "destination", summary: "Move or compress: the directory to publish into", kind: "value", placeholder: "PATH" },
+      { name: "keep-path", summary: "Hardlink: which copy of a group survives", kind: "value", placeholder: "PATH" },
+      { name: "replace", summary: "Hardlink: the copy that becomes a link", kind: "value", placeholder: "PATH" },
       {
         name: "source",
         summary: "Move or compress: what becomes of the source",

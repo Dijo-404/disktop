@@ -82,6 +82,8 @@ export async function runCli(args: readonly string[], context: CliContext): Prom
       ...(optional(parsed, "path")),
       ...(optional(parsed, "operation")),
       ...(optional(parsed, "destination")),
+      ...(optional(parsed, "keep-path", "keepPath")),
+      ...(optional(parsed, "replace", "replacePath")),
       ...(optional(parsed, "source")),
     });
   }

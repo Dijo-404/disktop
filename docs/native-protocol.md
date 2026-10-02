@@ -24,8 +24,8 @@ Device and inode IDs, counts, byte sizes, and nanosecond timestamps will cross I
 | Control | `cancel` | Stop a named in-flight request at a safe item boundary; the cancelled request still emits a final event. |
 | Implemented read | `scan`, `query-index`, `hash-candidates` | Bounded `openat2` traversal into a SQLite index, keyset-paginated pages out of it, and the staged duplicate pipeline over it. |
 | Planned read | `inspect` | Live metadata for one path. |
-| Implemented actions | `trash`, `erase`, `empty-trash`, `restore` | Recheck plan and target, perform one constrained syscall, journal per-item outcome. |
-| Planned actions | `copy-move`, `compress`, `dedup-hardlink` | Staged output, verification, and publication without overwrite. |
+| Implemented actions | `trash`, `erase`, `empty-trash`, `restore`, `dedup-hardlink` | Recheck plan and target, perform one constrained syscall, journal per-item outcome. |
+| Planned actions | `copy-move`, `compress` | Staged output, verification, and publication without overwrite. |
 | Manager journal | `manager-begin`, `manager-append`, `manager-finish` | Record intent, progress, command result, and verification for a fixed-argument Linux manager adapter. The helper does not invent or execute manager commands. |
 | Recovery | `journal-reconcile` | Resolve interrupted records into honest completed, partial, or uncertain states, and return a page of history. Reconciling and listing are one operation because a caller that could list without reconciling would read a history still claiming an abandoned action is running. |
 
@@ -75,9 +75,40 @@ about to move. The free-space readings are the real observation beside it. A man
 may only provide estimates or unknown item counts; those are never promoted to exact
 numbers. See [safety.md](safety.md) for the action sequence and recovery rules.
 
+### Replacing a duplicate with a hardlink
+
+`dedup-hardlink` validates the kept file once, before any item: it is what every target
+becomes, so a kept file that is not what the plan reviewed makes the whole request wrong
+rather than one item of it. Its descriptor is then held open for the whole action, which
+is what makes the comparison below mean something — the bytes compared are the bytes of
+the inode that gets linked, not of whatever the kept path names a moment later.
+
+Each item is checked in a fixed order and stops at the first thing that fails. Identity
+comes before content: a name that already reaches the kept inode is `skipped` with
+`already-linked`, because removing it would free nothing. A target on another device is
+refused with `different-filesystem`; a hardlink cannot cross one. Owner, group, and
+permissions must match, because one inode has one set of them and linking would silently
+change the target's — a mismatch is `metadata-incompatible`. Then both files are read in
+full and compared byte for byte; anything else is `content-changed`. The digests that
+grouped these files said they were probably identical, and probably is not a basis for
+releasing somebody's only copy of something.
+
+The replacement itself is a staged link and a `RENAME_EXCHANGE`. The helper links the
+kept file to `.disktop-link-<pid>-<n>` in the target's own directory, exchanges that name
+with the reviewed one, and unlinks the staging name — which is the step that releases the
+old inode and the step that cannot be taken back. The reviewed name never points at
+nothing: before the exchange it holds the old inode, after it the kept one. A filesystem
+that cannot exchange two names atomically is refused with `unsupported-filesystem` rather
+than served by a sequence with a window where the name is gone.
+
+A completed item reports the bytes it freed, which is zero when the replaced file had
+another name of its own: only the last name to an inode frees anything. The result's
+bytes-moved-to-Trash is always zero and undo is never available, because nothing moved
+anywhere.
+
 ## Contract tests
 
-The Rust tests exercise the `hello` handshake, `probe` argument rejection, protocol mismatch, unknown fields, oversized requests, explicit rejection of an operation this build does not implement, traversal over sandbox trees with hardlinks, symlinks, unreadable directories and names that are not valid UTF-8, index paging and filters, a live cancellation that still produces a queryable index, the duplicate funnel over a tree holding a matched pair, a lone file in its size class, two names for one inode, and two files whose ends match and whose middles do not, and every implemented action: a Trash move with its metadata, a name collision that keeps both files, a changed target that is skipped, a protected root that is refused, a recursive erase that removes a symlink without following it, emptying a directory that is shaped like a Trash and refusing one that is not, and a restore that refuses to overwrite whatever now occupies the original path.
+The Rust tests exercise the `hello` handshake, `probe` argument rejection, protocol mismatch, unknown fields, oversized requests, explicit rejection of an operation this build does not implement, traversal over sandbox trees with hardlinks, symlinks, unreadable directories and names that are not valid UTF-8, index paging and filters, a live cancellation that still produces a queryable index, the duplicate funnel over a tree holding a matched pair, a lone file in its size class, two names for one inode, and two files whose ends match and whose middles do not, and every implemented action: a Trash move with its metadata, a name collision that keeps both files, a changed target that is skipped, a protected root that is refused, a recursive erase that removes a symlink without following it, emptying a directory that is shaped like a Trash and refusing one that is not, a restore that refuses to overwrite whatever now occupies the original path, and a hardlink replacement over files that differ in their last byte, in their permissions, and in their inode.
 
 `tests/integration/scan.test.mjs` drives the real binary through the CLI against fixture trees, compares allocated totals against `du -x`, and proves a bind mount is not descended into. `tests/integration/actions.test.mjs` does the same for the action pipeline, including that bytes moved to Trash and observed free-space change are reported as distinct values. `tests/recovery/journal.test.mjs` kills the helper mid-action and reads the journal back.
 

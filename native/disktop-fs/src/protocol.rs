@@ -33,7 +33,7 @@ use std::thread::JoinHandle;
 
 const PROTOCOL_VERSION: u16 = 1;
 const MAX_REQUEST_BYTES: usize = 1024 * 1024;
-const SUPPORTED_OPERATIONS: [&str; 11] = [
+const SUPPORTED_OPERATIONS: [&str; 12] = [
     "hello",
     "probe",
     "cancel",
@@ -44,13 +44,13 @@ const SUPPORTED_OPERATIONS: [&str; 11] = [
     "erase",
     "empty-trash",
     "restore",
+    "dedup-hardlink",
     "journal-reconcile",
 ];
-const PLANNED_OPERATIONS: [&str; 7] = [
+const PLANNED_OPERATIONS: [&str; 6] = [
     "inspect",
     "copy-move",
     "compress",
-    "dedup-hardlink",
     "manager-begin",
     "manager-append",
     "manager-finish",
@@ -113,6 +113,15 @@ struct EraseArguments {
 struct RestoreArguments {
     journal_directory: String,
     journal_id: String,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct DedupHardlinkArguments {
+    plan_id: String,
+    journal_directory: String,
+    keep: TargetArguments,
+    targets: Vec<TargetArguments>,
 }
 
 #[derive(Deserialize)]
@@ -407,6 +416,7 @@ fn handle_request(server: &Arc<Server>, line: &[u8]) {
         "trash" => trash(server, responder, request.arguments),
         "erase" => erase(server, responder, request.arguments),
         "empty-trash" => empty_trash(server, responder, request.arguments),
+        "dedup-hardlink" => dedup_hardlink(server, responder, request.arguments),
         "restore" => restore(server, responder, request.arguments),
         "journal-reconcile" => journal_reconcile(&responder, request.arguments),
         "hello" | "probe" if request.arguments.is_empty() => {
@@ -1038,6 +1048,33 @@ fn trash(server: &Arc<Server>, responder: Responder, arguments: Map<String, Valu
     );
 }
 
+/// Replace every reviewed duplicate with a link to one kept file.
+fn dedup_hardlink(server: &Arc<Server>, responder: Responder, arguments: Map<String, Value>) {
+    let arguments: DedupHardlinkArguments = match decode(arguments) {
+        Ok(arguments) => arguments,
+        Err(message) => return fail(&responder, "invalid-arguments", &message),
+    };
+    let request = match dedup_hardlink_request(&arguments) {
+        Ok(request) => request,
+        Err(message) => return fail(&responder, "invalid-arguments", &message),
+    };
+    if let Err(message) = require_containment() {
+        return fail(&responder, "unsupported-kernel", &message);
+    }
+    spawn_cancellable(
+        server,
+        responder,
+        "dedup-hardlink",
+        ACTION_ABANDONED,
+        move |responder, cancelled| {
+            report_action(
+                responder,
+                actions::run_dedup_hardlink(&request, &mut reporter(responder), cancelled),
+            );
+        },
+    );
+}
+
 /// Remove every reviewed target permanently.
 fn erase(server: &Arc<Server>, responder: Responder, arguments: Map<String, Value>) {
     let arguments: EraseArguments = match decode(arguments) {
@@ -1277,6 +1314,32 @@ fn erase_request(arguments: &EraseArguments) -> Result<actions::EraseRequest, St
     Ok(actions::EraseRequest {
         plan_id: arguments.plan_id.clone(),
         journal_directory: decoded_directory(&arguments.journal_directory)?,
+        targets: decoded_targets(&arguments.targets)?,
+    })
+}
+
+fn dedup_hardlink_request(
+    arguments: &DedupHardlinkArguments,
+) -> Result<actions::DedupHardlinkRequest, String> {
+    if arguments.targets.is_empty() {
+        return Err("A mutation needs at least one target".to_owned());
+    }
+    let keep = decoded_targets(std::slice::from_ref(&arguments.keep))?
+        .pop()
+        .expect("one target in, one target out");
+    if arguments
+        .targets
+        .iter()
+        .any(|target| target.path == arguments.keep.path)
+    {
+        return Err(
+            "The file being kept cannot also be one of the files being replaced".to_owned(),
+        );
+    }
+    Ok(actions::DedupHardlinkRequest {
+        plan_id: arguments.plan_id.clone(),
+        journal_directory: decoded_directory(&arguments.journal_directory)?,
+        keep,
         targets: decoded_targets(&arguments.targets)?,
     })
 }
@@ -1809,6 +1872,7 @@ mod tests {
                 "erase",
                 "empty-trash",
                 "restore",
+                "dedup-hardlink",
                 "journal-reconcile"
             ])
         );
@@ -2365,6 +2429,265 @@ mod tests {
         assert_eq!(record["items"].as_array().unwrap().len(), 1);
         assert_eq!(record["items"][0]["outcome"], "completed");
         assert!(record["items"][0]["destination"].is_string());
+    }
+
+    // --- Replacing a duplicate with a hardlink ------------------------------
+
+    fn hardlink_request(id: &str, sandbox: &Sandbox, keep: &[u8], targets: &[String]) -> String {
+        let mut state = sandbox.bytes();
+        state.extend_from_slice(b"/state");
+        format!(
+            "{{\"protocolVersion\":1,\"requestId\":\"{id}\",\"operation\":\"dedup-hardlink\",\
+               \"arguments\":{{\"planId\":\"plan-0123456789abcd\",\
+               \"journalDirectory\":\"{}\",\"keep\":{},\"targets\":[{}]}}}}\n",
+            crate::base64::encode(&state),
+            target(keep, 0),
+            targets.join(","),
+        )
+    }
+
+    fn run_hardlink(id: &str, sandbox: &Sandbox, keep: &[u8], targets: &[String]) -> Vec<Value> {
+        session(&[hardlink_request(id, sandbox, keep, targets)], |events| {
+            terminal(events, id)
+        })
+    }
+
+    /// Two paths and whether they are the same inode now.
+    fn same_inode(left: &std::path::Path, right: &std::path::Path) -> bool {
+        use std::os::unix::fs::MetadataExt;
+        let left = std::fs::metadata(left).expect("left exists");
+        let right = std::fs::metadata(right).expect("right exists");
+        left.dev() == right.dev() && left.ino() == right.ino()
+    }
+
+    fn link_count(path: &std::path::Path) -> u64 {
+        use std::os::unix::fs::MetadataExt;
+        std::fs::metadata(path).expect("the file exists").nlink()
+    }
+
+    #[test]
+    fn a_duplicate_is_replaced_by_a_link_to_the_file_being_kept() {
+        let sandbox = Sandbox::new("hardlink-happy");
+        sandbox.directory(b"state");
+        let content = vec![9u8; 100_000];
+        std::fs::write(sandbox.path().join("keep.bin"), &content).unwrap();
+        std::fs::write(sandbox.path().join("copy.bin"), &content).unwrap();
+
+        let mut keep = sandbox.bytes();
+        keep.extend_from_slice(b"/keep.bin");
+        let mut copy = sandbox.bytes();
+        copy.extend_from_slice(b"/copy.bin");
+
+        let events = run_hardlink("link-1", &sandbox, &keep, &[target(&copy, 100_000)]);
+        let result = &completion(&events, "link-1")["result"];
+
+        assert_eq!(result["state"], "complete");
+        assert_eq!(result["completed"], "1");
+        assert_eq!(
+            result["bytesMovedToTrash"], "0",
+            "nothing went to Trash, so nothing can be put back",
+        );
+        assert_eq!(result["undoAvailable"], false);
+
+        let keep_path = sandbox.path().join("keep.bin");
+        let copy_path = sandbox.path().join("copy.bin");
+        assert!(
+            same_inode(&keep_path, &copy_path),
+            "both names reach one inode"
+        );
+        assert_eq!(link_count(&keep_path), 2);
+        assert_eq!(
+            std::fs::read(&copy_path).unwrap(),
+            content,
+            "the bytes under the replaced name are the bytes that were there",
+        );
+    }
+
+    #[test]
+    fn a_file_whose_bytes_differ_is_refused_however_the_sizes_match() {
+        let sandbox = Sandbox::new("hardlink-different");
+        sandbox.directory(b"state");
+        let mut other = vec![9u8; 100_000];
+        other[50_000] = 1;
+        std::fs::write(sandbox.path().join("keep.bin"), vec![9u8; 100_000]).unwrap();
+        std::fs::write(sandbox.path().join("copy.bin"), &other).unwrap();
+
+        let mut keep = sandbox.bytes();
+        keep.extend_from_slice(b"/keep.bin");
+        let mut copy = sandbox.bytes();
+        copy.extend_from_slice(b"/copy.bin");
+
+        let events = run_hardlink("link-2", &sandbox, &keep, &[target(&copy, 100_000)]);
+        let items = item_results(&events, "link-2");
+
+        assert_eq!(items[0]["itemResult"]["outcome"], "failed");
+        assert_eq!(items[0]["itemResult"]["reason"], "content-changed");
+        assert_eq!(
+            std::fs::read(sandbox.path().join("copy.bin")).unwrap(),
+            other,
+            "the file nobody proved identical is untouched",
+        );
+        assert!(!same_inode(
+            &sandbox.path().join("keep.bin"),
+            &sandbox.path().join("copy.bin"),
+        ));
+    }
+
+    #[test]
+    fn a_file_with_different_permissions_is_refused_rather_than_silently_regraded() {
+        let sandbox = Sandbox::new("hardlink-mode");
+        sandbox.directory(b"state");
+        let content = vec![3u8; 50_000];
+        std::fs::write(sandbox.path().join("keep.bin"), &content).unwrap();
+        std::fs::write(sandbox.path().join("copy.bin"), &content).unwrap();
+        sandbox.chmod(b"copy.bin", 0o600);
+        sandbox.chmod(b"keep.bin", 0o644);
+
+        let mut keep = sandbox.bytes();
+        keep.extend_from_slice(b"/keep.bin");
+        let mut copy = sandbox.bytes();
+        copy.extend_from_slice(b"/copy.bin");
+
+        let events = run_hardlink("link-3", &sandbox, &keep, &[target(&copy, 50_000)]);
+        let items = item_results(&events, "link-3");
+
+        assert_eq!(items[0]["itemResult"]["outcome"], "failed");
+        assert_eq!(items[0]["itemResult"]["reason"], "metadata-incompatible");
+        assert!(!same_inode(
+            &sandbox.path().join("keep.bin"),
+            &sandbox.path().join("copy.bin"),
+        ));
+    }
+
+    #[test]
+    fn a_name_that_already_reaches_the_kept_inode_is_skipped_and_frees_nothing() {
+        let sandbox = Sandbox::new("hardlink-already");
+        sandbox.directory(b"state");
+        std::fs::write(sandbox.path().join("keep.bin"), vec![4u8; 20_000]).unwrap();
+        sandbox.hardlink(b"keep.bin", b"copy.bin");
+
+        let mut keep = sandbox.bytes();
+        keep.extend_from_slice(b"/keep.bin");
+        let mut copy = sandbox.bytes();
+        copy.extend_from_slice(b"/copy.bin");
+
+        let events = run_hardlink("link-4", &sandbox, &keep, &[target(&copy, 20_000)]);
+        let items = item_results(&events, "link-4");
+        let result = &completion(&events, "link-4")["result"];
+
+        assert_eq!(items[0]["itemResult"]["outcome"], "skipped");
+        assert_eq!(items[0]["itemResult"]["reason"], "already-linked");
+        assert_eq!(result["completed"], "0");
+        assert_eq!(result["skipped"], "1");
+        assert_eq!(link_count(&sandbox.path().join("keep.bin")), 2);
+    }
+
+    #[test]
+    fn a_changed_file_is_skipped_rather_than_replaced() {
+        let sandbox = Sandbox::new("hardlink-changed");
+        sandbox.directory(b"state");
+        let content = vec![5u8; 30_000];
+        std::fs::write(sandbox.path().join("keep.bin"), &content).unwrap();
+        std::fs::write(sandbox.path().join("copy.bin"), &content).unwrap();
+
+        let mut keep = sandbox.bytes();
+        keep.extend_from_slice(b"/keep.bin");
+        let mut copy = sandbox.bytes();
+        copy.extend_from_slice(b"/copy.bin");
+        let reviewed = target(&copy, 30_000);
+
+        // The plan was reviewed; then the file changed under it.
+        std::fs::write(sandbox.path().join("copy.bin"), vec![6u8; 30_000]).unwrap();
+
+        let events = run_hardlink("link-5", &sandbox, &keep, &[reviewed]);
+        let items = item_results(&events, "link-5");
+
+        assert_eq!(items[0]["itemResult"]["outcome"], "skipped");
+        assert_eq!(items[0]["itemResult"]["reason"], "changed-target");
+        assert_eq!(
+            std::fs::read(sandbox.path().join("copy.bin")).unwrap(),
+            vec![6u8; 30_000]
+        );
+    }
+
+    #[test]
+    fn a_kept_file_that_changed_since_review_refuses_the_whole_request() {
+        let sandbox = Sandbox::new("hardlink-keep-changed");
+        sandbox.directory(b"state");
+        let content = vec![7u8; 10_000];
+        std::fs::write(sandbox.path().join("keep.bin"), &content).unwrap();
+        std::fs::write(sandbox.path().join("copy.bin"), &content).unwrap();
+
+        let mut keep = sandbox.bytes();
+        keep.extend_from_slice(b"/keep.bin");
+        let mut copy = sandbox.bytes();
+        copy.extend_from_slice(b"/copy.bin");
+        let request = hardlink_request("link-6", &sandbox, &keep, &[target(&copy, 10_000)]);
+
+        std::fs::write(sandbox.path().join("keep.bin"), vec![8u8; 10_000]).unwrap();
+
+        let events = session(&[request], |events| terminal(events, "link-6"));
+        let error = events
+            .iter()
+            .find(|event| event["event"] == "error")
+            .expect("the request is refused as a whole");
+
+        assert_eq!(error["error"]["code"], "changed-target");
+        assert!(!same_inode(
+            &sandbox.path().join("keep.bin"),
+            &sandbox.path().join("copy.bin"),
+        ));
+    }
+
+    #[test]
+    fn a_protected_target_is_refused_before_anything_is_linked() {
+        let sandbox = Sandbox::new("hardlink-protected");
+        sandbox.directory(b"state");
+        std::fs::write(sandbox.path().join("keep.bin"), vec![1u8; 1000]).unwrap();
+        std::fs::write(sandbox.path().join("copy.bin"), vec![1u8; 1000]).unwrap();
+
+        let mut keep = sandbox.bytes();
+        keep.extend_from_slice(b"/keep.bin");
+        let mut copy = sandbox.bytes();
+        copy.extend_from_slice(b"/copy.bin");
+        let fingerprinted = target(&copy, 1000);
+        let protected = fingerprinted.replace(
+            &crate::base64::encode(&copy),
+            &crate::base64::encode(b"/etc/passwd"),
+        );
+
+        let events = run_hardlink("link-7", &sandbox, &keep, &[protected]);
+        let items = item_results(&events, "link-7");
+
+        assert_eq!(items[0]["itemResult"]["outcome"], "failed");
+        assert_eq!(items[0]["itemResult"]["reason"], "protected-path");
+    }
+
+    #[test]
+    fn a_replaced_duplicate_leaves_no_staging_name_behind() {
+        let sandbox = Sandbox::new("hardlink-staging");
+        sandbox.directory(b"state");
+        let content = vec![2u8; 40_000];
+        std::fs::write(sandbox.path().join("keep.bin"), &content).unwrap();
+        std::fs::write(sandbox.path().join("copy.bin"), &content).unwrap();
+
+        let mut keep = sandbox.bytes();
+        keep.extend_from_slice(b"/keep.bin");
+        let mut copy = sandbox.bytes();
+        copy.extend_from_slice(b"/copy.bin");
+
+        run_hardlink("link-8", &sandbox, &keep, &[target(&copy, 40_000)]);
+
+        let leftovers: Vec<String> = std::fs::read_dir(sandbox.path())
+            .unwrap()
+            .filter_map(|entry| entry.ok())
+            .map(|entry| entry.file_name().to_string_lossy().into_owned())
+            .filter(|name| name.starts_with(".disktop-link"))
+            .collect();
+        assert!(
+            leftovers.is_empty(),
+            "staging names were left behind: {leftovers:?}"
+        );
     }
 
     // --- Erase and emptying Trash -------------------------------------------

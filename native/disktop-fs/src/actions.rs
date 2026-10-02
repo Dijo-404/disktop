@@ -15,6 +15,7 @@
 //! numbers: on one filesystem the first is large and the second is zero, and
 //! presenting either as the other would be a lie about reclaimed space.
 
+use crate::content;
 use crate::guard::{self, Fingerprint, Guard, GuardContext};
 use crate::journal::{Counts, Identity, Journal, Outcome, State};
 use crate::sys::{self, EntryKind};
@@ -62,6 +63,18 @@ pub struct EmptyTrashRequest {
 pub struct RestoreRequest {
     pub journal_directory: PathBuf,
     pub journal_id: String,
+}
+
+/// Replacing duplicates with links to one file that is kept.
+///
+/// The kept file is validated once, before any item: it is the thing every
+/// target becomes, so a kept file that is not what the plan reviewed makes the
+/// whole request wrong rather than one item of it.
+pub struct DedupHardlinkRequest {
+    pub plan_id: String,
+    pub journal_directory: PathBuf,
+    pub keep: Target,
+    pub targets: Vec<Target>,
 }
 
 pub struct TrashRequest {
@@ -147,12 +160,334 @@ pub fn run_erase(
     )
 }
 
+/// Replace every reviewed duplicate with a link to the file being kept.
+///
+/// Nothing here is recoverable once the last other name to an inode is gone,
+/// which is why the plan that authorised it is irreversible and why the byte
+/// compare below is not optional. The digests that grouped these files said
+/// they were probably identical; this reads both files in full and refuses
+/// unless they are.
+pub fn run_dedup_hardlink(
+    request: &DedupHardlinkRequest,
+    report: &mut dyn FnMut(ItemReport),
+    cancelled: &AtomicBool,
+) -> Result<ActionSummary, ActionRefusal> {
+    // The kept file is validated once, before anything is linked to it. A
+    // kept file that is not what the plan reviewed makes every item wrong, so
+    // it refuses the request rather than failing each target in turn.
+    let keep_parent = guard::resolve_parent(&request.keep.path)
+        .map_err(|refusal| ActionRefusal::new(refusal.code, refusal.message))?;
+    let keep_live = guard::revalidate(&keep_parent, &request.keep.expected)
+        .map_err(|refusal| ActionRefusal::new(refusal.code, refusal.message))?;
+    if keep_live.kind != EntryKind::File {
+        return Err(ActionRefusal::new(
+            "invalid-arguments",
+            "The file being kept is not a regular file, so nothing can be linked to it.",
+        ));
+    }
+
+    let keep_descriptor = sys::openat_read_no_symlinks(keep_parent.descriptor(), &keep_parent.name)
+        .map_err(|error| {
+            ActionRefusal::new(
+                "permission-denied",
+                format!("The file being kept could not be opened: {error}"),
+            )
+        })?;
+    let keep = KeptFile {
+        descriptor: keep_descriptor,
+        parent: keep_parent,
+        metadata: keep_live,
+    };
+
+    let outcome = run_action(
+        Operation::DedupHardlink,
+        &request.plan_id,
+        &request.journal_directory,
+        &request.targets,
+        report,
+        cancelled,
+        |guard, journal, journal_id, position, target| {
+            hardlink_one(guard, &keep, journal, journal_id, position, target)
+        },
+    );
+    sys::close(keep.descriptor);
+    outcome
+}
+
+/// The file every target becomes a name for, held open for the whole action.
+///
+/// Holding the descriptor is what makes the byte compare mean something: the
+/// bytes compared are the bytes of the inode that gets linked, not of whatever
+/// the kept path happens to name a moment later.
+struct KeptFile {
+    descriptor: std::os::unix::io::RawFd,
+    parent: guard::ResolvedParent,
+    metadata: sys::Metadata,
+}
+
+/// Replace one duplicate with a link to the kept file.
+///
+/// The order matters. Identity is checked before content, because comparing
+/// two files that are already one inode is pointless and replacing one with a
+/// link to itself would be worse. Content is checked before metadata is
+/// trusted and before the journal is written, because a file whose bytes do
+/// not match is not this operation's business at all. And the link is made
+/// under a staging name and exchanged, so the reviewed name never points at
+/// nothing: either it holds the old inode or it holds the kept one.
+fn hardlink_one(
+    guard: &Guard,
+    keep: &KeptFile,
+    journal: &Journal,
+    journal_id: &str,
+    position: u64,
+    target: &Target,
+) -> ItemReport {
+    let refuse = |code: &'static str, message: String, outcome: Outcome| ItemReport {
+        path: target.path.clone(),
+        outcome,
+        reason: Some(code),
+        message: Some(message),
+        bytes: 0,
+    };
+
+    if let Err(refusal) = guard.classify(&target.path) {
+        return refuse(refusal.code, refusal.message, Outcome::Failed);
+    }
+    let parent = match guard::resolve_parent(&target.path) {
+        Ok(parent) => parent,
+        Err(refusal) => {
+            let outcome = outcome_for(refusal.code);
+            return refuse(refusal.code, refusal.message, outcome);
+        }
+    };
+    let live = match guard::revalidate(&parent, &target.expected) {
+        Ok(live) => live,
+        Err(refusal) => {
+            let outcome = outcome_for(refusal.code);
+            return refuse(refusal.code, refusal.message, outcome);
+        }
+    };
+
+    if live.kind != EntryKind::File {
+        return refuse(
+            "invalid-arguments",
+            "Only a regular file can be replaced by a hardlink.".to_owned(),
+            Outcome::Failed,
+        );
+    }
+    if live.device != keep.metadata.device {
+        return refuse(
+            "different-filesystem",
+            "A hardlink cannot cross a filesystem, so this file cannot become a name for the one \
+             being kept."
+                .to_owned(),
+            Outcome::Failed,
+        );
+    }
+    if live.inode == keep.metadata.inode {
+        // Already one inode reached by two names. Replacing it would free
+        // nothing and would briefly point the name at a staging link to itself.
+        return refuse(
+            "already-linked",
+            "This name already reaches the file being kept, so removing it would free nothing."
+                .to_owned(),
+            Outcome::Skipped,
+        );
+    }
+    if live.owner_id != keep.metadata.owner_id
+        || live.group_id != keep.metadata.group_id
+        || live.permissions != keep.metadata.permissions
+    {
+        return refuse(
+            "metadata-incompatible",
+            "This file's owner, group, or permissions differ from the file being kept. One inode \
+             has one set of them, so linking would silently change this file's."
+                .to_owned(),
+            Outcome::Failed,
+        );
+    }
+
+    let descriptor = match sys::openat_read_no_symlinks(parent.descriptor(), &parent.name) {
+        Ok(descriptor) => descriptor,
+        Err(error) => {
+            return refuse(
+                "permission-denied",
+                format!("This file could not be opened to compare it: {error}"),
+                Outcome::Failed,
+            );
+        }
+    };
+    // The gate. A digest said these were probably identical; this is the only
+    // thing that says they are. See docs/adr/0006.
+    let identical = content::bytes_equal(keep.descriptor, descriptor);
+    sys::close(descriptor);
+    match identical {
+        Ok(true) => {}
+        Ok(false) => {
+            return refuse(
+                "content-changed",
+                "This file does not hold the same bytes as the file being kept, so it was left \
+                 alone."
+                    .to_owned(),
+                Outcome::Failed,
+            );
+        }
+        Err(error) => {
+            return refuse(
+                "permission-denied",
+                format!("The two files could not be compared, so neither was changed: {error}"),
+                Outcome::Failed,
+            );
+        }
+    }
+
+    // The intent names both paths, so an interrupted item is legible: the
+    // record says which file was about to become a name for which other one.
+    if let Err(error) =
+        journal.record_intent(journal_id, position, &target.path, Some(&keep.path()))
+    {
+        return refuse(
+            "journal-write-failed",
+            format!("This item's intent could not be recorded, so it was not replaced: {error}"),
+            Outcome::Failed,
+        );
+    }
+
+    let staging = match stage_link(&keep.parent, parent.descriptor()) {
+        Ok(staging) => staging,
+        Err((code, message)) => {
+            return settle(
+                journal,
+                journal_id,
+                position,
+                target,
+                refuse(code, message, Outcome::Failed),
+            );
+        }
+    };
+
+    // After this the reviewed name holds the kept inode and the staging name
+    // holds the old one. The name never points at nothing in between.
+    if let Err(error) = sys::renameat_exchange(
+        parent.descriptor(),
+        &staging,
+        parent.descriptor(),
+        &parent.name,
+    ) {
+        let _ = sys::unlinkat(parent.descriptor(), &staging, false);
+        let (code, message) = match error.raw_os_error() {
+            Some(libc::EINVAL) | Some(libc::ENOSYS) => (
+                "unsupported-filesystem",
+                "This filesystem cannot exchange two names atomically, and Disktop will not \
+                 replace a file through a sequence that leaves its name pointing at nothing."
+                    .to_owned(),
+            ),
+            Some(libc::EACCES) | Some(libc::EPERM) => (
+                "permission-denied",
+                format!("This user may not replace the file: {error}"),
+            ),
+            _ => (
+                "internal-error",
+                format!("The replacement could not be completed: {error}"),
+            ),
+        };
+        return settle(
+            journal,
+            journal_id,
+            position,
+            target,
+            refuse(code, message, Outcome::Failed),
+        );
+    }
+
+    // Removing the staging name releases the old inode, if this was its last
+    // name. That is the step this operation cannot take back.
+    let leftover = sys::unlinkat(parent.descriptor(), &staging, false).is_err();
+
+    // Removing one of several names to an inode frees nothing; only the last
+    // one does. Reporting the plan's number either way would claim space back
+    // that is still in use.
+    let freed = if live.link_count <= 1 {
+        target.reviewed_bytes
+    } else {
+        0
+    };
+
+    let report = ItemReport {
+        path: target.path.clone(),
+        outcome: Outcome::Completed,
+        reason: None,
+        message: if leftover {
+            Some(format!(
+                "Replaced, but the staging name '{}' could not be removed and is still in the \
+                 directory.",
+                String::from_utf8_lossy(&staging),
+            ))
+        } else if freed == 0 {
+            Some(
+                "Replaced. This file had another name, so nothing was freed by removing this one."
+                    .to_owned(),
+            )
+        } else {
+            None
+        },
+        bytes: freed,
+    };
+    settle(journal, journal_id, position, target, report)
+}
+
+impl KeptFile {
+    fn path(&self) -> Vec<u8> {
+        self.parent.name.clone()
+    }
+}
+
+/// Reserve a name in the target's own directory and link the kept file to it.
+///
+/// The link is made in the directory the replacement happens in, so the
+/// exchange that follows is between two names under one descriptor. `EEXIST`
+/// is what makes the name exclusive: there is no check-then-create window.
+fn stage_link(
+    keep_parent: &guard::ResolvedParent,
+    target_parent: libc::c_int,
+) -> Result<Vec<u8>, (&'static str, String)> {
+    for attempt in 0..64u32 {
+        let name = format!(".disktop-link-{}-{attempt}", std::process::id()).into_bytes();
+        match sys::linkat(
+            keep_parent.descriptor(),
+            &keep_parent.name,
+            target_parent,
+            &name,
+        ) {
+            Ok(()) => return Ok(name),
+            Err(error) if error.raw_os_error() == Some(libc::EEXIST) => continue,
+            Err(error) => {
+                let code = match error.raw_os_error() {
+                    Some(libc::EXDEV) => "different-filesystem",
+                    Some(libc::EACCES) | Some(libc::EPERM) => "permission-denied",
+                    Some(libc::EMLINK) => "unsupported-filesystem",
+                    _ => "internal-error",
+                };
+                return Err((
+                    code,
+                    format!("A link to the file being kept could not be made: {error}"),
+                ));
+            }
+        }
+    }
+    Err((
+        "internal-error",
+        "No staging name was free in the target's directory.".to_owned(),
+    ))
+}
+
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Operation {
     Trash,
     Erase,
     EmptyTrash,
     Restore,
+    DedupHardlink,
 }
 
 impl Operation {
@@ -162,6 +497,7 @@ impl Operation {
             Operation::Erase => "erase",
             Operation::EmptyTrash => "empty-trash",
             Operation::Restore => "restore",
+            Operation::DedupHardlink => "dedup-hardlink",
         }
     }
 

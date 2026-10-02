@@ -87,6 +87,16 @@ export interface ActionPlan {
   readonly destination?: RawPath;
   /** What becomes of the source, for the same two operations and no others. */
   readonly sourceDisposition?: SourceDisposition;
+  /**
+   * The copy a hardlink replacement keeps, and absent for every other
+   * operation. It is always one of this plan's own entries, so the fingerprint
+   * the helper revalidates it against is the one that was reviewed.
+   *
+   * This is named rather than inferred from entry order because the operation
+   * is irreversible: "the first one" is the kind of implicit rule that puts
+   * the wrong file's inode on the releasing end of it.
+   */
+  readonly keepPath?: RawPath;
   readonly warnings: readonly string[];
 }
 
@@ -119,6 +129,7 @@ export interface PlanInput {
   readonly regenerationCost?: string;
   readonly destination?: RawPath;
   readonly sourceDisposition?: SourceDisposition;
+  readonly keepPath?: RawPath;
   readonly warnings: readonly string[];
   readonly id?: string;
   readonly random?: () => string;
@@ -197,9 +208,24 @@ export function buildPlan(input: PlanInput): ActionPlan {
   }
   // A duplicate has to be replaced by a link to something, and that something
   // has to be in the plan. One entry is a file with nothing to point at.
-  if (input.operation === "dedup-hardlink" && input.entries.length < 2) {
+  if (input.operation === "dedup-hardlink") {
+    if (input.entries.length < 2) {
+      throw new RangeError(
+        "Replacing a duplicate with a hardlink needs the file to keep and at least one to replace",
+      );
+    }
+    if (input.keepPath === undefined) {
+      throw new RangeError("A hardlink replacement plan has to name the copy it keeps");
+    }
+    const kept = input.keepPath;
+    if (!input.entries.some((entry) => entry.path.bytesBase64 === kept.bytesBase64)) {
+      throw new RangeError(
+        "The copy a hardlink replacement keeps has to be one of the plan's own reviewed entries",
+      );
+    }
+  } else if (input.keepPath !== undefined) {
     throw new RangeError(
-      "Replacing a duplicate with a hardlink needs the file to keep and at least one to replace",
+      `A '${input.operation}' plan keeps nothing, so it carries no kept copy`,
     );
   }
 
@@ -245,6 +271,7 @@ export function buildPlan(input: PlanInput): ActionPlan {
     ...(input.sourceDisposition === undefined
       ? {}
       : { sourceDisposition: input.sourceDisposition }),
+    ...(input.keepPath === undefined ? {} : { keepPath: input.keepPath }),
     warnings,
   };
 }
