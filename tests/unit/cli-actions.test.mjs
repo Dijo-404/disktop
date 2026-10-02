@@ -328,3 +328,22 @@ test("find refuses a kind that is not one of the four", async () => {
   assert.equal(envelopeOf(context, "find").error.code, "invalid-input");
   assert.equal(context.recordedActions.find, undefined);
 });
+
+test("Ctrl+C during 'find duplicates' aborts the signal the search was given", async () => {
+  const handlers = new Set();
+  let received;
+  const context = fakeContext({
+    actions: {
+      async find(_request, signal) {
+        received = signal;
+        for (const handler of handlers) handler();
+        return { kind: "duplicates", result: { kind: "found", groups: [], reclaimableBytes: 0n, complete: true, warnings: [], candidatesRead: 0n, filesHashed: 0n } };
+      },
+    },
+  });
+  context.signals = { listen: (handler) => handlers.add(handler), stop: (handler) => handlers.delete(handler) };
+  await runCli(["find", "duplicates", "--json"], context);
+  assert.ok(received, "the search was handed a signal");
+  assert.equal(received.aborted, true);
+  assert.equal(handlers.size, 0, "the interrupt listener is removed afterwards");
+});

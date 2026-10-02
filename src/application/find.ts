@@ -46,7 +46,7 @@ export type FindOutcome =
   | { readonly kind: "unavailable"; readonly capability: Capability };
 
 export interface FindService {
-  find(request: FindRequest): Promise<FindOutcome>;
+  find(request: FindRequest, signal?: AbortSignal): Promise<FindOutcome>;
 }
 
 /** Files smaller than this are not offered as duplicates unless asked for. */
@@ -75,7 +75,7 @@ export function createFindService(
   inventory?: Pick<InventoryPort, "mountOptionsFor">,
 ): FindService {
   return {
-    async find(request) {
+    async find(request, signal = new AbortController().signal) {
       if (request.kind === "duplicates") {
         if (duplicates === undefined) {
           return {
@@ -96,10 +96,7 @@ export function createFindService(
             minimumBytes: request.minimumBytes ?? DEFAULT_DUPLICATE_MINIMUM_BYTES,
             ...(request.limit === undefined ? {} : { maximumGroups: boundedLimit(request.limit) }),
           },
-          // A duplicate search is cancellable from the helper's side, but
-          // `find` has no interrupt of its own to hand it; the CLI's signal
-          // reaches the helper through the adapter.
-          new AbortController().signal,
+          signal,
         );
         return { kind: "duplicates", result };
       }

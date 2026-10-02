@@ -410,18 +410,29 @@ export async function runFind(context: CliContext, options: FindOptions): Promis
     staleBeforeNanoseconds = staleBeforeNanoseconds_(context.now(), Number(days));
   }
 
-  const outcome = await context.actions.find({
-    kind: options.kind as FindKind,
-    scanId: scan.scanId,
-    path: wanted,
-    ...(options.limit === undefined ? {} : { limit: Number(options.limit) }),
-    rule: rule as KeepRule,
-    ...(options.keepUnder === undefined
-      ? {}
-      : { keepUnder: rawPathFromUtf8(context.resolvePath(options.keepUnder)) }),
-    ...(minimumBytes === undefined ? {} : { minimumBytes }),
-    ...(staleBeforeNanoseconds === undefined ? {} : { staleBeforeNanoseconds }),
-  });
+  const controller = new AbortController();
+  const interrupt = (): void => controller.abort();
+  context.signals.listen(interrupt);
+  let outcome;
+  try {
+    outcome = await context.actions.find(
+      {
+        kind: options.kind as FindKind,
+        scanId: scan.scanId,
+        path: wanted,
+        ...(options.limit === undefined ? {} : { limit: Number(options.limit) }),
+        rule: rule as KeepRule,
+        ...(options.keepUnder === undefined
+          ? {}
+          : { keepUnder: rawPathFromUtf8(context.resolvePath(options.keepUnder)) }),
+        ...(minimumBytes === undefined ? {} : { minimumBytes }),
+        ...(staleBeforeNanoseconds === undefined ? {} : { staleBeforeNanoseconds }),
+      },
+      controller.signal,
+    );
+  } finally {
+    context.signals.stop(interrupt);
+  }
 
   if (outcome.kind === "refused") {
     return refuse(context, "find", options.asJson, outcome.failure);
