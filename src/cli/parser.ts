@@ -172,7 +172,17 @@ export const COMMANDS: readonly CommandSpec[] = [
     ],
     implemented: true,
   },
-  { path: ["history"], summary: "Inspect the action journal", options: [JSON_OPTION, UNITS_OPTION], implemented: true },
+  {
+    path: ["history"],
+    summary: "Inspect the action journal",
+    options: [
+      JSON_OPTION,
+      UNITS_OPTION,
+      { name: "cursor", summary: "Continue from a previous page", kind: "value", placeholder: "CURSOR" },
+      { name: "limit", summary: "Records per page, up to 200", kind: "value", placeholder: "COUNT" },
+    ],
+    implemented: true,
+  },
   {
     path: ["undo"],
     summary: "Put back what a Trash action moved",

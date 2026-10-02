@@ -253,8 +253,36 @@ export async function runApply(context: CliContext, options: ApplyOptions): Prom
 }
 
 /** The durable record of what was done, reconciled as it is read. */
-export async function runHistory(context: CliContext, asJson: boolean): Promise<number> {
-  const page = await context.actions.history();
+export interface HistoryOptions {
+  readonly asJson: boolean;
+  readonly cursor?: string;
+  readonly limit?: string;
+}
+
+export async function runHistory(context: CliContext, options: HistoryOptions): Promise<number> {
+  const asJson = options.asJson;
+  if (
+    options.limit !== undefined &&
+    (!/^[1-9][0-9]{0,2}$/.test(options.limit) || Number(options.limit) > 200)
+  ) {
+    return refuse(context, "history", asJson, {
+      code: "invalid-input",
+      message: "'--limit' accepts a whole number of records from 1 to 200.",
+    });
+  }
+  let page;
+  try {
+    page = await context.actions.history(
+      options.cursor,
+      options.limit === undefined ? undefined : Number(options.limit),
+    );
+  } catch (error) {
+    const failure = (error as { failure?: OperationFailure }).failure;
+    if (failure === undefined || options.cursor === undefined) {
+      throw error;
+    }
+    return refuse(context, "history", asJson, { code: "invalid-input", message: failure.message });
+  }
 
   if (asJson) {
     writeEnvelope(
@@ -277,6 +305,9 @@ export async function runHistory(context: CliContext, asJson: boolean): Promise<
 
   for (const line of historyLines(page.records, context.settings.units)) {
     context.output.stdout(`${line}\n`);
+  }
+  if (page.nextCursor !== undefined) {
+    context.output.stdout(`More: disktop history --cursor ${page.nextCursor}\n`);
   }
   if (page.reconciled > 0n) {
     context.output.stderr(
