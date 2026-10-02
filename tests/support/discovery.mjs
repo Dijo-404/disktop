@@ -16,6 +16,7 @@ export function discoveryEnvironment(home, overrides = {}) {
     userId: 1000n,
     now: overrides.now ?? new Date("2026-10-01T00:00:00.000Z"),
     staleAfterDays: 183,
+    rules: [],
     appImageRoots: overrides.appImageRoots ?? [],
     artifactDirectories: overrides.artifactDirectories ?? [
       "node_modules",

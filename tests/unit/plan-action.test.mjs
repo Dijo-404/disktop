@@ -109,6 +109,9 @@ function service(overrides = {}) {
         expiryMinutes: 60,
       },
       now: () => NOW,
+      ...(overrides.ruleHashes === undefined
+        ? {}
+        : { ruleHashFor: (findingId) => overrides.ruleHashes[findingId] }),
     }),
     saved,
   };
@@ -579,4 +582,39 @@ test("--replace on an operation that keeps nothing is refused", async () => {
 
   assert.equal(outcome.kind, "refused");
   assert.equal(outcome.failure.code, "invalid-input");
+});
+
+test("planning a rule's finding carries that rule's hash into the plan", async () => {
+  const { service: planner } = service({
+    facts: facts({ kind: "file" }),
+    findings: [
+      finding({
+        id: "rules:old-downloads",
+        providerId: "rules",
+        paths: [rawPathFromUtf8("/home/example/Downloads/a.iso")],
+        availableActionIds: ["trash"],
+      }),
+    ],
+    ruleHashes: { "rules:old-downloads": "e".repeat(64) },
+  });
+
+  const outcome = await planner.plan(
+    { operation: "trash", findingId: "rules:old-downloads" },
+    SIGNAL,
+  );
+
+  assert.equal(outcome.kind, "planned");
+  assert.equal(outcome.plan.ruleHash, "e".repeat(64));
+});
+
+test("a finding that did not come from a rule carries no rule hash", async () => {
+  const { service: planner } = service({ ruleHashes: { "rules:old-downloads": "e".repeat(64) } });
+
+  const outcome = await planner.plan(
+    { operation: "trash", findingId: "cache.language:pip" },
+    SIGNAL,
+  );
+
+  assert.equal(outcome.kind, "planned");
+  assert.equal(outcome.plan.ruleHash, undefined);
 });

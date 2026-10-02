@@ -68,6 +68,9 @@ function service(stored, overrides = {}) {
         },
       },
       now: () => overrides.now ?? NOW,
+      ...(overrides.currentRuleHashes === undefined
+        ? {}
+        : { currentRuleHashes: overrides.currentRuleHashes }),
     }),
   };
 }
@@ -186,4 +189,68 @@ test("free space that nothing could read leaves the observed change unknown rath
 
   assert.equal(outcome.kind, "applied");
   assert.equal(outcome.observedFreeSpaceChange, undefined);
+});
+
+// --- A plan built from a cleanup rule ---
+
+test("a plan from a rule is applied when the rule in the file still hashes the same", async () => {
+  const stored = plan({ providerId: "rules", findingId: "rules:old", ruleHash: "b".repeat(64) });
+  const { service: apply, applied } = service(stored, {
+    currentRuleHashes: () => new Set(["b".repeat(64)]),
+  });
+
+  const outcome = await apply.apply({ planId: stored.id, confirmed: true }, SIGNAL);
+
+  assert.equal(outcome.kind, "applied");
+  assert.equal(applied.length, 1);
+});
+
+test("a plan whose rule has been edited since it was reviewed is refused", async () => {
+  const stored = plan({ providerId: "rules", findingId: "rules:old", ruleHash: "b".repeat(64) });
+  const { service: apply, applied } = service(stored, {
+    currentRuleHashes: () => new Set(["c".repeat(64)]),
+  });
+
+  const outcome = await apply.apply({ planId: stored.id, confirmed: true }, SIGNAL);
+
+  assert.equal(outcome.kind, "refused");
+  assert.equal(outcome.failure.code, "invalid-plan");
+  assert.match(outcome.failure.message, /rule/i);
+  assert.deepEqual(applied, [], "nothing was applied");
+});
+
+test("a plan whose rule has been removed from the file is refused", async () => {
+  const stored = plan({ providerId: "rules", findingId: "rules:old", ruleHash: "b".repeat(64) });
+  const { service: apply } = service(stored, { currentRuleHashes: () => new Set() });
+
+  const outcome = await apply.apply({ planId: stored.id, confirmed: true }, SIGNAL);
+
+  assert.equal(outcome.kind, "refused");
+  assert.match(outcome.failure.message, /rule/i);
+});
+
+test("a plan that came from no rule is unaffected by what the rules now say", async () => {
+  const stored = plan();
+  const { service: apply, applied } = service(stored, {
+    currentRuleHashes: () => new Set(["d".repeat(64)]),
+  });
+
+  const outcome = await apply.apply({ planId: stored.id, confirmed: true }, SIGNAL);
+
+  assert.equal(outcome.kind, "applied");
+  assert.equal(applied.length, 1);
+});
+
+test("a plan from a rule is applied when nothing can say what the rules are now", async () => {
+  const stored = plan({ providerId: "rules", findingId: "rules:old", ruleHash: "b".repeat(64) });
+  const { service: apply, applied } = service(stored);
+
+  const outcome = await apply.apply({ planId: stored.id, confirmed: true }, SIGNAL);
+
+  assert.equal(
+    outcome.kind,
+    "applied",
+    "a caller that supplied no rules is a caller with no rules to contradict",
+  );
+  assert.equal(applied.length, 1);
 });

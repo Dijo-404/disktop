@@ -171,3 +171,38 @@ detector to remember, so a new detector gets them for free:
 helper checks it again from the other side of the process boundary. The rules here are
 the floor, not the guarantee. `tests/unit/provider-actions.test.mjs` holds every
 built-in detector to them against three fixture homes.
+
+## Cleanup rules somebody wrote themselves
+
+`[[rules]]` blocks in `config.toml` become findings through the `rules` provider, which
+has the same shape as every other detector and deliberately no more power.
+
+A rule is data and only data: roots, name patterns, excludes, kinds, a minimum age, a
+minimum size, and hard limits on how much it may select. There is no field for a command
+and no combination of fields that becomes one. `config.toml` is a file other programs can
+write to, and a configuration format that could name a command is a configuration format
+that can be made to run anything.
+
+Roots go through `isRefusedAsAllowedRoot`, the same check that bounds `additional_allowed_roots`,
+so a protected system root or a shared container root such as `/home` is refused as the
+file loads. A pattern that is absolute or that holds a `..` segment is refused for the
+same reason: a rule may not reach outside the roots it declares. Patterns match against
+display text rather than raw bytes, and a name that does not decode cleanly is left
+unmatched — the safe direction, since nobody can type a pattern for bytes that are not
+text.
+
+`maximum_count` and `maximum_bytes` are enforced during selection rather than checked
+afterwards. A rule that says "at most twenty gigabytes" and produces a plan for two
+hundred has already failed at the thing the limit was written for; the finding stops at
+the limit and its evidence says it did.
+
+The provider reads a stored scan's index through `IndexSearchPort.entriesUnder`. It never
+walks a tree, never runs a command, and never removes anything. A root no stored scan
+covers makes the result incomplete and names the scan that would fix it, because "nothing
+matched" and "nobody looked" are different answers.
+
+A plan built from a rule records that rule's hash, which is taken over the rule's fields
+in a fixed order so that reordering the file changes nothing and editing the rule changes
+everything. `disktop clean apply` reads the rules again and refuses a plan whose hash no
+longer matches: the confirmation somebody gave was for the selection the old rule
+described, and it does not carry over to a new one.

@@ -24,7 +24,9 @@ import { NativeHelperClient } from "../native/client.js";
 import type { Accounting } from "../ports/scan.js";
 import type { RetentionLimits } from "../ports/snapshots.js";
 import { loadConfigFile } from "../storage/config.js";
+import { ruleSlug } from "../providers/rules/index.js";
 import { createPlanStore } from "../storage/plans.js";
+import { ruleHash } from "../storage/rules.js";
 import { createSnapshotStore } from "../storage/snapshots.js";
 import { resolveLocations } from "../storage/xdg.js";
 
@@ -111,6 +113,13 @@ export async function createServices(options: CompositionOptions = {}): Promise<
     crossFilesystems: config.scan.crossFilesystems,
     excludes,
   });
+  // A rule's identity, by the finding id its provider gives it, so a plan can
+  // carry it and an apply can tell whether the rule has changed since.
+  const ruleHashesByFinding = new Map<string, string>(
+    config.rules.map((rule) => [`rules:${ruleSlug(rule.name)}`, ruleHash(rule)]),
+  );
+  const ruleHashes: ReadonlySet<string> = new Set(ruleHashesByFinding.values());
+
   const tools = createToolPort();
   const discovery = {
     home,
@@ -118,6 +127,7 @@ export async function createServices(options: CompositionOptions = {}): Promise<
     userId: BigInt(process.getuid?.() ?? 0),
     now: new Date(),
     staleAfterDays: config.find.staleAfterDays,
+    rules: config.rules,
     appImageRoots: config.providers.appImageRoots.map(rawPathFromUtf8),
     artifactDirectories: config.providers.artifactDirectories,
     largeLogBytes: BigInt(config.providers.largeLogBytes),
@@ -172,8 +182,14 @@ export async function createServices(options: CompositionOptions = {}): Promise<
         expiryMinutes: config.cleanup.planExpiryMinutes,
       },
       now: () => new Date(),
+      ruleHashFor: (findingId) => ruleHashesByFinding.get(findingId),
     }),
-    apply: createApplyService({ store: planStore, actions, now: () => new Date() }),
+    apply: createApplyService({
+      store: planStore,
+      actions,
+      now: () => new Date(),
+      currentRuleHashes: () => ruleHashes,
+    }),
     undo: createUndoService({ journal: actions, actions }),
     find: createFindService(explore, createDuplicateService(scanner), inventory),
     scan: createScanService(scanner, {

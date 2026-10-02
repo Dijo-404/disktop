@@ -971,6 +971,11 @@
         "keepPath": {
           "description": "The copy a hardlink replacement keeps. Always one of this plan's own entries, and present for exactly that operation. It is named rather than inferred from entry order because the operation is irreversible.",
           "$ref": "#/$defs/rawPath"
+        },
+        "ruleHash": {
+          "description": "The identity of the cleanup rule this plan came from, when it came from one. An apply reads the rule again and hashes it again; a plan whose hash no longer matches was reviewed against a rule that is not the rule in config.toml any more, and is refused.",
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
         }
       },
       "allOf": [

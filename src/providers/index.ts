@@ -23,6 +23,7 @@ import {
   createVirtualMachineProvider,
   createWineProvider,
 } from "./storage/index.js";
+import { createRulesProvider } from "./rules/index.js";
 import {
   createCrashProvider,
   createLogProvider,
@@ -45,6 +46,9 @@ export interface BuiltInProviderPorts {
 
 export function createBuiltInProviders(ports: BuiltInProviderPorts): readonly FindingProvider[] {
   return [
+    // A person's own rules run first, so what they wrote down is at the top of
+    // the list they read.
+    createRulesProvider(),
     createCondaProvider(),
     createPythonEnvsProvider(),
     createPyenvProvider(),

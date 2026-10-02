@@ -70,6 +70,13 @@ export interface PlanDependencies {
   readonly store: Pick<PlanStore, "save">;
   readonly settings: PlanSettings;
   readonly now: () => Date;
+  /**
+   * The hash of the cleanup rule a finding came from, when it came from one.
+   *
+   * It goes into the plan so an apply can tell whether the rule it was
+   * reviewed against is still the rule in the configuration file.
+   */
+  readonly ruleHashFor?: (findingId: string) => string | undefined;
 }
 
 /** The operations a generic plan may fix. `manager` belongs to a later phase. */
@@ -248,6 +255,11 @@ export function createPlanService(dependencies: PlanDependencies): PlanService {
         entries.push(toEntry(path, facts, measured.get(path.bytesBase64)));
       }
 
+      const ruleHash =
+        subject.findingId === undefined || dependencies.ruleHashFor === undefined
+          ? undefined
+          : dependencies.ruleHashFor(subject.findingId);
+
       const warnings = [...subject.warnings];
       if (entries.some((entry) => entry.expected.kind === "directory" && !measured.has(entry.path.bytesBase64))) {
         warnings.push(
@@ -271,6 +283,7 @@ export function createPlanService(dependencies: PlanDependencies): PlanService {
           ? {}
           : { sourceDisposition: request.sourceDisposition }),
         ...(keepPath === undefined ? {} : { keepPath }),
+        ...(ruleHash === undefined ? {} : { ruleHash }),
         warnings,
       });
 

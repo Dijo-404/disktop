@@ -48,6 +48,7 @@ async function buildContext(): Promise<CliContext> {
     },
     // Ctrl+C asks a running command to stop at a safe boundary; it does not
     // tear the process down and leave the work unreported.
+    startupWarnings: services.startupWarnings,
     signals: {
       listen: (handler) => {
         process.on("SIGINT", handler);

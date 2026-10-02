@@ -97,6 +97,14 @@ export interface ActionPlan {
    * the wrong file's inode on the releasing end of it.
    */
   readonly keepPath?: RawPath;
+  /**
+   * The identity of the cleanup rule this plan came from, when it came from
+   * one. An apply reads the rule again and hashes it again: a plan whose hash
+   * no longer matches was reviewed against a rule that is not the rule in the
+   * file any more, and a confirmation given for the first one does not carry
+   * over to the second.
+   */
+  readonly ruleHash?: string;
   readonly warnings: readonly string[];
 }
 
@@ -130,6 +138,7 @@ export interface PlanInput {
   readonly destination?: RawPath;
   readonly sourceDisposition?: SourceDisposition;
   readonly keepPath?: RawPath;
+  readonly ruleHash?: string;
   readonly warnings: readonly string[];
   readonly id?: string;
   readonly random?: () => string;
@@ -229,6 +238,10 @@ export function buildPlan(input: PlanInput): ActionPlan {
     );
   }
 
+  if (input.ruleHash !== undefined && !/^[0-9a-f]{64}$/.test(input.ruleHash)) {
+    throw new RangeError("A rule hash is 64 lowercase hexadecimal characters or absent");
+  }
+
   const publishing = publishesOutput(input.operation);
   if (publishing && (input.destination === undefined || input.sourceDisposition === undefined)) {
     throw new RangeError(
@@ -272,6 +285,7 @@ export function buildPlan(input: PlanInput): ActionPlan {
       ? {}
       : { sourceDisposition: input.sourceDisposition }),
     ...(input.keepPath === undefined ? {} : { keepPath: input.keepPath }),
+    ...(input.ruleHash === undefined ? {} : { ruleHash: input.ruleHash }),
     warnings,
   };
 }

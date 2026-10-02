@@ -36,7 +36,7 @@ test("unsupported TOML syntax is an error rather than a silent omission", () => 
     'value = 2026-09-29',
     'value = { inline = true }',
     'a.b = 1',
-    "[[products]]",
+    "[[products]",
     'value = """multi"""',
     'novalue',
   ]) {
@@ -65,4 +65,95 @@ test("prototype-polluting keys are refused", () => {
   assert.throws(() => parseToml("[__proto__]\nx = 1"), /line 1/);
   assert.throws(() => parseToml("__proto__ = 1"), /line 1/);
   assert.equal(Object.getPrototypeOf(parseToml("a = 1")), null);
+});
+
+// --- Arrays of tables, for [[rules]] ---
+
+test("an array of tables collects each block in the order it was written", () => {
+  const document = parseToml(`
+[[rules]]
+name = "old downloads"
+minimum_age_days = 30
+
+[[rules]]
+name = "build output"
+minimum_age_days = 7
+`);
+
+  assert.ok(Array.isArray(document.rules));
+  assert.equal(document.rules.length, 2);
+  assert.equal(document.rules[0].name, "old downloads");
+  assert.equal(document.rules[0].minimum_age_days, 30);
+  assert.equal(document.rules[1].name, "build output");
+});
+
+test("a single array-of-tables block is still an array of one", () => {
+  const document = parseToml(`
+[[rules]]
+name = "only one"
+`);
+
+  assert.ok(Array.isArray(document.rules));
+  assert.equal(document.rules.length, 1);
+});
+
+test("a key repeated inside one array-of-tables block is an error, not last-one-wins", () => {
+  assert.throws(
+    () =>
+      parseToml(`
+[[rules]]
+name = "first"
+name = "second"
+`),
+    /defined twice/,
+  );
+});
+
+test("the same key may appear in different blocks of the same array", () => {
+  const document = parseToml(`
+[[rules]]
+name = "first"
+
+[[rules]]
+name = "second"
+`);
+
+  assert.equal(document.rules[0].name, "first");
+  assert.equal(document.rules[1].name, "second");
+});
+
+test("an array of tables cannot take over a name a plain table already used", () => {
+  assert.throws(
+    () =>
+      parseToml(`
+[rules]
+name = "a table"
+
+[[rules]]
+name = "an array"
+`),
+    /rules/,
+  );
+});
+
+test("a plain table cannot take over a name an array of tables already used", () => {
+  assert.throws(
+    () =>
+      parseToml(`
+[[rules]]
+name = "an array"
+
+[rules]
+name = "a table"
+`),
+    /rules/,
+  );
+});
+
+test("an unterminated array-of-tables header is an error with its line", () => {
+  assert.throws(() => parseToml("[[rules]\nname = \"x\"\n"), /line 1/);
+});
+
+test("an array-of-tables name that is not a bare key is refused", () => {
+  assert.throws(() => parseToml("[[rules.nested]]\nname = \"x\"\n"), /rules\.nested/);
 });

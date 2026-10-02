@@ -1008,3 +1008,123 @@ test("undoing a compress that removed its source permanently refuses rather than
   assert.ok(!existsSync(tree.single), "nothing was invented at the original path");
   assert.ok(existsSync(`${tree.single}.zst`), "the archive is left where it was published");
 });
+
+test("a cleanup rule written in config.toml becomes a finding and a reviewed plan", async () => {
+  const home = await disktopHome();
+  const tree = await createActionTree(home);
+  const downloads = join(home, "downloads");
+  await mkdir(downloads, { recursive: true });
+  const big = join(downloads, "old.iso");
+  await writeFile(big, Buffer.alloc(200_000, 1));
+  const old = new Date(Date.now() - 400 * 86_400_000);
+  await utimes(big, old, old);
+  void tree;
+
+  await mkdir(join(home, "config", "disktop"), { recursive: true });
+  await writeFile(
+    join(home, "config", "disktop", "config.toml"),
+    [
+      "[[rules]]",
+      'name = "old disk images"',
+      `roots = ["${downloads}"]`,
+      'globs = ["*.iso"]',
+      "minimum_age_days = 30",
+      "minimum_bytes = 1024",
+      "maximum_count = 10",
+      "maximum_bytes = 1073741824",
+      "",
+    ].join("\n"),
+  );
+
+  // A rule reads a stored scan's index; it never walks a tree itself.
+  disktop(home, ["scan", home, "--json"]);
+
+  const listed = envelope(disktop(home, ["clean", "--json"]), "clean");
+  const found = listed.data.findings.find((finding) => finding.id === "rules:old-disk-images");
+  assert.ok(found, `rule findings were ${JSON.stringify(listed.data.findings.map((f) => f.id))}`);
+  assert.ok(
+    found.paths.some((path) => path.display === big),
+    "the rule selected the file it describes",
+  );
+
+  const planned = envelope(
+    disktop(home, ["clean", "plan", found.id, "--json"]),
+    "plan",
+  );
+  assert.match(planned.data.plan.ruleHash, /^[0-9a-f]{64}$/);
+  assert.ok(existsSync(big), "planning changes nothing");
+});
+
+test("a plan is refused once its rule has been edited", async () => {
+  const home = await disktopHome();
+  await createActionTree(home);
+  const downloads = join(home, "downloads");
+  await mkdir(downloads, { recursive: true });
+  const big = join(downloads, "old.iso");
+  await writeFile(big, Buffer.alloc(200_000, 1));
+  const old = new Date(Date.now() - 400 * 86_400_000);
+  await utimes(big, old, old);
+
+  const configPath = join(home, "config", "disktop", "config.toml");
+  const rule = (ageDays) =>
+    [
+      "[[rules]]",
+      'name = "old disk images"',
+      `roots = ["${downloads}"]`,
+      'globs = ["*.iso"]',
+      `minimum_age_days = ${ageDays}`,
+      "minimum_bytes = 1024",
+      "maximum_count = 10",
+      "maximum_bytes = 1073741824",
+      "",
+    ].join("\n");
+
+  await mkdir(join(home, "config", "disktop"), { recursive: true });
+  await writeFile(configPath, rule(30));
+  disktop(home, ["scan", home, "--json"]);
+
+  const planned = envelope(
+    disktop(home, ["clean", "plan", "rules:old-disk-images", "--json"]),
+    "plan",
+  );
+
+  // The rule now selects a different set than the one that was reviewed.
+  await writeFile(configPath, rule(7));
+
+  const applied = disktop(home, ["clean", "apply", planned.data.plan.id, "--yes", "--json"]);
+
+  assert.equal(applied.status, 2);
+  assert.match(JSON.parse(applied.stdout).error.message, /rule/i);
+  assert.ok(existsSync(big), "nothing was removed on a plan nobody re-reviewed");
+});
+
+test("a rule naming a protected root is reported when the configuration loads", async () => {
+  const home = await disktopHome();
+  await mkdir(join(home, "config", "disktop"), { recursive: true });
+  await writeFile(
+    join(home, "config", "disktop", "config.toml"),
+    [
+      "[[rules]]",
+      'name = "bad"',
+      'roots = ["/etc"]',
+      'globs = ["*"]',
+      "minimum_age_days = 1",
+      "minimum_bytes = 0",
+      "maximum_count = 1",
+      "maximum_bytes = 1",
+      "",
+    ].join("\n"),
+  );
+
+  const result = disktop(home, ["clean", "--json"]);
+
+  // Disktop still runs with a configuration it could not apply, but it says
+  // so: somebody whose own rules were dropped is reading a listing that is
+  // missing exactly the thing they wrote.
+  assert.equal(result.status, 3);
+  const document = JSON.parse(result.stdout);
+  assert.equal(document.status, "incomplete");
+  const problem = document.warnings.find((warning) => warning.code === "config-not-applied");
+  assert.ok(problem, `warnings were ${JSON.stringify(document.warnings)}`);
+  assert.match(problem.message, /etc/);
+});

@@ -144,6 +144,7 @@ function encodePlan(plan: ActionPlan): Record<string, unknown> {
       ? {}
       : { sourceDisposition: plan.sourceDisposition }),
     ...(plan.keepPath === undefined ? {} : { keepPath: plan.keepPath.bytesBase64 }),
+    ...(plan.ruleHash === undefined ? {} : { ruleHash: plan.ruleHash }),
     warnings: [...plan.warnings],
   };
 }
@@ -227,6 +228,7 @@ function decodePlan(document: unknown): ActionPlan | undefined {
     ...(document.keepPath === undefined
       ? {}
       : { keepPath: decodePath(text(document.keepPath)) }),
+    ...(document.ruleHash === undefined ? {} : { ruleHash: ruleHashOf(document.ruleHash) }),
     warnings: Array.isArray(document.warnings) ? document.warnings.map(text) : [],
   };
   return plan;
@@ -250,6 +252,15 @@ function decodeEntry(value: unknown): PlannedEntry {
     expected: fingerprint,
     reviewedBytes: parseDecimalBytes(text(value.reviewedBytes)),
   };
+}
+
+/** A stored hash that is not a hash is a stored plan this build will not read. */
+function ruleHashOf(value: unknown): string {
+  const stored = text(value);
+  if (!/^[0-9a-f]{64}$/.test(stored)) {
+    throw new RangeError("A stored plan's rule hash is not a hash");
+  }
+  return stored;
 }
 
 function decodePath(encoded: string): RawPath {

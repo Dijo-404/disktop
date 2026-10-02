@@ -157,6 +157,12 @@ read from the source, and only then published with a rename that refuses to over
 The source is not touched until that has happened, so a move that fails at any point
 leaves it exactly where it was.
 
+A plan built from one of your own `[[rules]]` records that rule's identity. If you edit
+the rule before applying the plan, the apply is refused and asks you to review it again:
+what you confirmed was the selection the old rule described. See
+[providers.md](providers.md#cleanup-rules-somebody-wrote-themselves) and
+[config.example.toml](config.example.toml).
+
 Planning by `FINDING_ID` rediscovers first, so it takes as long as `disktop clean`
 does. Planning `--path` does not. A path whose bytes are not valid UTF-8 cannot be
 given as `--path`, because process arguments are UTF-8; such a path is still
