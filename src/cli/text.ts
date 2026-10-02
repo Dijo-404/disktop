@@ -1,4 +1,5 @@
 import type { Alert, Filesystem, IndexedEntry, StorageDevice, Warning } from "../domain/models.js";
+import type { DecidedGroup } from "../application/duplicates.js";
 import type { ScanSummary } from "../application/scan.js";
 import type { SnapshotDiff } from "../application/snapshots.js";
 import type { FootprintSummary, ProviderReport } from "../application/footprint.js";
@@ -110,6 +111,45 @@ export function entryLines(entries: readonly IndexedEntry[], units: Units, accou
     `${`Size (${accounting})`.padStart(sizeWidth)}  Kind  Path`,
     ...rows.map((row) => `${row.size.padStart(sizeWidth)}  ${row.kind.padEnd(4)}  ${row.path}${row.note}`),
   ];
+}
+
+/**
+ * Duplicate groups as a person reads them.
+ *
+ * Each group names the copy that would survive and why, then the copies the
+ * rule would act on. A group the rule could not decide shows its reason and no
+ * keeper: there is nothing to act on there and pretending otherwise is how the
+ * wrong file goes.
+ */
+export function duplicateLines(
+  groups: readonly DecidedGroup[],
+  reclaimableBytes: bigint,
+  units: Units,
+): string[] {
+  if (groups.length === 0) {
+    return ["No duplicate files matched."];
+  }
+
+  const lines: string[] = [
+    `${groups.length} ${groups.length === 1 ? "group" : "groups"} of identical files; removing the copies below would free ${formatBytes(reclaimableBytes, units)}.`,
+  ];
+  for (const [position, decided] of groups.entries()) {
+    const size = formatBytes(decided.group.apparentBytes, units);
+    lines.push(`${position + 1}. ${size} each, ${decided.group.files.length} copies`);
+    if (decided.decision.kind === "undecidable") {
+      lines.push(`     undecided: ${decided.decision.reason}`);
+      for (const file of decided.group.files) {
+        lines.push(`       ?  ${file.path.display}`);
+      }
+      continue;
+    }
+    lines.push(`     keep: ${decided.decision.kept.path.display}`);
+    lines.push(`     because ${decided.decision.basis}`);
+    for (const other of decided.decision.others) {
+      lines.push(`       -  ${other.path.display}`);
+    }
+  }
+  return lines;
 }
 
 export function typeTotalLines(totals: readonly TypeTotal[], units: Units): string[] {

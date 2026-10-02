@@ -107,6 +107,9 @@ export async function runCli(args: readonly string[], context: CliContext): Prom
       kind: parsed.operand ?? "",
       ...(optional(parsed, "path")),
       ...(optional(parsed, "limit")),
+      ...(optional(parsed, "keep")),
+      ...(optional(parsed, "keep-under", "keepUnder")),
+      ...(optional(parsed, "min-size", "minSize")),
     });
   }
   if (name === "snapshots") {

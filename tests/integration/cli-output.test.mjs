@@ -89,7 +89,7 @@ test("alerts check validates and reports 0, 1, or 3 and nothing else", () => {
 });
 
 test("an unbuilt command still emits a schema-valid error envelope on stdout", () => {
-  const result = disktop(["find", "duplicates", "--json"]);
+  const result = disktop(["report", "--json"]);
   const envelope = envelopeFrom(result);
   validate("error", envelope);
   assert.equal(result.status, 2);

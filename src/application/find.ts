@@ -1,9 +1,11 @@
+import type { KeepRule } from "../domain/duplicates.js";
 import type { OperationFailure } from "../domain/errors.js";
 import type { Capability, IndexedEntry, RawPath } from "../domain/models.js";
 import type { EntryFilter } from "../ports/scan.js";
+import type { DuplicateOutcome, DuplicateService } from "./duplicates.js";
 import { DEFAULT_PAGE, boundedLimit, type ExploreService } from "./explore.js";
 
-/** What `disktop find` can be asked for. Duplicates and stale belong to Phase 5. */
+/** What `disktop find` can be asked for. Stale belongs to a later task. */
 export type FindKind = "empty" | "broken" | "duplicates" | "stale";
 
 export const FIND_KINDS: readonly FindKind[] = ["duplicates", "stale", "empty", "broken"];
@@ -14,6 +16,12 @@ export interface FindRequest {
   readonly path: RawPath;
   readonly limit?: number;
   readonly cursor?: string;
+  /** Duplicates only: which copy of each group survives. */
+  readonly rule?: KeepRule;
+  /** Duplicates only, and required by the `in-path` rule. */
+  readonly keepUnder?: RawPath;
+  /** Duplicates only: files smaller than this are not candidates. */
+  readonly minimumBytes?: bigint;
 }
 
 export type FindOutcome =
@@ -22,6 +30,7 @@ export type FindOutcome =
       readonly entries: readonly IndexedEntry[];
       readonly nextCursor?: string;
     }
+  | { readonly kind: "duplicates"; readonly result: DuplicateOutcome }
   | { readonly kind: "refused"; readonly failure: OperationFailure }
   | { readonly kind: "unavailable"; readonly capability: Capability };
 
@@ -29,27 +38,67 @@ export interface FindService {
   find(request: FindRequest): Promise<FindOutcome>;
 }
 
+/** Files smaller than this are not offered as duplicates unless asked for. */
+export const DEFAULT_DUPLICATE_MINIMUM_BYTES = 1024n * 1024n;
+
 /**
- * Empty directories and broken links, answered from a stored scan.
+ * Empty directories, broken links, and duplicates, answered from a stored scan.
  *
- * Both are facts the walk already established: it counted each directory's
- * entries as it read them and asked once per symlink whether the target
- * resolved. Walking the tree again to rediscover either would cost what the
- * scan cost, so this is a filter over the index and never a traversal.
+ * The first two are facts the walk already established: it counted each
+ * directory's entries as it read them and asked once per symlink whether the
+ * target resolved. Walking the tree again to rediscover either would cost what
+ * the scan cost, so they are a filter over the index and never a traversal.
+ *
+ * Duplicates are different in kind: no column in the index can answer them,
+ * because the answer depends on content. They go to the helper, which reads as
+ * little of that content as it can, and come back as groups rather than as a
+ * page of rows — so they travel in their own outcome rather than being flattened
+ * into a list that would lose which file pairs with which.
  *
  * A directory the scan could not open carries no child count at all, so it can
  * never answer a search for empty ones.
  */
-export function createFindService(index: Pick<ExploreService, "page">): FindService {
+export function createFindService(
+  index: Pick<ExploreService, "page">,
+  duplicates?: Pick<DuplicateService, "find">,
+): FindService {
   return {
     async find(request) {
+      if (request.kind === "duplicates") {
+        if (duplicates === undefined) {
+          return {
+            kind: "refused",
+            failure: {
+              code: "unsupported",
+              message:
+                "Finding duplicates needs the Disktop helper, which is not available on this machine.",
+            },
+          };
+        }
+        const result = await duplicates.find(
+          {
+            scanId: request.scanId,
+            path: request.path,
+            rule: request.rule ?? "oldest",
+            ...(request.keepUnder === undefined ? {} : { keepUnder: request.keepUnder }),
+            minimumBytes: request.minimumBytes ?? DEFAULT_DUPLICATE_MINIMUM_BYTES,
+            ...(request.limit === undefined ? {} : { maximumGroups: boundedLimit(request.limit) }),
+          },
+          // A duplicate search is cancellable from the helper's side, but
+          // `find` has no interrupt of its own to hand it; the CLI's signal
+          // reaches the helper through the adapter.
+          new AbortController().signal,
+        );
+        return { kind: "duplicates", result };
+      }
+
       const filter = filterFor(request.kind);
       if (filter === undefined) {
         return {
           kind: "refused",
           failure: {
             code: "not-implemented",
-            message: `'disktop find ${request.kind}' is declared but not implemented yet. 'empty' and 'broken' work today.`,
+            message: `'disktop find ${request.kind}' is declared but not implemented yet. 'duplicates', 'empty', and 'broken' work today.`,
           },
         };
       }

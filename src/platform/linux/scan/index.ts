@@ -1,6 +1,8 @@
-import { CapabilityUnavailable } from "../../../domain/errors.js";
+import { CapabilityUnavailable, StaleScanIndex } from "../../../domain/errors.js";
 import type { IndexedEntry, RawPath, Warning } from "../../../domain/models.js";
 import { rawPathFromBytes, rawPathFromUtf8 } from "../../../domain/paths.js";
+import type { DuplicatePort, DuplicateQuery, DuplicateReading } from "../../../ports/duplicates.js";
+import type { DuplicateFile, DuplicateGroup } from "../../../domain/duplicates.js";
 import type {
   EntryPage,
   EntryQuery,
@@ -13,9 +15,12 @@ import type {
 } from "../../../ports/scan.js";
 import type { HelperEvent, HelperStart, NativeHelperClient } from "../../../native/client.js";
 import {
+  parseDuplicateResult,
   parseIndexPage,
   parseProgress,
   parseScanResult,
+  type NativeDuplicateFile,
+  type NativeDuplicateGroup,
   type NativeIndexEntry,
   type NativeScanResult,
   type NativeWarning,
@@ -37,10 +42,46 @@ export interface NativeScannerOptions {
  * base64 and come back the same way: this adapter never builds a path from
  * display text, and never touches the filesystem itself.
  */
-export function createNativeScanner(options: NativeScannerOptions): ScanPort & FileIndexPort {
+export function createNativeScanner(
+  options: NativeScannerOptions,
+): ScanPort & FileIndexPort & DuplicatePort {
   const indexDirectory = rawPathFromUtf8(options.indexDirectory).bytesBase64;
 
   return {
+    async groups(query: DuplicateQuery, signal: AbortSignal): Promise<DuplicateReading> {
+      const client = await connect(options.start);
+      try {
+        const event = await client.request(
+          "hash-candidates",
+          {
+            scanId: query.scanId,
+            indexDirectory,
+            underPath: query.underPath.bytesBase64,
+            minimumBytes: query.minimumBytes.toString(10),
+            ...(query.maximumGroups === undefined ? {} : { maximumGroups: query.maximumGroups }),
+            ...(query.maximumFilesPerGroup === undefined
+              ? {}
+              : { maximumFilesPerGroup: query.maximumFilesPerGroup }),
+          },
+          signal,
+        );
+        refuseError(event, client, query.scanId);
+        const result = parseDuplicateResult(event.result);
+        return {
+          groups: result.groups.map(toDuplicateGroup),
+          complete: result.complete,
+          // The helper's warnings are sentences about one search, not codes
+          // from the scanner's fixed set, so they arrive as text and are
+          // labelled here rather than being squeezed into a scan warning code.
+          warnings: result.warnings.map((message) => ({ code: "incomplete-search", message })),
+          candidatesRead: result.candidatesRead,
+          filesHashed: result.filesHashed,
+        };
+      } finally {
+        await client.close();
+      }
+    },
+
     async *run(request: ScanRequest, signal: AbortSignal): AsyncIterable<ScanEvent> {
       const client = await connect(options.start);
       try {
@@ -156,7 +197,7 @@ function toCompleteEvent(result: NativeScanResult): ScanEvent {
  * a kernel or permission problem reads as a missing capability rather than a
  * crash.
  */
-function refuseError(event: HelperEvent, client: NativeHelperClient): void {
+function refuseError(event: HelperEvent, client: NativeHelperClient, scanId?: string): void {
   if (event.event !== "error") {
     return;
   }
@@ -174,6 +215,12 @@ function refuseError(event: HelperEvent, client: NativeHelperClient): void {
   }
   if (code === "unsupported-filesystem") {
     throw new CapabilityUnavailable({ status: "unsupported-filesystem", explanation });
+  }
+  // The index prunes whole scans to stay inside its budget, so a scan it no
+  // longer holds is routine. Letting it through as a generic failure would
+  // tell somebody Disktop broke when their cache simply rolled over.
+  if (code === "unknown-request" && scanId !== undefined) {
+    throw new StaleScanIndex(scanId, message);
   }
   throw new Error(explanation);
 }
@@ -214,6 +261,27 @@ function toIndexedEntry(entry: NativeIndexEntry): IndexedEntry {
     shared: entry.shared,
     ...(entry.childEntries === undefined ? {} : { childEntries: entry.childEntries }),
     ...(entry.broken === undefined ? {} : { broken: entry.broken }),
+  };
+}
+
+function toDuplicateGroup(group: NativeDuplicateGroup): DuplicateGroup {
+  return {
+    apparentBytes: group.apparentBytes,
+    digest: group.digest,
+    files: group.files.map(toDuplicateFile),
+  };
+}
+
+function toDuplicateFile(file: NativeDuplicateFile): DuplicateFile {
+  return {
+    path: decodePath(file.path),
+    device: file.device,
+    inode: file.inode,
+    apparentBytes: file.apparentBytes,
+    modifiedNanoseconds: file.modifiedNanoseconds,
+    ownerId: file.ownerId,
+    groupId: file.groupId,
+    permissions: file.permissions,
   };
 }
 

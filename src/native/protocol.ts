@@ -324,6 +324,93 @@ function decimal(value: unknown, field: string): bigint {
   return BigInt(value);
 }
 
+export interface NativeDuplicateFile {
+  readonly path: string;
+  readonly device: bigint;
+  readonly inode: bigint;
+  readonly apparentBytes: bigint;
+  readonly modifiedNanoseconds: bigint;
+  readonly ownerId: bigint;
+  readonly groupId: bigint;
+  readonly permissions: number;
+}
+
+export interface NativeDuplicateGroup {
+  readonly apparentBytes: bigint;
+  readonly digest: string;
+  readonly files: readonly NativeDuplicateFile[];
+}
+
+export interface NativeDuplicateResult {
+  readonly groups: readonly NativeDuplicateGroup[];
+  readonly complete: boolean;
+  readonly warnings: readonly string[];
+  readonly candidatesRead: bigint;
+  readonly filesHashed: bigint;
+}
+
+/**
+ * Read a duplicate search's answer, refusing one that cannot be true.
+ *
+ * A group of fewer than two files is not a duplicate group, and an incomplete
+ * answer that names nothing it missed is an answer that would be read as the
+ * whole picture. Both are refused here rather than passed on, for the same
+ * reason the schema refuses them: a listing is where somebody decides which
+ * copy of something to remove.
+ */
+export function parseDuplicateResult(result: unknown): NativeDuplicateResult {
+  if (!isRecord(result) || !Array.isArray(result.groups) || typeof result.complete !== "boolean") {
+    throw new Error("The helper returned a duplicate result without groups");
+  }
+  const warnings = result.warnings;
+  if (!Array.isArray(warnings) || warnings.some((entry: unknown) => typeof entry !== "string")) {
+    throw new Error("The helper returned a duplicate result without a warning list");
+  }
+  if (!result.complete && warnings.length === 0) {
+    throw new Error("The helper reported an incomplete duplicate search without saying what it missed");
+  }
+  return {
+    groups: result.groups.map((group: unknown) => parseDuplicateGroup(group)),
+    complete: result.complete,
+    warnings: warnings as readonly string[],
+    candidatesRead: decimal(result.candidatesRead, "candidatesRead"),
+    filesHashed: decimal(result.filesHashed, "filesHashed"),
+  };
+}
+
+function parseDuplicateGroup(value: unknown): NativeDuplicateGroup {
+  if (!isRecord(value) || typeof value.digest !== "string" || !/^[0-9a-f]{64}$/.test(value.digest)) {
+    throw new Error("The helper returned a duplicate group without a hexadecimal digest");
+  }
+  if (!Array.isArray(value.files) || value.files.length < 2) {
+    throw new Error("The helper returned a duplicate group holding fewer than two files");
+  }
+  return {
+    apparentBytes: decimal(value.apparentBytes, "apparentBytes"),
+    digest: value.digest,
+    files: value.files.map((file: unknown) => parseDuplicateFile(file)),
+  };
+}
+
+function parseDuplicateFile(value: unknown): NativeDuplicateFile {
+  if (!isRecord(value) || typeof value.path !== "string") {
+    throw new Error("The helper returned a duplicate file without a byte path");
+  }
+  if (typeof value.permissions !== "number" || !Number.isInteger(value.permissions)) {
+    throw new Error("The helper returned a duplicate file without its permission bits");
+  }
+  return {
+    path: value.path,
+    device: decimal(value.device, "device"),
+    inode: decimal(value.inode, "inode"),
+    apparentBytes: decimal(value.apparentBytes, "apparentBytes"),
+    modifiedNanoseconds: decimal(value.modifiedNanoseconds, "modifiedNanoseconds"),
+    ownerId: decimal(value.ownerId, "ownerId"),
+    groupId: decimal(value.groupId, "groupId"),
+    permissions: value.permissions,
+  };
+}
+
 export interface NativeActionResult {
   readonly journalId: string;
   readonly state: "complete" | "partial" | "uncertain";

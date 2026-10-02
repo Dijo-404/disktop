@@ -334,3 +334,124 @@ test("find reads empty directories and dangling links out of a stored scan", asy
     "a link to a file that exists is not broken",
   );
 });
+
+test("find duplicates groups real copies, skips a second hardlink, and keeps the copy the rule names", async () => {
+  const home = await disktopHome();
+  const tree = await createActionTree(home);
+  disktop(home, ["scan", home, "--json"]);
+
+  const found = envelope(
+    disktop(home, [
+      "find",
+      "duplicates",
+      "--path",
+      tree.duplicates.root,
+      "--min-size",
+      "1024",
+      "--keep",
+      "oldest",
+      "--json",
+    ]),
+    "find",
+  );
+
+  const paths = (group) => group.files.map((file) => file.path.display).sort();
+  assert.equal(
+    found.data.groups.length,
+    1,
+    `groups were ${JSON.stringify(found.data.groups.map(paths))}`,
+  );
+
+  const group = found.data.groups[0];
+  assert.deepEqual(paths(group), [tree.duplicates.copy, tree.duplicates.original].sort());
+  assert.equal(
+    group.files.some((file) => file.path.display === tree.duplicates.secondName),
+    false,
+    "a second name for an inode already in the group is not a third copy",
+  );
+  assert.equal(
+    group.files.some((file) => file.path.display.endsWith("/other.bin")),
+    false,
+    "a file of the same size holding different bytes is not a duplicate",
+  );
+
+  // Two copies of 200,000 bytes reclaim one copy's worth, never both.
+  assert.equal(group.apparentBytes, "200000");
+  assert.equal(group.reclaimableBytes, "200000");
+  assert.equal(found.data.reclaimableBytes, "200000");
+  assert.ok(
+    BigInt(found.data.filesHashed) <= BigInt(found.data.candidatesRead),
+    "nothing was hashed that was not a candidate",
+  );
+
+  assert.equal(group.decision.kind, "decided");
+  assert.ok(
+    group.files.some((file) => file.path.display === group.decision.keep.display),
+    "the kept copy is one of the group's own files",
+  );
+  assert.doesNotMatch(group.decision.basis, /access|opened|atime/i);
+});
+
+test("find duplicates leaves every file where it is", async () => {
+  const home = await disktopHome();
+  const tree = await createActionTree(home);
+  disktop(home, ["scan", home, "--json"]);
+
+  disktop(home, ["find", "duplicates", "--path", tree.duplicates.root, "--json"]);
+
+  for (const path of [tree.duplicates.original, tree.duplicates.copy, tree.duplicates.secondName]) {
+    assert.ok(existsSync(path), `${path} was removed by a search that only reads`);
+  }
+});
+
+test("find duplicates with --keep in-path and no match reports the group as undecided", async () => {
+  const home = await disktopHome();
+  const tree = await createActionTree(home);
+  disktop(home, ["scan", home, "--json"]);
+
+  const found = envelope(
+    disktop(home, [
+      "find",
+      "duplicates",
+      "--path",
+      tree.duplicates.root,
+      "--min-size",
+      "1024",
+      "--keep",
+      "in-path",
+      "--keep-under",
+      join(home, "nowhere-in-particular"),
+      "--json",
+    ]),
+    "find",
+  );
+
+  assert.equal(found.data.groups.length, 1);
+  assert.equal(found.data.groups[0].decision.kind, "undecidable");
+  assert.equal(
+    found.data.reclaimableBytes,
+    "0",
+    "a group with no chosen keeper reclaims nothing",
+  );
+});
+
+test("find duplicates with --keep in-path and no directory refuses rather than guessing", async () => {
+  const home = await disktopHome();
+  const tree = await createActionTree(home);
+  disktop(home, ["scan", home, "--json"]);
+
+  const result = disktop(home, [
+    "find",
+    "duplicates",
+    "--path",
+    tree.duplicates.root,
+    "--keep",
+    "in-path",
+    "--json",
+  ]);
+
+  assert.equal(result.status, 2);
+  const document = JSON.parse(result.stdout);
+  assert.equal(document.status, "error");
+  assert.match(document.error.message, /--keep-under/);
+});

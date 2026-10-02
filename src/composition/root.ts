@@ -3,6 +3,7 @@ import { join } from "node:path";
 import { createDashboardService, type DashboardService, type DashboardSettings } from "../application/dashboard.js";
 import { createExploreService, type ExploreService } from "../application/explore.js";
 import { createApplyService, type ApplyService } from "../application/apply-action.js";
+import { createDuplicateService } from "../application/duplicates.js";
 import { createFindService, type FindService } from "../application/find.js";
 import { createFootprintService, type FootprintService } from "../application/footprint.js";
 import { createPlanService, type PlanService } from "../application/plan-action.js";
@@ -171,7 +172,7 @@ export async function createServices(options: CompositionOptions = {}): Promise<
     }),
     apply: createApplyService({ store: planStore, actions, now: () => new Date() }),
     undo: createUndoService({ journal: actions, actions }),
-    find: createFindService(explore),
+    find: createFindService(explore, createDuplicateService(scanner)),
     scan: createScanService(scanner, {
       crossFilesystems: config.scan.crossFilesystems,
       accounting: config.scan.accounting,
