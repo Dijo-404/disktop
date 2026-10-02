@@ -33,27 +33,27 @@ function exchange(requests) {
 test("native hello reports only the implemented operations", async () => {
   const [response] = await exchange([handshakeRequest("hello-1")]);
   const result = parseHandshakeResponse(JSON.stringify(response), "hello-1");
-  assert.deepEqual(result.supportedOperations, ["hello", "probe", "cancel", "scan", "query-index", "hash-candidates", "trash", "erase", "empty-trash", "restore", "dedup-hardlink", "copy-move", "journal-reconcile"]);
+  assert.deepEqual(result.supportedOperations, ["hello", "probe", "cancel", "scan", "query-index", "hash-candidates", "trash", "erase", "empty-trash", "restore", "dedup-hardlink", "copy-move", "compress", "journal-reconcile"]);
   // Trash is implemented; the operations whose phase has not arrived are not
   // listed, so a client cannot discover one by name and assume it works.
-  for (const implemented of ["trash", "erase", "empty-trash", "restore", "dedup-hardlink", "copy-move"]) {
+  for (const implemented of ["trash", "erase", "empty-trash", "restore", "dedup-hardlink", "copy-move", "compress"]) {
     assert.equal(result.supportedOperations.includes(implemented), true);
   }
-  for (const mutation of ["compress", "inspect"]) {
+  for (const mutation of ["inspect", "manager-begin"]) {
     assert.equal(result.supportedOperations.includes(mutation), false);
   }
   assert.equal(typeof result.kernelCapabilities.openat2.available, "boolean");
 });
 
-test("native helper rejects a planned destructive operation without changing a file", async () => {
+test("native helper rejects an operation this build does not implement, without changing a file", async () => {
   const sandbox = await mkdtemp(join(tmpdir(), "disktop-native-test-"));
   const target = join(sandbox, "keep-me.txt");
   try {
     await writeFile(target, "data stays here\n");
     const [response] = await exchange([{
       protocolVersion: 1,
-      requestId: "compress-1",
-      operation: "compress",
+      requestId: "inspect-1",
+      operation: "inspect",
       arguments: { path: target },
     }]);
     assert.equal(response.event, "error");

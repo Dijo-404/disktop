@@ -288,6 +288,26 @@
           }
         }
       }
+    },
+    {
+      "if": {
+        "type": "object",
+        "properties": {
+          "operation": {
+            "const": "compress"
+          }
+        },
+        "required": [
+          "operation"
+        ]
+      },
+      "then": {
+        "properties": {
+          "arguments": {
+            "$ref": "#/$defs/compressArguments"
+          }
+        }
+      }
     }
   ],
   "$defs": {
@@ -605,6 +625,49 @@
         },
         "sourceDisposition": {
           "description": "What becomes of the source once the copy is verified and published. Fixed in the plan; apply time cannot choose it.",
+          "type": "string",
+          "enum": [
+            "trash",
+            "permanent"
+          ]
+        },
+        "targets": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "$ref": "common.json#/$defs/mutationTarget"
+          }
+        }
+      }
+    },
+    "compressArguments": {
+      "description": "Compress every reviewed target into `<name>.zst` or, for a directory, `<name>.tar.zst`, verify the archive by decompressing it, publish it without overwriting anything, and only then dispose of the source. The verification is a read-back the way anybody recovering from the archive would read it: an archive that will not decompress to the bytes that went in is not an archive, however well the write went.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "planId",
+        "journalDirectory",
+        "homeTrashDirectory",
+        "destinationDirectory",
+        "sourceDisposition",
+        "targets"
+      ],
+      "properties": {
+        "planId": {
+          "$ref": "common.json#/$defs/planId"
+        },
+        "journalDirectory": {
+          "$ref": "common.json#/$defs/pathBytes"
+        },
+        "homeTrashDirectory": {
+          "$ref": "common.json#/$defs/pathBytes"
+        },
+        "destinationDirectory": {
+          "description": "An existing directory, or the empty string for 'beside the source', which is where somebody would put an archive by hand.",
+          "type": "string",
+          "maxLength": 16384
+        },
+        "sourceDisposition": {
           "type": "string",
           "enum": [
             "trash",

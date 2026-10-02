@@ -23,9 +23,8 @@ Device and inode IDs, counts, byte sizes, and nanosecond timestamps will cross I
 | Handshake | `hello`, `probe` | Version, platform, checksum field, supported-operation list, and `openat2` capability probe only. |
 | Control | `cancel` | Stop a named in-flight request at a safe item boundary; the cancelled request still emits a final event. |
 | Implemented read | `scan`, `query-index`, `hash-candidates` | Bounded `openat2` traversal into a SQLite index, keyset-paginated pages out of it, and the staged duplicate pipeline over it. |
+| Implemented actions | `trash`, `erase`, `empty-trash`, `restore`, `dedup-hardlink`, `copy-move`, `compress` | Recheck plan and target, perform one constrained syscall or a staged and verified output, journal per-item outcome. |
 | Planned read | `inspect` | Live metadata for one path. |
-| Implemented actions | `trash`, `erase`, `empty-trash`, `restore`, `dedup-hardlink`, `copy-move` | Recheck plan and target, perform one constrained syscall or a staged and verified copy, journal per-item outcome. |
-| Planned actions | `compress` | Staged output, verification, and publication without overwrite. |
 | Manager journal | `manager-begin`, `manager-append`, `manager-finish` | Record intent, progress, command result, and verification for a fixed-argument Linux manager adapter. The helper does not invent or execute manager commands. |
 | Recovery | `journal-reconcile` | Resolve interrupted records into honest completed, partial, or uncertain states, and return a page of history. Reconciling and listing are one operation because a caller that could list without reconciling would read a history still claiming an abandoned action is running. |
 
@@ -139,6 +138,30 @@ inside the source stops the copy rather than quietly pulling another filesystem
 across, and a symlink is copied as the link object it is, with exactly the bytes
 it held. A socket, device node, or fifo stops the item: making a different
 object with the same name would be worse than saying it was not copied.
+
+### Compressing
+
+`compress` has the move's shape — stage, verify, publish without overwriting,
+and only then touch the source — and differs in one place: the verification.
+A copy is checked by reading the written bytes back off the device. An archive
+is checked by *decompressing* it, the way anybody recovering from it would, and
+comparing what comes out against what went in. An archive that will not read
+back is not an archive, however well the write went.
+
+A regular file becomes `<name>.zst` and a directory becomes `<name>.tar.zst`.
+`destinationDirectory` may be the empty string, which means beside the source —
+where somebody would put an archive by hand. A tree is walked with the same
+containment the copier uses, so a nested mount stops the item and a symlink is
+stored as a link object holding exactly the bytes it held.
+
+### What a restorable action records
+
+`trash`, and a `copy-move` or `compress` whose plan said `trash`, all leave the
+original in Trash, and all record the item's destination as **where the source
+went** rather than where any output was published. That is what `restore` reads
+to find the original again. A `permanent` disposition records no Trash
+destination, so a restore of it finds nothing to bring back and says so rather
+than inventing a path.
 
 ## Contract tests
 

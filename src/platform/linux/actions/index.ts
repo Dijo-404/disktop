@@ -73,7 +73,7 @@ export function createNativeActions(options: NativeActionOptions): ActionPort & 
         operation,
         operation === "dedup-hardlink"
           ? hardlinkArguments(plan, journalDirectory)
-          : operation === "copy-move"
+          : operation === "copy-move" || operation === "compress"
           ? {
               planId: plan.id,
               journalDirectory,
@@ -165,6 +165,8 @@ function helperOperation(plan: ActionPlan): string {
       return "dedup-hardlink";
     case "move":
       return "copy-move";
+    case "compress":
+      return "compress";
     default:
       throw new CapabilityUnavailable({
         status: "unsupported-kernel",

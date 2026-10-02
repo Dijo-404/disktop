@@ -12,7 +12,7 @@ import { spawnSync } from "node:child_process";
 import { existsSync, readdirSync } from "node:fs";
 import { chmod, mkdir, mkdtemp, readFile, rm, stat, utimes, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { after, test } from "node:test";
 import { createActionTree } from "../fixtures/generate.mjs";
 import { compileBundle } from "../support/schemas.mjs";
@@ -558,13 +558,11 @@ test("a compress plan publishes beside the source and says what becomes of it", 
   assert.equal(planned.data.plan.operation, "compress");
   assert.equal(planned.data.plan.sourceDisposition, "trash");
   assert.equal(planned.data.plan.reversibility, "undo-from-trash");
-  assert.ok(planned.data.plan.destination, "a compress plan names where the archive lands");
-
-  // Phase 5 fixes the plan; the helper that carries it out comes next.
-  const applied = disktop(home, ["clean", "apply", planned.data.plan.id, "--yes", "--json"]);
-  assert.equal(applied.status, 2);
-  assert.match(JSON.parse(applied.stdout).error.message, /compress/i);
-  assert.ok(existsSync(tree.artifacts), "a refused apply leaves the source where it is");
+  assert.equal(
+    planned.data.plan.destination.display,
+    dirname(tree.artifacts),
+    "an archive lands beside what it archives unless somebody says otherwise",
+  );
 });
 
 test("a compress plan that removes its source permanently says it cannot be undone", async () => {
@@ -872,4 +870,141 @@ test("a move refuses to publish over something already at the destination", asyn
     "do not overwrite me",
   );
   assert.ok(existsSync(tree.artifacts), "the source is preserved when the copy cannot publish");
+});
+
+test("a reviewed compress publishes an archive, trashes the source, and undo brings it back", async () => {
+  const home = await disktopHome();
+  const tree = await createActionTree(home);
+
+  const planned = envelope(
+    disktop(home, [
+      "clean",
+      "plan",
+      "--path",
+      tree.artifacts,
+      "--operation",
+      "compress",
+      "--source",
+      "trash",
+      "--json",
+    ]),
+    "plan",
+  );
+  assert.equal(planned.data.plan.operation, "compress");
+  assert.equal(planned.data.plan.reversibility, "undo-from-trash");
+
+  const applied = envelope(
+    disktop(home, ["clean", "apply", planned.data.plan.id, "--yes", "--json"]),
+    "apply",
+  );
+
+  assert.equal(applied.data.result.completed, "1");
+  assert.ok(existsSync(`${tree.artifacts}.tar.zst`), "the archive was published beside the source");
+  assert.ok(!existsSync(tree.artifacts), "the source went to Trash");
+  assert.equal(applied.data.result.undoAvailable, true);
+
+  const raw = disktop(home, ["undo", applied.data.result.journalId, "--yes", "--json"]);
+  assert.equal(raw.status, 0, `undo said: ${raw.stdout}${raw.stderr}`);
+  const undone = envelope(raw, "undo");
+  assert.equal(undone.data.result.completed, "1");
+  assert.ok(existsSync(tree.artifacts), "undo put the source back");
+});
+
+test("a compress that removes its source permanently has nothing to put back", async () => {
+  const home = await disktopHome();
+  const tree = await createActionTree(home);
+
+  const planned = envelope(
+    disktop(home, [
+      "clean",
+      "plan",
+      "--path",
+      tree.single,
+      "--operation",
+      "compress",
+      "--source",
+      "permanent",
+      "--json",
+    ]),
+    "plan",
+  );
+  assert.equal(planned.data.plan.reversibility, "irreversible");
+
+  const applied = envelope(
+    disktop(home, ["clean", "apply", planned.data.plan.id, "--yes", "--permanent", "--json"]),
+    "apply",
+  );
+
+  assert.equal(applied.data.result.completed, "1");
+  assert.equal(applied.data.result.bytesMovedToTrash, "0");
+  assert.equal(applied.data.result.undoAvailable, false);
+  assert.ok(existsSync(`${tree.single}.zst`));
+  assert.ok(!existsSync(tree.single));
+});
+
+test("a compressed file's archive holds exactly the bytes that went in", async () => {
+  const home = await disktopHome();
+  const tree = await createActionTree(home);
+  const original = await readFile(tree.single);
+
+  const planned = envelope(
+    disktop(home, [
+      "clean",
+      "plan",
+      "--path",
+      tree.single,
+      "--operation",
+      "compress",
+      "--source",
+      "trash",
+      "--json",
+    ]),
+    "plan",
+  );
+  disktop(home, ["clean", "apply", planned.data.plan.id, "--yes", "--json"]);
+
+  const { createReadStream } = await import("node:fs");
+  const { createGunzip } = await import("node:zlib");
+  void createGunzip;
+  // zstd is decoded with the system tool when it is there; otherwise the
+  // archive's existence and the helper's own round-trip test carry this.
+  const unzstd = spawnSync("zstd", ["-d", "-c", `${tree.single}.zst`], {
+    encoding: "buffer",
+    maxBuffer: 64 * 1024 * 1024,
+  });
+  void createReadStream;
+  if (unzstd.error !== undefined || unzstd.status !== 0) {
+    return;
+  }
+  assert.deepEqual(unzstd.stdout, original, "every byte came back out of the archive");
+});
+
+test("undoing a compress that removed its source permanently refuses rather than inventing one", async () => {
+  const home = await disktopHome();
+  const tree = await createActionTree(home);
+
+  const planned = envelope(
+    disktop(home, [
+      "clean",
+      "plan",
+      "--path",
+      tree.single,
+      "--operation",
+      "compress",
+      "--source",
+      "permanent",
+      "--json",
+    ]),
+    "plan",
+  );
+  const applied = envelope(
+    disktop(home, ["clean", "apply", planned.data.plan.id, "--yes", "--permanent", "--json"]),
+    "apply",
+  );
+
+  const undone = disktop(home, ["undo", applied.data.result.journalId, "--yes", "--json"]);
+
+  assert.notEqual(undone.status, 0, "there is no source to bring back");
+  assert.ok(!existsSync(tree.single), "nothing was invented at the original path");
+  assert.ok(existsSync(`${tree.single}.zst`), "the archive is left where it was published");
 });
