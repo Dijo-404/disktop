@@ -97,3 +97,18 @@ test("this host's Docker is read, and no named volume is ever selectable", async
     assert.equal(reported.offered, false);
   }
 });
+
+test("this host's kernels are judged by its own package manager, and the running one is never proposed", async () => {
+  const { createKernelAdapter } = await import("../../dist/platform/linux/managers/kernels.js");
+  const { release } = await import("node:os");
+  const ports = await hostPorts();
+  const discovery = await createKernelAdapter({ tools: ports.tools, runningRelease: release, installed: ports.installed }).discover();
+  for (const proposal of discovery.proposals) {
+    for (const item of proposal.items) {
+      assert.equal(item.id.endsWith(release()), false, `${item.id} belongs to the running kernel`);
+    }
+  }
+  if (discovery.proposals.length === 0) {
+    assert.ok(discovery.capability.explanation.length > 0);
+  }
+});

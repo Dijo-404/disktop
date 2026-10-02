@@ -1,0 +1,11 @@
+bash	5.2.26-3.fc40.x86_64	8123456
+kernel	6.10.6-200.fc40.x86_64	0
+kernel-core	6.10.6-200.fc40.x86_64	72000000
+kernel-modules	6.10.6-200.fc40.x86_64	60000000
+kernel-modules-core	6.10.6-200.fc40.x86_64	40000000
+kernel	6.10.9-200.fc40.x86_64	0
+kernel-core	6.10.9-200.fc40.x86_64	72000000
+kernel-modules	6.10.9-200.fc40.x86_64	60000000
+kernel	6.10.12-200.fc40.x86_64	0
+kernel-core	6.10.12-200.fc40.x86_64	72000000
+kernel-headers	6.10.3-200.fc40.x86_64	6000000

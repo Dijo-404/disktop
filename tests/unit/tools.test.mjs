@@ -137,3 +137,13 @@ test("a device argument that is not a device path is refused", async () => {
   assert.equal(outcome.capability.status, "missing-tool");
   assert.deepEqual(calls, []);
 });
+
+test("a simulated purge takes only kernel package names, and at least one", async () => {
+  const { isAllowedQuery } = await import("../../dist/platform/linux/tools.js");
+  assert.equal(isAllowedQuery("apt-get", ["-s", "purge", "linux-image-6.8.0-40-generic"]), true);
+  assert.equal(isAllowedQuery("apt-get", ["-s", "purge"]), false);
+  assert.equal(isAllowedQuery("apt-get", ["-s", "purge", "linux-image-6.8.0-40-generic", "-y"]), false);
+  assert.equal(isAllowedQuery("apt-get", ["purge", "linux-image-6.8.0-40-generic"]), false);
+  assert.equal(isAllowedQuery("rpm", ["-e", "--test", "--", "kernel-core-6.10.6-200.fc40.x86_64"]), true);
+  assert.equal(isAllowedQuery("rpm", ["-e", "--", "kernel-core-6.10.6-200.fc40.x86_64"]), false);
+});

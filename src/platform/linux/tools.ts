@@ -1,8 +1,12 @@
 import type { ToolOutput, ToolPort } from "../../ports/providers.js";
 import { runFixedCommand } from "./process.js";
 
-/** A literal word, or a pattern for the one word in a query that varies. */
-export type QueryWord = string | RegExp;
+/** A literal word, a pattern for one word, or a pattern every remaining word must match. */
+export type QueryWord = string | RegExp | { readonly rest: RegExp };
+
+const rest = (pattern: RegExp): { readonly rest: RegExp } => ({ rest: pattern });
+const KERNEL_PACKAGE = /^linux-[a-z0-9][a-z0-9.+-]{0,127}$/;
+const KERNEL_RPM = /^kernel[a-z0-9-]*-[0-9][A-Za-z0-9._+-]{0,127}$/;
 
 const DEVICE = /^\/dev\/[A-Za-z0-9][A-Za-z0-9/_.:-]*$/;
 
@@ -14,6 +18,7 @@ const DEVICE = /^\/dev\/[A-Za-z0-9][A-Za-z0-9/_.:-]*$/;
  * after a reviewed plan, never through here.
  */
 export const ALLOWED_QUERIES: Readonly<Record<string, readonly (readonly QueryWord[])[]>> = {
+  "apt-get": [["-s", "purge", rest(KERNEL_PACKAGE)]],
   btrfs: [["subvolume", "list", "/"]],
   docker: [
     ["image", "ls", "--filter", "dangling=true", "--no-trunc", "--format", "{{.ID}}\t{{.Size}}"],
@@ -21,7 +26,10 @@ export const ALLOWED_QUERIES: Readonly<Record<string, readonly (readonly QueryWo
     ["volume", "ls", "--filter", "dangling=true", "--format", "{{.Name}}\t{{.Labels}}"],
     ["system", "df", "--format", "{{json .}}"],
   ],
-  "dpkg-query": [["-W", "-f=${Package}\t${Installed-Size}\t${Status}\n"]],
+  "dpkg-query": [
+    ["-W", "-f=${Package}\t${Installed-Size}\t${Status}\n"],
+    ["-W", "-f=${Package}\t${Status}\t${Installed-Size}\n"],
+  ],
   flatpak: [
     ["list", "--columns=application,size,origin"],
     ["list", "--user", "--columns=ref"],
@@ -38,7 +46,11 @@ export const ALLOWED_QUERIES: Readonly<Record<string, readonly (readonly QueryWo
     ["container", "ls", "--all", "--filter", "status=exited", "--filter", "status=created", "--no-trunc", "--format", "{{.ID}}\t{{.State}}"],
     ["volume", "ls", "--filter", "dangling=true", "--format", "{{.Name}}\t{{.Anonymous}}"],
   ],
-  rpm: [["-qa", "--qf", "%{NAME}\t%{SIZE}\n"]],
+  rpm: [
+    ["-qa", "--qf", "%{NAME}\t%{SIZE}\n"],
+    ["-qa", "--qf", "%{NAME}\t%{VERSION}-%{RELEASE}.%{ARCH}\t%{SIZE}\n"],
+    ["-e", "--test", "--", rest(KERNEL_RPM)],
+  ],
   smartctl: [["--scan", "-j"], ["-H", "-A", "-j", DEVICE]],
   snap: [["list"], ["list", "--all"]],
   zfs: [["list", "-H", "-p", "-t", "snapshot", "-o", "name,used"]],
@@ -48,14 +60,19 @@ export const ALLOWED_TOOLS: readonly string[] = Object.keys(ALLOWED_QUERIES);
 
 export function isAllowedQuery(name: string, commandArguments: readonly string[]): boolean {
   const patterns = Object.hasOwn(ALLOWED_QUERIES, name) ? ALLOWED_QUERIES[name] : undefined;
-  return (patterns ?? []).some(
-    (pattern) =>
-      pattern.length === commandArguments.length &&
-      pattern.every((word, index) => {
-        const actual = commandArguments[index] as string;
-        return typeof word === "string" ? word === actual : word.test(actual);
-      }),
-  );
+  return (patterns ?? []).some((pattern) => {
+    const last = pattern[pattern.length - 1];
+    const open = last !== undefined && typeof last === "object" && "rest" in last;
+    const fixed = open ? pattern.slice(0, -1) : pattern;
+    if (open ? commandArguments.length <= fixed.length : commandArguments.length !== fixed.length) {
+      return false;
+    }
+    const head = fixed.every((word, index) => {
+      const actual = commandArguments[index] as string;
+      return typeof word === "string" ? word === actual : (word as RegExp).test(actual);
+    });
+    return head && (!open || commandArguments.slice(fixed.length).every((actual) => last.rest.test(actual)));
+  });
 }
 
 export type RunCommand = (name: string, commandArguments: readonly string[]) => Promise<ToolOutput>;
