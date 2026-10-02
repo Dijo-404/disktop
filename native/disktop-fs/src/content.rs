@@ -71,6 +71,10 @@ pub fn full_digest(descriptor: RawFd) -> io::Result<[u8; 32]> {
 /// This is the gate every content-equality mutation passes through. A digest
 /// never stands in for it: a digest says two files are probably the same, and
 /// "probably" is not a basis for releasing somebody's only copy of something.
+// The mutations that call this land with dedup-hardlink and copy-move; until
+// the first of them does, nothing in the binary reaches it and CI treats a
+// clippy warning as an error.
+#[allow(dead_code)]
 pub fn bytes_equal(left: RawFd, right: RawFd) -> io::Result<bool> {
     if crate::sys::metadata_of(left)?.apparent_bytes
         != crate::sys::metadata_of(right)?.apparent_bytes

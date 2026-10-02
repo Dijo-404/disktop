@@ -228,6 +228,26 @@
           }
         }
       }
+    },
+    {
+      "if": {
+        "type": "object",
+        "properties": {
+          "operation": {
+            "const": "hash-candidates"
+          }
+        },
+        "required": [
+          "operation"
+        ]
+      },
+      "then": {
+        "properties": {
+          "arguments": {
+            "$ref": "#/$defs/hashCandidatesArguments"
+          }
+        }
+      }
     }
   ],
   "$defs": {
@@ -448,6 +468,41 @@
         },
         "journalId": {
           "$ref": "common.json#/$defs/planId"
+        }
+      }
+    },
+    "hashCandidatesArguments": {
+      "description": "Find the groups of identical files in one finished scan. The helper opens each candidate read-only with the same containment a mutation uses and changes nothing. A query usually runs in a different helper process from the scan that wrote the index, so the directory is named here rather than remembered.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "scanId",
+        "indexDirectory"
+      ],
+      "properties": {
+        "scanId": {
+          "$ref": "common.json#/$defs/scanId"
+        },
+        "indexDirectory": {
+          "$ref": "common.json#/$defs/pathBytes"
+        },
+        "underPath": {
+          "description": "Search only this path and what is below it. A path the scan never saw is refused by name rather than answered with no groups.",
+          "$ref": "common.json#/$defs/pathBytes"
+        },
+        "minimumBytes": {
+          "description": "Files below this size are not candidates. Defaults to 1, because every empty file is identical to every other and saying so helps nobody.",
+          "$ref": "common.json#/$defs/decimalInteger"
+        },
+        "maximumGroups": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 1000
+        },
+        "maximumFilesPerGroup": {
+          "type": "integer",
+          "minimum": 2,
+          "maximum": 1000
         }
       }
     }

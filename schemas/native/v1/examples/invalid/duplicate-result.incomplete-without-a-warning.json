@@ -1,0 +1,13 @@
+{
+  "protocolVersion": 1,
+  "requestId": "hash-candidates-4",
+  "eventId": "2",
+  "event": "complete",
+  "result": {
+    "groups": [],
+    "complete": false,
+    "warnings": [],
+    "candidatesRead": "12",
+    "filesHashed": "0"
+  }
+}

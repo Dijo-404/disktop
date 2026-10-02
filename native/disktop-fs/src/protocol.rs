@@ -1,16 +1,17 @@
 //! Versioned JSON-lines boundary for the filesystem helper.
 //!
-//! Reads are implemented: `hello`, `probe`, `scan`, `query-index`, `cancel`,
-//! and `journal-reconcile`. Every operation that changes a user file is still
-//! refused explicitly, because the reviewed plan and guard it would have to go
-//! through do not exist yet.
+//! Reads are `hello`, `probe`, `scan`, `query-index`, `hash-candidates`, and
+//! `journal-reconcile`; mutations are `trash`, `erase`, `empty-trash`, and
+//! `restore`. Every operation this build does not implement is refused by name
+//! rather than ignored, so a client can tell "not here yet" from "never".
 //!
-//! A scan runs on its own thread so that `cancel` can be read and acted on
-//! while it is still walking. Every event goes out through one lock, so two
+//! Anything that reads content or changes a file runs on its own thread so
+//! that `cancel` can be read and acted on while it is still working. Every event goes out through one lock, so two
 //! requests can never interleave halfway through a line, and each request's
 //! event IDs are monotonic from 1.
 
 use crate::actions::{self, TrashRequest};
+use crate::duplicates;
 use crate::guard::Fingerprint;
 use crate::index::{IndexLimits, IndexWriter};
 use crate::journal::{self, Journal};
@@ -32,20 +33,20 @@ use std::thread::JoinHandle;
 
 const PROTOCOL_VERSION: u16 = 1;
 const MAX_REQUEST_BYTES: usize = 1024 * 1024;
-const SUPPORTED_OPERATIONS: [&str; 10] = [
+const SUPPORTED_OPERATIONS: [&str; 11] = [
     "hello",
     "probe",
     "cancel",
     "scan",
     "query-index",
+    "hash-candidates",
     "trash",
     "erase",
     "empty-trash",
     "restore",
     "journal-reconcile",
 ];
-const PLANNED_OPERATIONS: [&str; 8] = [
-    "hash-candidates",
+const PLANNED_OPERATIONS: [&str; 7] = [
     "inspect",
     "copy-move",
     "compress",
@@ -194,6 +195,21 @@ struct QueryIndexArguments {
     include_type_totals: Option<bool>,
     #[serde(default)]
     include_owner_totals: Option<bool>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct HashCandidatesArguments {
+    scan_id: String,
+    index_directory: String,
+    #[serde(default)]
+    under_path: Option<String>,
+    #[serde(default)]
+    minimum_bytes: Option<String>,
+    #[serde(default)]
+    maximum_groups: Option<u32>,
+    #[serde(default)]
+    maximum_files_per_group: Option<u32>,
 }
 
 enum InputLine {
@@ -404,6 +420,7 @@ fn handle_request(server: &Arc<Server>, line: &[u8]) {
         "cancel" => cancel(server, &responder, request.arguments),
         "scan" => scan(server, responder, request.arguments),
         "query-index" => query_index(&responder, request.arguments),
+        "hash-candidates" => hash_candidates(server, responder, request.arguments),
         operation if PLANNED_OPERATIONS.contains(&operation) => fail(
             &responder,
             "unsupported-operation",
@@ -828,6 +845,171 @@ fn query_index(responder: &Responder, arguments: Map<String, Value>) {
 /// It runs on its own thread for the same reason a scan does: a person who
 /// changes their mind halfway through a long list has to be able to say so,
 /// and `cancel` can only be read while this is still going.
+/// Find the groups of identical files in one scan.
+///
+/// This reads content, which a query of the index does not, so it runs on its
+/// own thread and answers `cancel` like a scan does. It opens every file it
+/// reads with the same containment a mutation uses and changes nothing.
+fn hash_candidates(server: &Arc<Server>, responder: Responder, arguments: Map<String, Value>) {
+    let arguments: HashCandidatesArguments = match decode(arguments) {
+        Ok(arguments) => arguments,
+        Err(message) => return fail(&responder, "invalid-arguments", &message),
+    };
+
+    let index_directory = match decode_path(&arguments.index_directory) {
+        Ok(path) => PathBuf::from(OsStr::from_bytes(&path)),
+        Err(message) => return fail(&responder, "invalid-arguments", &message),
+    };
+    let minimum_bytes = match arguments.minimum_bytes.as_deref() {
+        None => 1,
+        Some(value) => match parse_u64(Some(value)) {
+            Some(parsed) => parsed,
+            None => {
+                return fail(
+                    &responder,
+                    "invalid-arguments",
+                    "minimumBytes must be a decimal string",
+                );
+            }
+        },
+    };
+    let under_path = match arguments.under_path.as_deref() {
+        None => None,
+        Some(encoded) => match decode_path(encoded) {
+            Ok(path) => Some(path),
+            Err(message) => return fail(&responder, "invalid-arguments", &message),
+        },
+    };
+
+    if let Err(message) = require_containment() {
+        return fail(&responder, "unsupported-kernel", &message);
+    }
+
+    let connection = match crate::index::open(&index_directory) {
+        Ok(connection) => connection,
+        Err(error) => {
+            return fail(
+                &responder,
+                "internal-error",
+                &format!("The index could not be opened: {error}"),
+            );
+        }
+    };
+    match crate::index::scan_exists(&connection, &arguments.scan_id) {
+        Ok(true) => {}
+        Ok(false) => {
+            return fail(
+                &responder,
+                "unknown-request",
+                "That scan is not in the index. It may have been pruned; run a new scan.",
+            );
+        }
+        Err(error) => {
+            return fail(
+                &responder,
+                "internal-error",
+                &format!("The index could not be read: {error}"),
+            );
+        }
+    }
+
+    let under = match under_path {
+        None => None,
+        Some(path) => match crate::index::subtree_range(&connection, &arguments.scan_id, &path) {
+            // A path the scan never saw is refused by name; no groups would
+            // read as "there are no duplicates under there".
+            Ok(None) => {
+                return fail(
+                    &responder,
+                    "invalid-arguments",
+                    "That path is not in this scan. Scan it before searching it.",
+                );
+            }
+            Ok(range) => range,
+            Err(error) => {
+                return fail(
+                    &responder,
+                    "internal-error",
+                    &format!("The subtree could not be resolved: {error}"),
+                );
+            }
+        },
+    };
+    drop(connection);
+
+    let request = duplicates::Request {
+        scan_id: arguments.scan_id,
+        under,
+        minimum_bytes,
+        maximum_groups: arguments.maximum_groups.unwrap_or(duplicates::MAX_GROUPS),
+        maximum_files_per_group: arguments
+            .maximum_files_per_group
+            .unwrap_or(duplicates::MAX_FILES_PER_GROUP),
+    };
+
+    spawn_cancellable(
+        server,
+        responder,
+        "hash-candidates",
+        SEARCH_ABANDONED,
+        move |responder, cancelled| {
+            // The connection is opened on the worker thread: a rusqlite
+            // connection belongs to the thread that made it.
+            let connection = match crate::index::open(&index_directory) {
+                Ok(connection) => connection,
+                Err(error) => {
+                    return fail(
+                        responder,
+                        "internal-error",
+                        &format!("The index could not be opened: {error}"),
+                    );
+                }
+            };
+            match duplicates::find(&connection, &request, cancelled) {
+                Ok(report) => {
+                    responder.emit("complete", json!({ "result": duplicate_result(&report) }))
+                }
+                Err(error) => fail(
+                    responder,
+                    "internal-error",
+                    &format!("The duplicate search failed: {error}"),
+                ),
+            }
+        },
+    );
+}
+
+fn duplicate_result(report: &duplicates::Report) -> Value {
+    json!({
+        "groups": report
+            .groups
+            .iter()
+            .map(|group| json!({
+                "apparentBytes": group.apparent_bytes.to_string(),
+                "digest": crate::content::hex(&group.digest),
+                "files": group
+                    .files
+                    .iter()
+                    .map(|file| json!({
+                        "path": crate::base64::encode(&file.path),
+                        "device": file.device.to_string(),
+                        "inode": file.inode.to_string(),
+                        "apparentBytes": file.apparent_bytes.to_string(),
+                        "modifiedNanoseconds": file.modified_nanoseconds.to_string(),
+                        "ownerId": file.owner_id.to_string(),
+                        "groupId": file.group_id.to_string(),
+                        "permissions": file.permissions,
+                    }))
+                    .collect::<Vec<Value>>(),
+            }))
+            .collect::<Vec<Value>>(),
+        "complete": report.complete,
+        "warnings": report.warnings,
+        "candidatesRead": report.candidates_read.to_string(),
+        "filesHashed": report.files_hashed.to_string(),
+    })
+}
+
 fn trash(server: &Arc<Server>, responder: Responder, arguments: Map<String, Value>) {
     let arguments: TrashArguments = match decode(arguments) {
         Ok(arguments) => arguments,
@@ -842,12 +1024,18 @@ fn trash(server: &Arc<Server>, responder: Responder, arguments: Map<String, Valu
         return fail(&responder, "unsupported-kernel", &message);
     }
 
-    spawn_mutation(server, responder, "trash", move |responder, cancelled| {
-        report_action(
-            responder,
-            actions::run_trash(&request, &mut reporter(responder), cancelled),
-        );
-    });
+    spawn_cancellable(
+        server,
+        responder,
+        "trash",
+        ACTION_ABANDONED,
+        move |responder, cancelled| {
+            report_action(
+                responder,
+                actions::run_trash(&request, &mut reporter(responder), cancelled),
+            );
+        },
+    );
 }
 
 /// Remove every reviewed target permanently.
@@ -863,12 +1051,18 @@ fn erase(server: &Arc<Server>, responder: Responder, arguments: Map<String, Valu
     if let Err(message) = require_containment() {
         return fail(&responder, "unsupported-kernel", &message);
     }
-    spawn_mutation(server, responder, "erase", move |responder, cancelled| {
-        report_action(
-            responder,
-            actions::run_erase(&request, &mut reporter(responder), cancelled),
-        );
-    });
+    spawn_cancellable(
+        server,
+        responder,
+        "erase",
+        ACTION_ABANDONED,
+        move |responder, cancelled| {
+            report_action(
+                responder,
+                actions::run_erase(&request, &mut reporter(responder), cancelled),
+            );
+        },
+    );
 }
 
 /// Empty every directory that really is a Trash.
@@ -884,10 +1078,11 @@ fn empty_trash(server: &Arc<Server>, responder: Responder, arguments: Map<String
     if let Err(message) = require_containment() {
         return fail(&responder, "unsupported-kernel", &message);
     }
-    spawn_mutation(
+    spawn_cancellable(
         server,
         responder,
         "empty-trash",
+        ACTION_ABANDONED,
         move |responder, cancelled| {
             report_action(
                 responder,
@@ -922,12 +1117,18 @@ fn restore(server: &Arc<Server>, responder: Responder, arguments: Map<String, Va
         journal_directory,
         journal_id: arguments.journal_id,
     };
-    spawn_mutation(server, responder, "restore", move |responder, cancelled| {
-        report_action(
-            responder,
-            actions::run_restore(&request, &mut reporter(responder), cancelled),
-        );
-    });
+    spawn_cancellable(
+        server,
+        responder,
+        "restore",
+        ACTION_ABANDONED,
+        move |responder, cancelled| {
+            report_action(
+                responder,
+                actions::run_restore(&request, &mut reporter(responder), cancelled),
+            );
+        },
+    );
 }
 
 fn require_containment() -> Result<(), String> {
@@ -944,8 +1145,13 @@ fn require_containment() -> Result<(), String> {
 /// It runs off the reading thread for the same reason a scan does: somebody who
 /// changes their mind halfway through a long list has to be able to say so, and
 /// `cancel` can only be read while this is still going.
-fn spawn_mutation<F>(server: &Arc<Server>, responder: Responder, operation: &str, work: F)
-where
+fn spawn_cancellable<F>(
+    server: &Arc<Server>,
+    responder: Responder,
+    operation: &str,
+    abandoned: &'static str,
+    work: F,
+) where
     F: FnOnce(&Responder, &AtomicBool) + Send + 'static,
 {
     let cancelled = Arc::new(AtomicBool::new(false));
@@ -964,17 +1170,20 @@ where
             work(&responder, &cancelled);
         }));
         if outcome.is_err() {
-            fail(
-                &responder,
-                "internal-error",
-                "The action failed unexpectedly and was abandoned. The journal holds what it \
-                 recorded before that point.",
-            );
+            fail(&responder, "internal-error", abandoned);
         }
         registry(&owned).remove(&request_id);
     });
     server.workers.lock().expect("workers").push(worker);
 }
+
+/// What a client reads when a worker panicked rather than settling its own
+/// request. A mutation's journal is the thing a person needs pointed at.
+const ACTION_ABANDONED: &str = "The action failed unexpectedly and was abandoned. The journal holds what it recorded \
+     before that point.";
+
+const SEARCH_ABANDONED: &str = "The search failed unexpectedly and was abandoned. Nothing was read beyond that point and \
+     no file was changed.";
 
 fn report_action(
     responder: &Responder,
@@ -1595,12 +1804,65 @@ mod tests {
                 "cancel",
                 "scan",
                 "query-index",
+                "hash-candidates",
                 "trash",
                 "erase",
                 "empty-trash",
                 "restore",
                 "journal-reconcile"
             ])
+        );
+    }
+
+    #[test]
+    fn hash_candidates_answers_with_the_groups_it_found() {
+        let sandbox = Sandbox::new("protocol-duplicates");
+        sandbox.directory(b"index");
+        std::fs::write(sandbox.path().join("a"), vec![5u8; 200_000]).unwrap();
+        std::fs::write(sandbox.path().join("b"), vec![5u8; 200_000]).unwrap();
+        std::fs::write(sandbox.path().join("c"), vec![6u8; 200_000]).unwrap();
+        let index = sandbox.path().join("index");
+        let index_bytes = index.as_os_str().as_bytes();
+
+        let scan = session(
+            &[scan_request("scan-1", &sandbox.bytes(), index_bytes)],
+            |events| terminal(events, "scan-1"),
+        );
+        let scan_id = scan.last().unwrap()["result"]["scanId"]
+            .as_str()
+            .expect("a scan ID")
+            .to_owned();
+
+        let events = session(
+            &[format!(
+                "{{\"protocolVersion\":1,\"requestId\":\"dup-1\",\
+                  \"operation\":\"hash-candidates\",\
+                  \"arguments\":{{\"scanId\":\"{scan_id}\",\"indexDirectory\":\"{}\"}}}}\n",
+                crate::base64::encode(index_bytes),
+            )],
+            |events| terminal(events, "dup-1"),
+        );
+
+        let complete = events
+            .iter()
+            .find(|event| event["event"] == "complete")
+            .expect("the search completes");
+        assert_eq!(complete["result"]["complete"], true);
+        let groups = complete["result"]["groups"].as_array().expect("groups");
+        assert_eq!(groups.len(), 1, "only a and b hold the same bytes");
+        assert_eq!(groups[0]["apparentBytes"], "200000");
+        assert_eq!(groups[0]["files"].as_array().unwrap().len(), 2);
+        assert_eq!(
+            groups[0]["digest"].as_str().expect("a digest").len(),
+            64,
+            "a digest reads as hexadecimal, not as an array of numbers",
+        );
+        // Paths are base64 bytes on the wire, never display text.
+        assert!(
+            !groups[0]["files"][0]["path"]
+                .as_str()
+                .unwrap()
+                .contains('/')
         );
     }
 
