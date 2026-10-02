@@ -9,6 +9,7 @@ import type { ScanService } from "../application/scan.js";
 import type { SnapshotService } from "../application/snapshots.js";
 import type { Alert, RawPath, Warning } from "../domain/models.js";
 import type { NotificationOutcome } from "../ports/notifications.js";
+import type { TimerService } from "../application/timer.js";
 import type { Accounting } from "../ports/scan.js";
 import type { RetentionLimits } from "../ports/snapshots.js";
 import type { CliOutput } from "./parser.js";
@@ -89,6 +90,7 @@ export interface CliContext {
   readonly signals: InterruptSource;
   /** Absent where nothing can show a notification. */
   readonly notifications?: AlertNotifications;
+  readonly timer?: TimerService;
   /**
    * What went wrong before any command ran — a configuration file that could
    * not be applied, most of all. A command that lists findings has to say so:
