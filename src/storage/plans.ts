@@ -26,6 +26,9 @@ const PLAN_SUFFIX = ".json";
 /** Bumped when the stored shape changes, so an old plan is skipped, not guessed at. */
 export const PLAN_VERSION = 1;
 
+/** The longest expiry `cleanup.plan_expiry_minutes` can configure. */
+const MAX_EXPIRY_MILLISECONDS = 1440 * 60_000;
+
 /**
  * Reviewed plans on disk, one JSON file each, under `$XDG_STATE_HOME`.
  *
@@ -200,11 +203,35 @@ function decodePlan(document: unknown): ActionPlan | undefined {
     return undefined;
   }
 
+  const createdAt = instant(document.createdAt);
+  const expiresAt = instant(document.expiresAt);
+  const window = Date.parse(expiresAt) - Date.parse(createdAt);
+  if (window <= 0 || window > MAX_EXPIRY_MILLISECONDS) {
+    return undefined;
+  }
+
+  const decodedEntries = Array.isArray(entries) ? entries.map(decodeEntry) : undefined;
+  if (operation !== "manager" && (decodedEntries === undefined || decodedEntries.length === 0)) {
+    return undefined;
+  }
+  if (decodedEntries !== undefined) {
+    const total = decodedEntries.reduce((sum, entry) => sum + entry.reviewedBytes, 0n);
+    if (parseDecimalBytes(text(document.selectedBytes)) !== total) {
+      return undefined;
+    }
+    if (
+      document.exactItemCount !== undefined &&
+      parseDecimalBytes(text(document.exactItemCount)) !== BigInt(decodedEntries.length)
+    ) {
+      return undefined;
+    }
+  }
+
   const plan: ActionPlan = {
     id: text(document.id),
     operation,
-    createdAt: text(document.createdAt),
-    expiresAt: text(document.expiresAt),
+    createdAt,
+    expiresAt,
     providerId: text(document.providerId),
     ...(document.findingId === undefined ? {} : { findingId: text(document.findingId) }),
     scopeSummary: text(document.scopeSummary),
@@ -216,7 +243,7 @@ function decodePlan(document: unknown): ActionPlan | undefined {
       ? {}
       : { exactItemCount: parseDecimalBytes(text(document.exactItemCount)) }),
     selectedBytes: parseDecimalBytes(text(document.selectedBytes)),
-    ...(Array.isArray(entries) ? { entries: entries.map(decodeEntry) } : {}),
+    ...(decodedEntries === undefined ? {} : { entries: decodedEntries }),
     ...(document.managerScope === undefined ? {} : { managerScope: text(document.managerScope) }),
     ...(document.regenerationCost === undefined
       ? {}
@@ -243,7 +270,7 @@ function decodeEntry(value: unknown): PlannedEntry {
     device: parseDecimalBytes(text(expected.device)),
     inode: parseDecimalBytes(text(expected.inode)),
     mountId: text(expected.mountId),
-    kind: text(expected.kind) as EntryFingerprint["kind"],
+    kind: entryKind(expected.kind),
     apparentBytes: parseDecimalBytes(text(expected.apparentBytes)),
     modifiedNanoseconds: parseDecimalBytes(text(expected.modifiedNanoseconds)),
   };
@@ -252,6 +279,26 @@ function decodeEntry(value: unknown): PlannedEntry {
     expected: fingerprint,
     reviewedBytes: parseDecimalBytes(text(value.reviewedBytes)),
   };
+}
+
+const ENTRY_KINDS: readonly EntryFingerprint["kind"][] = ["file", "directory", "symlink"];
+
+function entryKind(value: unknown): EntryFingerprint["kind"] {
+  const kind = text(value) as EntryFingerprint["kind"];
+  if (!ENTRY_KINDS.includes(kind)) {
+    throw new RangeError("A stored plan entry names a kind Disktop never plans");
+  }
+  return kind;
+}
+
+const INSTANT = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d{1,3})?Z$/;
+
+function instant(value: unknown): string {
+  const stored = text(value);
+  if (!INSTANT.test(stored) || Number.isNaN(Date.parse(stored))) {
+    throw new RangeError("A stored plan time is not an instant");
+  }
+  return stored;
 }
 
 /** A stored hash that is not a hash is a stored plan this build will not read. */

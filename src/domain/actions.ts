@@ -316,7 +316,8 @@ export function buildPlan(input: PlanInput): ActionPlan {
  * item by item and applied to whatever is there now.
  */
 export function isExpired(plan: ActionPlan, now: Date): boolean {
-  return now.getTime() >= Date.parse(plan.expiresAt);
+  const expiry = Date.parse(plan.expiresAt);
+  return Number.isNaN(expiry) || now.getTime() >= expiry;
 }
 
 /**
