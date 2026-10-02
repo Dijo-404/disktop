@@ -234,6 +234,16 @@ pub fn run_dedup_hardlink(
             "The file being kept is not a regular file, so nothing can be linked to it.",
         ));
     }
+    if request
+        .targets
+        .iter()
+        .any(|target| target.expected.device != keep_live.device)
+    {
+        return Err(ActionRefusal::new(
+            "different-filesystem",
+            "Not every file in this group is on the same filesystem as the one being kept, so a hardlink cannot join them.",
+        ));
+    }
 
     let keep_descriptor = sys::openat_read_no_symlinks(keep_parent.descriptor(), &keep_parent.name)
         .map_err(|error| {

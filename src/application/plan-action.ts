@@ -255,6 +255,16 @@ export function createPlanService(dependencies: PlanDependencies): PlanService {
         entries.push(toEntry(path, facts, measured.get(path.bytesBase64)));
       }
 
+      if (
+        request.operation === "dedup-hardlink" &&
+        new Set(entries.map((entry) => entry.expected.device)).size > 1
+      ) {
+        return refuse(
+          "invalid-plan",
+          "These files are not on the same filesystem, so a hardlink cannot join them.",
+        );
+      }
+
       const ruleHash =
         subject.findingId === undefined || dependencies.ruleHashFor === undefined
           ? undefined
