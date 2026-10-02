@@ -426,6 +426,29 @@ fn hardlink_one(
             );
         }
     };
+    let directory = parent_path(&target.path);
+    let record = StagingRecord {
+        journal,
+        journal_id,
+        position,
+        directory: &directory,
+    };
+    if let Err(error) = record.record_identity(
+        &staging,
+        &Identity {
+            device: keep.metadata.device,
+            inode: keep.metadata.inode,
+        },
+    ) {
+        let _ = sys::unlinkat(parent.descriptor(), &staging, false);
+        return settle(
+            journal,
+            journal_id,
+            position,
+            target,
+            refuse("journal-write-failed", error.to_string(), Outcome::Failed),
+        );
+    }
 
     // After this the reviewed name holds the kept inode and the staging name
     // holds the old one. The name never points at nothing in between.
@@ -436,6 +459,7 @@ fn hardlink_one(
         &parent.name,
     ) {
         let _ = sys::unlinkat(parent.descriptor(), &staging, false);
+        record.forget();
         let (code, message) = match error.raw_os_error() {
             Some(libc::EINVAL) | Some(libc::ENOSYS) => (
                 "unsupported-filesystem",
@@ -464,6 +488,7 @@ fn hardlink_one(
     // Removing the staging name releases the old inode, if this was its last
     // name. That is the step this operation cannot take back.
     let leftover = sys::unlinkat(parent.descriptor(), &staging, false).is_err();
+    record.forget();
 
     // Removing one of several names to an inode frees nothing; only the last
     // one does. Reporting the plan's number either way would claim space back
@@ -799,7 +824,13 @@ fn compress_one(
         );
     }
 
-    let staged = match stage_archive(&parent, destination, &live, &archive_name) {
+    let staging = StagingRecord {
+        journal,
+        journal_id,
+        position,
+        directory: &destination_path,
+    };
+    let staged = match stage_archive(&parent, destination, &live, &archive_name, &staging) {
         Ok(staged) => staged,
         Err((code, message)) => {
             return settle(
@@ -812,8 +843,12 @@ fn compress_one(
         }
     };
 
-    if let Err(error) = sys::renameat_no_replace(destination, &staged, destination, &archive_name) {
+    let publish = sys::renameat_no_replace(destination, &staged, destination, &archive_name);
+    if publish.is_err() {
         let _ = sys::unlinkat(destination, &staged, false);
+    }
+    staging.forget();
+    if let Err(error) = publish {
         let (code, message) = match error.raw_os_error() {
             Some(libc::EEXIST) => (
                 "destination-exists",
@@ -861,6 +896,7 @@ fn stage_archive(
     destination: libc::c_int,
     live: &sys::Metadata,
     archive_name: &[u8],
+    record: &StagingRecord<'_>,
 ) -> Result<Vec<u8>, (&'static str, String)> {
     for attempt in 0..64u32 {
         let mut staging = archive_name.to_vec();
@@ -870,6 +906,8 @@ fn stage_archive(
         if sys::target_exists(destination, &staging) {
             continue;
         }
+        let staged_name = staging.clone();
+        let mut on_created = |descriptor| record.record(&staged_name, descriptor);
 
         // An archive holds everything that was inside the source, including
         // whatever was private in there, so it takes Disktop's own private mode
@@ -884,6 +922,7 @@ fn stage_archive(
                 destination,
                 &staging,
                 PRIVATE_FILE_MODE,
+                &mut on_created,
             )
             .and_then(|written| {
                 // Read back the way somebody recovering from it would, and
@@ -907,17 +946,23 @@ fn stage_archive(
         } else {
             let source = sys::openat_read_no_symlinks(parent.descriptor(), &parent.name)
                 .map_err(describe_copy)?;
-            let result = archive::compress_file(source, destination, &staging, PRIVATE_FILE_MODE)
-                .and_then(|written| {
-                    let recovered = archive::verify_file(destination, &staging)?;
-                    if recovered != written {
-                        return Err(std::io::Error::new(
-                            std::io::ErrorKind::InvalidData,
-                            "the archive did not read back as the bytes that went into it",
-                        ));
-                    }
-                    Ok(())
-                });
+            let result = archive::compress_file(
+                source,
+                destination,
+                &staging,
+                PRIVATE_FILE_MODE,
+                &mut on_created,
+            )
+            .and_then(|written| {
+                let recovered = archive::verify_file(destination, &staging)?;
+                if recovered != written {
+                    return Err(std::io::Error::new(
+                        std::io::ErrorKind::InvalidData,
+                        "the archive did not read back as the bytes that went into it",
+                    ));
+                }
+                Ok(())
+            });
             sys::close(source);
             result
         };
@@ -926,6 +971,7 @@ fn stage_archive(
             Ok(()) => Ok(staging),
             Err(error) => {
                 let _ = sys::unlinkat(destination, &staging, false);
+                record.forget();
                 Err(describe_copy(error))
             }
         };
@@ -1040,7 +1086,13 @@ fn move_one(
         );
     }
 
-    let staged = match stage_copy(&parent, context.destination, &live) {
+    let staging = StagingRecord {
+        journal,
+        journal_id,
+        position,
+        directory: context.destination_path,
+    };
+    let staged = match stage_copy(&parent, context.destination, &live, &staging) {
         Ok(staged) => staged,
         Err((code, message)) => {
             return settle(
@@ -1056,13 +1108,17 @@ fn move_one(
     // Publishing is a rename that refuses to overwrite. Between the check
     // above and this, somebody could have created the name; this is what
     // actually decides, and it decides without destroying what they made.
-    if let Err(error) = sys::renameat_no_replace(
+    let publish = sys::renameat_no_replace(
         context.destination,
         &staged,
         context.destination,
         &parent.name,
-    ) {
+    );
+    if publish.is_err() {
         discard_staged(context.destination, &staged, live.kind);
+    }
+    staging.forget();
+    if let Err(error) = publish {
         let (code, message) = match error.raw_os_error() {
             Some(libc::EEXIST) | Some(libc::ENOTEMPTY) => (
                 "destination-exists",
@@ -1119,26 +1175,68 @@ fn room_for(destination_path: &[u8], needed: u64) -> Result<(), (&'static str, S
     ))
 }
 
+struct StagingRecord<'a> {
+    journal: &'a Journal,
+    journal_id: &'a str,
+    position: u64,
+    directory: &'a [u8],
+}
+
+impl StagingRecord<'_> {
+    fn record(&self, name: &[u8], descriptor: libc::c_int) -> std::io::Result<()> {
+        let metadata = sys::metadata_of(descriptor)?;
+        self.record_identity(
+            name,
+            &Identity {
+                device: metadata.device,
+                inode: metadata.inode,
+            },
+        )
+    }
+
+    fn record_identity(&self, name: &[u8], identity: &Identity) -> std::io::Result<()> {
+        let mut path = self.directory.to_vec();
+        path.push(b'/');
+        path.extend_from_slice(name);
+        self.journal
+            .record_staging(self.journal_id, self.position, &path, identity)
+            .map_err(|error| {
+                std::io::Error::other(format!("what was staged could not be journalled: {error}"))
+            })
+    }
+
+    fn forget(&self) {
+        let _ = self.journal.clear_staging(self.journal_id, self.position);
+    }
+}
+
 /// Copy one reviewed target under a staging name, returning that name.
 fn stage_copy(
     parent: &guard::ResolvedParent,
     destination: libc::c_int,
     live: &sys::Metadata,
+    staging: &StagingRecord<'_>,
 ) -> Result<Vec<u8>, (&'static str, String)> {
     for attempt in 0..64u32 {
-        let mut staging = parent.name.clone();
-        staging.extend_from_slice(
+        let mut name = parent.name.clone();
+        name.extend_from_slice(
             format!(".disktop-partial-{}-{attempt}", std::process::id()).as_bytes(),
         );
-        if sys::target_exists(destination, &staging) {
+        if sys::target_exists(destination, &name) {
             continue;
         }
 
         let outcome = if live.kind == EntryKind::Directory {
             let source = sys::open_directory_no_symlinks(parent.descriptor(), &parent.name)
                 .map_err(describe_copy)?;
-            let result =
-                transfer::copy_tree(source, destination, &staging, live.permissions).map(|_| ());
+            let result = transfer::copy_tree(
+                source,
+                destination,
+                &name,
+                live.permissions,
+                &mut |descriptor| staging.record(&name, descriptor),
+            )
+            .map(|_| ());
             sys::close(source);
             result
         } else {
@@ -1147,9 +1245,10 @@ fn stage_copy(
             let result = transfer::copy_file(
                 source,
                 destination,
-                &staging,
+                &name,
                 live.permissions,
                 Some(live.modified_nanoseconds),
+                &mut |descriptor| staging.record(&name, descriptor),
             )
             .map(|_| ());
             sys::close(source);
@@ -1157,9 +1256,10 @@ fn stage_copy(
         };
 
         return match outcome {
-            Ok(()) => Ok(staging),
+            Ok(()) => Ok(name),
             Err(error) => {
-                discard_staged(destination, &staging, live.kind);
+                discard_staged(destination, &name, live.kind);
+                staging.forget();
                 Err(describe_copy(error))
             }
         };
@@ -2086,6 +2186,59 @@ fn empty_one(
 }
 
 /// Remove everything inside a directory, leaving the directory itself.
+/// Release what interrupted actions staged and never published.
+///
+/// Only a name still holding the exact inode the helper journalled when it
+/// created it is removed; anything else is left where it is and named.
+pub fn release_abandoned_staging(journal: &Journal) -> rusqlite::Result<u64> {
+    let mut released = 0;
+    for left in journal.abandoned_staging()? {
+        let display = String::from_utf8_lossy(&left.path).into_owned();
+        let note = match release_one(&left) {
+            Released::Removed => {
+                released += 1;
+                "What Disktop had staged for this item was removed; it was never published."
+                    .to_owned()
+            }
+            Released::Gone => {
+                "Nothing remains under the name Disktop staged this item at.".to_owned()
+            }
+            Released::Kept => format!(
+                "Something may remain at {display}; it is not what Disktop staged, so it was left in place."
+            ),
+        };
+        journal.resolve_staging(&left.action_id, left.position, &note)?;
+    }
+    Ok(released)
+}
+
+enum Released {
+    Removed,
+    Gone,
+    Kept,
+}
+
+fn release_one(left: &crate::journal::AbandonedStaging) -> Released {
+    let Some(identity) = left.identity else {
+        return Released::Kept;
+    };
+    let Ok(parent) = guard::resolve_parent(&left.path) else {
+        return Released::Kept;
+    };
+    match sys::metadata_at(parent.descriptor(), &parent.name) {
+        Err(error) if error.raw_os_error() == Some(libc::ENOENT) => Released::Gone,
+        Err(_) => Released::Kept,
+        Ok(live) if live.device == identity.device && live.inode == identity.inode => {
+            if remove_entry(parent.descriptor(), &parent.name, live.kind).is_ok() {
+                Released::Removed
+            } else {
+                Released::Kept
+            }
+        }
+        Ok(_) => Released::Kept,
+    }
+}
+
 fn empty_directory(parent: libc::c_int, name: &[u8]) -> std::io::Result<()> {
     // `remove_children` takes the descriptor and closes it with its stream.
     remove_children(sys::open_directory_no_symlinks(parent, name)?)

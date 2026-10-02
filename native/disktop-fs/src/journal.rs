@@ -136,6 +136,13 @@ pub struct ActionRecord {
     pub items: Vec<ItemRecord>,
 }
 
+pub struct AbandonedStaging {
+    pub action_id: String,
+    pub position: u64,
+    pub path: Vec<u8>,
+    pub identity: Option<Identity>,
+}
+
 pub struct JournalPage {
     pub records: Vec<ActionRecord>,
     pub next_cursor: Option<String>,
@@ -173,6 +180,7 @@ impl Journal {
         // journal write that fails is an item whose outcome nobody recorded.
         connection.busy_timeout(BUSY_TIMEOUT)?;
         connection.execute_batch(SCHEMA)?;
+        migrate(&connection)?;
         // The journal names every path Disktop has acted on, so it is private
         // to the user who owns it whichever process created it first.
         make_private(&path, 0o600);
@@ -245,6 +253,76 @@ impl Journal {
                 identity.map(|identity| clamp(identity.device)),
                 identity.map(|identity| clamp(identity.inode)),
             ],
+        )?;
+        Ok(())
+    }
+
+    /// Name what an item staged, so a crash before it is published can be found.
+    pub fn record_staging(
+        &self,
+        action_id: &str,
+        position: u64,
+        path: &[u8],
+        identity: &Identity,
+    ) -> rusqlite::Result<()> {
+        self.connection.execute(
+            "UPDATE action_item SET staging = ?3, staging_device = ?4, staging_inode = ?5
+              WHERE action_id = ?1 AND position = ?2",
+            params![
+                action_id,
+                clamp(position),
+                path,
+                clamp(identity.device),
+                clamp(identity.inode)
+            ],
+        )?;
+        Ok(())
+    }
+
+    pub fn clear_staging(&self, action_id: &str, position: u64) -> rusqlite::Result<()> {
+        self.connection.execute(
+            "UPDATE action_item SET staging = NULL, staging_device = NULL, staging_inode = NULL
+              WHERE action_id = ?1 AND position = ?2",
+            params![action_id, clamp(position)],
+        )?;
+        Ok(())
+    }
+
+    /// Staged outputs whose item reconciliation could not settle.
+    pub fn abandoned_staging(&self) -> rusqlite::Result<Vec<AbandonedStaging>> {
+        let mut statement = self.connection.prepare(
+            "SELECT action_id, position, staging, staging_device, staging_inode FROM action_item
+              WHERE staging IS NOT NULL AND outcome = 'uncertain' ORDER BY action_id, position",
+        )?;
+        statement
+            .query_map([], |row| {
+                let device: Option<i64> = row.get(3)?;
+                let inode: Option<i64> = row.get(4)?;
+                Ok(AbandonedStaging {
+                    action_id: row.get(0)?,
+                    position: unclamp(row.get(1)?),
+                    path: row.get(2)?,
+                    identity: device.zip(inode).map(|(device, inode)| Identity {
+                        device: unclamp(device),
+                        inode: unclamp(inode),
+                    }),
+                })
+            })?
+            .collect()
+    }
+
+    pub fn resolve_staging(
+        &self,
+        action_id: &str,
+        position: u64,
+        note: &str,
+    ) -> rusqlite::Result<()> {
+        self.connection.execute(
+            "UPDATE action_item
+                SET staging = NULL, staging_device = NULL, staging_inode = NULL,
+                    reason = CASE WHEN reason IS NULL THEN ?3 ELSE reason || ' ' || ?3 END
+              WHERE action_id = ?1 AND position = ?2",
+            params![action_id, clamp(position), note],
         )?;
         Ok(())
     }
@@ -519,11 +597,52 @@ CREATE TABLE IF NOT EXISTS action_item (
   bytes INTEGER NOT NULL DEFAULT 0,
   moved_device INTEGER,
   moved_inode INTEGER,
+  staging BLOB,
+  staging_device INTEGER,
+  staging_inode INTEGER,
   PRIMARY KEY (action_id, position)
 );
 
 CREATE INDEX IF NOT EXISTS action_started ON action(started_at DESC, id DESC);
 ";
+
+/// Add the columns a journal written by an earlier build does not have.
+fn migrate(connection: &Connection) -> rusqlite::Result<()> {
+    let columns: Vec<String> = connection
+        .prepare("PRAGMA table_info(action_item)")?
+        .query_map([], |row| row.get(1))?
+        .collect::<rusqlite::Result<Vec<String>>>()?;
+    for (name, kind) in [
+        ("staging", "BLOB"),
+        ("staging_device", "INTEGER"),
+        ("staging_inode", "INTEGER"),
+    ] {
+        if !columns.iter().any(|column| column == name) {
+            connection
+                .execute_batch(&format!("ALTER TABLE action_item ADD COLUMN {name} {kind}"))?;
+        }
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+impl Journal {
+    pub fn connection_for_tests(&self) -> &Connection {
+        &self.connection
+    }
+}
+
+#[cfg(test)]
+pub mod tests_support {
+    use super::*;
+
+    pub fn abandon(journal: &Journal, id: &str) {
+        journal
+            .connection
+            .execute("UPDATE action SET owner_pid = 0 WHERE id = ?1", params![id])
+            .unwrap();
+    }
+}
 
 /// Whether some other live process holds this record open. A process ID the
 /// kernel has since handed to something else reads as alive, which only delays
@@ -612,6 +731,114 @@ fn decode_cursor(cursor: &str) -> rusqlite::Result<(i64, String)> {
 mod tests {
     use super::*;
     use crate::testing::Sandbox;
+
+    const OLD_SCHEMA: &str = "
+CREATE TABLE action (id TEXT PRIMARY KEY, plan_id TEXT NOT NULL, operation TEXT NOT NULL,
+  started_at INTEGER NOT NULL, finished_at INTEGER, state TEXT NOT NULL,
+  completed INTEGER NOT NULL DEFAULT 0, skipped INTEGER NOT NULL DEFAULT 0,
+  failed INTEGER NOT NULL DEFAULT 0, selected_bytes INTEGER NOT NULL DEFAULT 0,
+  trashed_bytes INTEGER NOT NULL DEFAULT 0, free_before INTEGER, free_after INTEGER,
+  owner_pid INTEGER NOT NULL DEFAULT 0);
+CREATE TABLE action_item (action_id TEXT NOT NULL REFERENCES action(id) ON DELETE CASCADE,
+  position INTEGER NOT NULL, path BLOB NOT NULL, destination BLOB, outcome TEXT NOT NULL,
+  reason TEXT, bytes INTEGER NOT NULL DEFAULT 0, moved_device INTEGER, moved_inode INTEGER,
+  PRIMARY KEY (action_id, position));
+";
+
+    use super::tests_support::abandon;
+
+    #[test]
+    fn a_journal_written_before_staging_was_recorded_opens_and_records_it() {
+        let sandbox = Sandbox::new("journal-migrate");
+        let connection = Connection::open(journal_path(sandbox.path())).unwrap();
+        connection.execute_batch(OLD_SCHEMA).unwrap();
+        drop(connection);
+
+        let journal = Journal::open(sandbox.path()).unwrap();
+        let id = journal
+            .begin("plan-0123456789ab", "copy-move", None)
+            .unwrap();
+        journal
+            .record_intent(&id, 0, b"/src/a", Some(b"/dst/a"))
+            .unwrap();
+        journal
+            .record_staging(
+                &id,
+                0,
+                b"/dst/a.disktop-partial-1-0",
+                &Identity {
+                    device: 1,
+                    inode: 2,
+                },
+            )
+            .unwrap();
+    }
+
+    #[test]
+    fn only_an_uncertain_item_with_a_staged_name_is_abandoned() {
+        let sandbox = Sandbox::new("journal-abandoned");
+        let journal = Journal::open(sandbox.path()).unwrap();
+        let id = journal
+            .begin("plan-0123456789ab", "copy-move", None)
+            .unwrap();
+        journal
+            .record_intent(&id, 0, b"/src/a", Some(b"/dst/a"))
+            .unwrap();
+        journal
+            .record_staging(
+                &id,
+                0,
+                b"/dst/a.disktop-partial-1-0",
+                &Identity {
+                    device: 1,
+                    inode: 2,
+                },
+            )
+            .unwrap();
+        journal
+            .record_intent(&id, 1, b"/src/b", Some(b"/dst/b"))
+            .unwrap();
+        journal
+            .record_staging(
+                &id,
+                1,
+                b"/dst/b.disktop-partial-1-1",
+                &Identity {
+                    device: 1,
+                    inode: 3,
+                },
+            )
+            .unwrap();
+        journal.clear_staging(&id, 1).unwrap();
+        assert!(
+            journal.abandoned_staging().unwrap().is_empty(),
+            "nothing is abandoned while its owner runs"
+        );
+
+        abandon(&journal, &id);
+        journal.reconcile().unwrap();
+        let abandoned = journal.abandoned_staging().unwrap();
+        assert_eq!(abandoned.len(), 1);
+        assert_eq!(abandoned[0].path, b"/dst/a.disktop-partial-1-0");
+        assert_eq!(
+            abandoned[0].identity,
+            Some(Identity {
+                device: 1,
+                inode: 2
+            })
+        );
+
+        journal.resolve_staging(&id, 0, "released").unwrap();
+        assert!(journal.abandoned_staging().unwrap().is_empty());
+        let record = journal.get(&id).unwrap().unwrap();
+        assert!(
+            record.items[0]
+                .reason
+                .as_deref()
+                .unwrap()
+                .contains("released")
+        );
+    }
 
     #[test]
     fn a_finished_action_reads_back_with_its_items() {
