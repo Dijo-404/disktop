@@ -1,3 +1,4 @@
+import type { OwnerShare } from "../application/explore.js";
 import { describeCommand, type ManagerScope } from "../domain/managers.js";
 import type { Alert, Filesystem, IndexedEntry, StorageDevice, Warning } from "../domain/models.js";
 import type { DecidedGroup } from "../application/duplicates.js";
@@ -167,6 +168,15 @@ export function duplicateLines(
     }
   }
   return lines;
+}
+
+export function ownerLines(owners: readonly OwnerShare[], units: Units): string[] {
+  return owners.map(
+    (owner) =>
+      `${formatBytes(owner.allocatedBytes, units).padStart(12)}  ${String(owner.entries).padStart(10)} files  ${
+        owner.name === undefined ? `user ${owner.ownerId}` : `${safeLine(owner.name)} (${owner.ownerId})`
+      }`,
+  );
 }
 
 export function typeTotalLines(totals: readonly TypeTotal[], units: Units): string[] {

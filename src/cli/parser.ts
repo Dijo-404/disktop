@@ -82,6 +82,7 @@ export const COMMANDS: readonly CommandSpec[] = [
       { name: "limit", summary: "Entries per page, up to 1000", kind: "value", placeholder: "COUNT" },
       { name: "cursor", summary: "Continue from a previous page", kind: "value", placeholder: "CURSOR" },
       { name: "type-totals", summary: "Also report bytes per file extension", kind: "flag" },
+      { name: "owners", summary: "Also report bytes per owning user", kind: "flag" },
     ],
     implemented: true,
   },
