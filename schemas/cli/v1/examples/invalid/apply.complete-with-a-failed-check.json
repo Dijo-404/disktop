@@ -1,0 +1,39 @@
+{
+  "schemaVersion": "1",
+  "command": "clean apply",
+  "generatedAt": "2026-10-01T08:42:03.551Z",
+  "status": "complete",
+  "exitCode": 0,
+  "data": {
+    "result": {
+      "planId": "plan-20261001T084119004Z-9f2c1ab0",
+      "journalId": "act-1759305679004-9f2c1ab07d4e5610",
+      "state": "complete",
+      "completed": "1",
+      "skipped": "0",
+      "failed": "0",
+      "selectedBytes": "7314112512",
+      "bytesMovedToTrash": "7314112512",
+      "freeBytesBefore": "42949672960",
+      "freeBytesAfter": "42949672960",
+      "observedFreeSpaceChange": "0",
+      "undoAvailable": true,
+      "notes": [
+        "A Trash move on the same filesystem usually frees nothing until Trash is emptied.",
+        "Other processes write to the same filesystem, so the observed free-space change is not only this action's doing."
+      ],
+      "verification": [
+        {
+          "check": "source-disposed",
+          "outcome": "failed",
+          "detail": "2 of the reviewed items were not: 1 skipped and 1 failed."
+        },
+        {
+          "check": "free-space-read",
+          "outcome": "passed",
+          "detail": "Free space was read before the first item and after the last."
+        }
+      ]
+    }
+  }
+}

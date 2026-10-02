@@ -87,9 +87,28 @@ into `--path` is impossible.
 
 The default user-file action follows the [freedesktop Trash specification](https://specifications.freedesktop.org/trash/latest/). It uses the home Trash when appropriate, otherwise a validated per-mount Trash location. It reserves unique metadata, records the original raw path safely, and refuses if it cannot establish a safe Trash destination. Moving to Trash on the same filesystem normally moves data without increasing free space. Emptying Trash is its own reviewed, irreversible operation.
 
-Permanent erase, hardlink replacement after release of the old inode, permanent-source move or compression, and some manager actions cannot be undone. Each is fixed in its plan and receives a separate warning. Cross-disk move and compression stage and verify an output before removing or trashing the source. On failure, they preserve the source and report any staged output. Hardlink replacement requires same-mount identical content and compatible ownership and metadata; it warns that later writes are shared.
+Permanent erase, hardlink replacement after release of the old inode, permanent-source move or compression, and some manager actions cannot be undone. Each is fixed in its plan and receives a separate warning. A move or a compress is exactly as reversible as what it does to the source, so `sourceDisposition` is fixed at review time beside the operation itself: `trash` leaves the original recoverable from the journal, and `permanent` makes the whole plan irreversible, because publishing a copy somewhere and then releasing the original's bytes is a permanent removal with an extra step. `src/domain/actions.ts` derives that and the stored plan's own claim is never believed.
+
+Where a move or compress publishes is judged by `classifyDestination`, which is deliberately a different question from `classifyGenericTarget`. A target is something Disktop removes, so it has to be inside a root the user said Disktop may clean. A destination is somewhere Disktop writes, and a cross-disk move means writing outside those roots by definition — `/mnt/archive` is a correct destination and an incorrect target. The allowlist and the mount-root rule therefore do not apply to a destination; the protected system roots, the shared container roots themselves, and Trash and Disktop's own state still do. Cross-disk move and compression stage and verify an output before removing or trashing the source. For a move, the verification is a digest taken over the bytes as they are read compared against a digest of the same bytes read back after an `fsync`. For a compression it is a decompression: the archive is read back the way anybody recovering from it would read it, and the tar stream that comes out is digested and compared against the one that went in — content, not an entry count, because a member rewritten to the same length keeps a count identical. The source is then revalidated once more immediately before it is disposed of, so anything written to it during a copy that ran for a long time stops the disposal rather than being released unreviewed. Either way, "it arrived whole" is a statement rather than a hope. On failure, they preserve the source and remove what they staged. A source that cannot be disposed of after a successful publish is recorded as uncertain, not failed: the action half happened, and calling it a failure would invite a second run into a destination the first one has already filled. Hardlink replacement requires same-mount identical content and compatible ownership and metadata; it warns that later writes are shared. The plan names the copy it keeps rather than leaving it to entry order, because the operation is irreversible and "the first one" is the kind of implicit rule that puts the wrong file's inode on the releasing end of it. The helper proves the content identical by reading both files in full immediately before it links; a digest groups candidates and never authorises the replacement. See [adr/0006](adr/0006-content-identity-and-archive-dependencies.md).
 
 Manager-owned state is changed only through scoped, fixed-argument manager adapters with probe, preview where supported, live preflight, apply, verification, permission mapping, and journal records. A manager may not provide exact item counts or byte savings; the UI must say so. An adapter never substitutes `rm -rf` for a missing manager.
+
+## What an action checked afterwards
+
+Every result carries a list of checks the apply made once the helper had finished. They
+answer a different question from the helper's per-item outcomes: the helper says what it
+did to each target, and this says whether the action as a whole did what the plan
+described, asked from the side the plan is on.
+
+A check that could not run is `unavailable` and never `passed`. "It was fine" and "nobody
+could tell" are different answers and only one of them is evidence, which is the same
+rule the free-space readings and the size bases follow. A `failed` check keeps the result
+off `complete` whatever the helper reported, and `disktop clean apply` exits `3`.
+
+An undo restores the source and stops there. A move or a compression also published
+something, and that output is named in the result and left exactly where it was put:
+removing it is a plan somebody reviews and confirms, not a side effect of undoing
+something else.
 
 ## Privileges and recovery
 

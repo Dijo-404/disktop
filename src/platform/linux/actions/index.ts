@@ -71,7 +71,20 @@ export function createNativeActions(options: NativeActionOptions): ActionPort & 
       const operation = helperOperation(plan);
       const result = await run(
         operation,
-        operation === "empty-trash"
+        operation === "dedup-hardlink"
+          ? hardlinkArguments(plan, journalDirectory)
+          : operation === "copy-move" || operation === "compress"
+          ? {
+              planId: plan.id,
+              journalDirectory,
+              // Carried whether or not the disposition needs it, so the helper
+              // never has to ask for it halfway through an action.
+              homeTrashDirectory,
+              destinationDirectory: requiredDestination(plan).bytesBase64,
+              sourceDisposition: requiredDisposition(plan),
+              targets: (plan.entries ?? []).map(encodeTarget),
+            }
+          : operation === "empty-trash"
           ? {
               planId: plan.id,
               journalDirectory,
@@ -148,12 +161,62 @@ function helperOperation(plan: ActionPlan): string {
       return "erase";
     case "empty-trash":
       return "empty-trash";
+    case "dedup-hardlink":
+      return "dedup-hardlink";
+    case "move":
+      return "copy-move";
+    case "compress":
+      return "compress";
     default:
       throw new CapabilityUnavailable({
         status: "unsupported-kernel",
         explanation: `Disktop cannot carry out a '${plan.operation}' plan yet.`,
       });
   }
+}
+
+/**
+ * The kept copy and the ones that become names for it.
+ *
+ * `keepPath` is one of the plan's own entries, so the fingerprint the helper
+ * revalidates it against is the one that was reviewed rather than one this
+ * adapter made up on the way past.
+ */
+function hardlinkArguments(
+  plan: ActionPlan,
+  journalDirectory: string,
+): Record<string, unknown> {
+  const entries = plan.entries ?? [];
+  const keep = entries.find((entry) => entry.path.bytesBase64 === plan.keepPath?.bytesBase64);
+  if (keep === undefined) {
+    throw new Error("A hardlink plan reached apply without the copy it keeps among its entries");
+  }
+  return {
+    planId: plan.id,
+    journalDirectory,
+    keep: encodeTarget(keep),
+    targets: entries.filter((entry) => entry !== keep).map(encodeTarget),
+  };
+}
+
+/**
+ * The two things a publishing plan fixes, read back out of it.
+ *
+ * They are required by the domain and by the schema, so an absent one is a
+ * plan that was built wrong rather than a choice to make here.
+ */
+function requiredDestination(plan: ActionPlan): { readonly bytesBase64: string } {
+  if (plan.destination === undefined) {
+    throw new Error(`Plan ${plan.id} reached apply without the destination it publishes into`);
+  }
+  return plan.destination;
+}
+
+function requiredDisposition(plan: ActionPlan): "trash" | "permanent" {
+  if (plan.sourceDisposition === undefined) {
+    throw new Error(`Plan ${plan.id} reached apply without saying what becomes of its source`);
+  }
+  return plan.sourceDisposition;
 }
 
 function encodeTarget(entry: PlannedEntry): Record<string, unknown> {
@@ -171,9 +234,17 @@ function encodeTarget(entry: PlannedEntry): Record<string, unknown> {
   };
 }
 
+/**
+ * What the helper reported, as a result.
+ *
+ * The verification list is empty here on purpose: the helper says what it did,
+ * and whether that matched the plan is a question `apply-action.ts` asks from
+ * the side the plan is on.
+ */
 function toResult(result: ReturnType<typeof parseActionResult>): ActionResult {
   return {
     planId: "",
+    verification: [],
     completed: result.completed,
     skipped: result.skipped,
     failed: result.failed,

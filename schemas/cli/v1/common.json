@@ -955,6 +955,27 @@
           "items": {
             "type": "string"
           }
+        },
+        "destination": {
+          "description": "Where a move or compress publishes its output. Present for exactly those two operations and absent for every other, because nothing else publishes anything. Fixed here so apply time cannot choose a different disk.",
+          "$ref": "#/$defs/rawPath"
+        },
+        "sourceDisposition": {
+          "description": "What becomes of the source once the output is verified. 'trash' leaves it recoverable; 'permanent' releases its bytes and makes the whole plan irreversible.",
+          "type": "string",
+          "enum": [
+            "trash",
+            "permanent"
+          ]
+        },
+        "keepPath": {
+          "description": "The copy a hardlink replacement keeps. Always one of this plan's own entries, and present for exactly that operation. It is named rather than inferred from entry order because the operation is irreversible.",
+          "$ref": "#/$defs/rawPath"
+        },
+        "ruleHash": {
+          "description": "The identity of the cleanup rule this plan came from, when it came from one. An apply reads the rule again and hashes it again; a plan whose hash no longer matches was reviewed against a rule that is not the rule in config.toml any more, and is refused.",
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
         }
       },
       "allOf": [
@@ -977,6 +998,93 @@
                 "type": "array",
                 "minItems": 1
               }
+            }
+          }
+        },
+        {
+          "description": "A move or a compress fixes both where it publishes and what becomes of the source; no other operation carries either.",
+          "if": {
+            "type": "object",
+            "properties": {
+              "operation": {
+                "enum": [
+                  "move",
+                  "compress"
+                ]
+              }
+            },
+            "required": [
+              "operation"
+            ]
+          },
+          "then": {
+            "properties": {
+              "destination": {
+                "type": "object"
+              },
+              "sourceDisposition": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "destination",
+              "sourceDisposition"
+            ]
+          },
+          "else": {
+            "properties": {
+              "destination": false,
+              "sourceDisposition": false
+            }
+          }
+        },
+        {
+          "description": "A move or compress that removes its source permanently is irreversible, whatever else it also does.",
+          "if": {
+            "type": "object",
+            "properties": {
+              "sourceDisposition": {
+                "const": "permanent"
+              }
+            },
+            "required": [
+              "sourceDisposition"
+            ]
+          },
+          "then": {
+            "properties": {
+              "reversibility": {
+                "const": "irreversible"
+              }
+            }
+          }
+        },
+        {
+          "description": "A hardlink replacement names the copy it keeps; no other operation keeps anything.",
+          "if": {
+            "type": "object",
+            "properties": {
+              "operation": {
+                "const": "dedup-hardlink"
+              }
+            },
+            "required": [
+              "operation"
+            ]
+          },
+          "then": {
+            "properties": {
+              "keepPath": {
+                "type": "object"
+              }
+            },
+            "required": [
+              "keepPath"
+            ]
+          },
+          "else": {
+            "properties": {
+              "keepPath": false
             }
           }
         }
@@ -1015,7 +1123,8 @@
         "failed",
         "selectedBytes",
         "bytesMovedToTrash",
-        "undoAvailable"
+        "undoAvailable",
+        "verification"
       ],
       "properties": {
         "planId": {
@@ -1062,8 +1171,78 @@
           "items": {
             "type": "string"
           }
+        },
+        "verification": {
+          "description": "What the apply checked once the helper had finished, and what it found. A check that could not run is 'unavailable' and never 'passed': \"it was fine\" and \"nobody could tell\" are different answers, and only one of them is evidence. A failed check means the action did not do what the plan described, and the result's state is never 'complete' when one is present.",
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "check",
+              "outcome",
+              "detail"
+            ],
+            "properties": {
+              "check": {
+                "type": "string",
+                "enum": [
+                  "destination-present",
+                  "source-disposed",
+                  "free-space-read",
+                  "digest-matched"
+                ]
+              },
+              "outcome": {
+                "type": "string",
+                "enum": [
+                  "passed",
+                  "failed",
+                  "unavailable"
+                ]
+              },
+              "detail": {
+                "type": "string",
+                "minLength": 1
+              }
+            }
+          }
         }
-      }
+      },
+      "allOf": [
+        {
+          "description": "A result that failed one of its own checks does not get to call itself complete.",
+          "if": {
+            "type": "object",
+            "properties": {
+              "state": {
+                "const": "complete"
+              }
+            },
+            "required": [
+              "state"
+            ]
+          },
+          "then": {
+            "properties": {
+              "verification": {
+                "type": "array",
+                "items": {
+                  "type": "object",
+                  "properties": {
+                    "outcome": {
+                      "type": "string",
+                      "not": {
+                        "const": "failed"
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      ]
     },
     "journalItem": {
       "type": "object",

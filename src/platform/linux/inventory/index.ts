@@ -1,6 +1,6 @@
 import { readFile, statfs } from "node:fs/promises";
 import type { Capability, Filesystem, RawPath, StorageDevice, Warning } from "../../../domain/models.js";
-import { pathBytes } from "../../../domain/paths.js";
+import { isWithin, pathBytes } from "../../../domain/paths.js";
 import type { InventoryPort, InventoryResult } from "../../../ports/inventory.js";
 import { LSBLK_ARGUMENTS, deviceKindOf, isMemoryBackedDevice, parseLsblk, type BlockDevice } from "./lsblk.js";
 import { filesystemIdOf, parseMountinfo, type MountEntry } from "./mountinfo.js";
@@ -56,7 +56,48 @@ export const linuxInventorySources: InventorySources = {
 };
 
 export function createLinuxInventory(sources: InventorySources = linuxInventorySources): InventoryPort {
-  return { list: () => collect(sources) };
+  return {
+    list: () => collect(sources),
+    mountOptionsFor: (path) => mountOptionsFor(sources, path),
+  };
+}
+
+/**
+ * The options of the deepest mount point containing this path.
+ *
+ * Deepest wins because mounts nest: `/home/example/work` mounted inside `/home`
+ * answers for paths under it, and the options that matter are the ones the
+ * kernel is actually applying to the file.
+ */
+async function mountOptionsFor(
+  sources: InventorySources,
+  path: RawPath,
+): Promise<readonly string[] | undefined> {
+  let mounts: readonly MountEntry[];
+  try {
+    mounts = parseMountinfo(await sources.readMountinfo()).mounts;
+  } catch {
+    return undefined;
+  }
+  if (mounts.length === 0) {
+    return undefined;
+  }
+
+  const target = pathBytes(path);
+  let best: MountEntry | undefined;
+  for (const mount of mounts) {
+    const point = pathBytes(mount.mountPoint);
+    if (!isWithin(point, target)) {
+      continue;
+    }
+    if (best === undefined || point.length > pathBytes(best.mountPoint).length) {
+      best = mount;
+    }
+  }
+  // Options are the mount's own; `superOptions` belong to the superblock and
+  // say the same thing for atime on every filesystem that reports it, so both
+  // are offered and the caller reads whichever names what it is looking for.
+  return best === undefined ? undefined : [...best.options, ...best.superOptions];
 }
 
 async function collect(sources: InventorySources): Promise<InventoryResult> {

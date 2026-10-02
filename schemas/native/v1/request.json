@@ -228,6 +228,86 @@
           }
         }
       }
+    },
+    {
+      "if": {
+        "type": "object",
+        "properties": {
+          "operation": {
+            "const": "hash-candidates"
+          }
+        },
+        "required": [
+          "operation"
+        ]
+      },
+      "then": {
+        "properties": {
+          "arguments": {
+            "$ref": "#/$defs/hashCandidatesArguments"
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "type": "object",
+        "properties": {
+          "operation": {
+            "const": "dedup-hardlink"
+          }
+        },
+        "required": [
+          "operation"
+        ]
+      },
+      "then": {
+        "properties": {
+          "arguments": {
+            "$ref": "#/$defs/dedupHardlinkArguments"
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "type": "object",
+        "properties": {
+          "operation": {
+            "const": "copy-move"
+          }
+        },
+        "required": [
+          "operation"
+        ]
+      },
+      "then": {
+        "properties": {
+          "arguments": {
+            "$ref": "#/$defs/copyMoveArguments"
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "type": "object",
+        "properties": {
+          "operation": {
+            "const": "compress"
+          }
+        },
+        "required": [
+          "operation"
+        ]
+      },
+      "then": {
+        "properties": {
+          "arguments": {
+            "$ref": "#/$defs/compressArguments"
+          }
+        }
+      }
     }
   ],
   "$defs": {
@@ -448,6 +528,158 @@
         },
         "journalId": {
           "$ref": "common.json#/$defs/planId"
+        }
+      }
+    },
+    "hashCandidatesArguments": {
+      "description": "Find the groups of identical files in one finished scan. The helper opens each candidate read-only with the same containment a mutation uses and changes nothing. A query usually runs in a different helper process from the scan that wrote the index, so the directory is named here rather than remembered.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "scanId",
+        "indexDirectory"
+      ],
+      "properties": {
+        "scanId": {
+          "$ref": "common.json#/$defs/scanId"
+        },
+        "indexDirectory": {
+          "$ref": "common.json#/$defs/pathBytes"
+        },
+        "underPath": {
+          "description": "Search only this path and what is below it. A path the scan never saw is refused by name rather than answered with no groups.",
+          "$ref": "common.json#/$defs/pathBytes"
+        },
+        "minimumBytes": {
+          "description": "Files below this size are not candidates. Defaults to 1, because every empty file is identical to every other and saying so helps nobody.",
+          "$ref": "common.json#/$defs/decimalInteger"
+        },
+        "maximumGroups": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 1000
+        },
+        "maximumFilesPerGroup": {
+          "type": "integer",
+          "minimum": 2,
+          "maximum": 1000
+        }
+      }
+    },
+    "dedupHardlinkArguments": {
+      "description": "Replace every reviewed duplicate with a link to one kept file. The kept file is validated once before any item, because it is what every target becomes; a kept file that is not what the plan reviewed makes the whole request wrong rather than one item of it. The helper byte-compares each target against it immediately before linking, whatever digest grouped them.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "planId",
+        "journalDirectory",
+        "keep",
+        "targets"
+      ],
+      "properties": {
+        "planId": {
+          "$ref": "common.json#/$defs/planId"
+        },
+        "journalDirectory": {
+          "$ref": "common.json#/$defs/pathBytes"
+        },
+        "keep": {
+          "description": "The copy that survives. It may not also appear in `targets`.",
+          "$ref": "common.json#/$defs/mutationTarget"
+        },
+        "targets": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "$ref": "common.json#/$defs/mutationTarget"
+          }
+        }
+      }
+    },
+    "copyMoveArguments": {
+      "description": "Copy every reviewed target onto another filesystem, verify what arrived, publish it without overwriting anything, and only then dispose of the source. A failure at any step before the publish leaves the source where it was and removes what was staged.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "planId",
+        "journalDirectory",
+        "homeTrashDirectory",
+        "destinationDirectory",
+        "sourceDisposition",
+        "targets"
+      ],
+      "properties": {
+        "planId": {
+          "$ref": "common.json#/$defs/planId"
+        },
+        "journalDirectory": {
+          "$ref": "common.json#/$defs/pathBytes"
+        },
+        "homeTrashDirectory": {
+          "description": "Carried whether or not the disposition needs it, so the helper never has to ask for it halfway through an action.",
+          "$ref": "common.json#/$defs/pathBytes"
+        },
+        "destinationDirectory": {
+          "description": "An existing directory. The helper publishes into it and never creates it.",
+          "$ref": "common.json#/$defs/pathBytes"
+        },
+        "sourceDisposition": {
+          "description": "What becomes of the source once the copy is verified and published. Fixed in the plan; apply time cannot choose it.",
+          "type": "string",
+          "enum": [
+            "trash",
+            "permanent"
+          ]
+        },
+        "targets": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "$ref": "common.json#/$defs/mutationTarget"
+          }
+        }
+      }
+    },
+    "compressArguments": {
+      "description": "Compress every reviewed target into `<name>.zst` or, for a directory, `<name>.tar.zst`, verify the archive by decompressing it, publish it without overwriting anything, and only then dispose of the source. The verification is a read-back the way anybody recovering from the archive would read it: an archive that will not decompress to the bytes that went in is not an archive, however well the write went.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "planId",
+        "journalDirectory",
+        "homeTrashDirectory",
+        "destinationDirectory",
+        "sourceDisposition",
+        "targets"
+      ],
+      "properties": {
+        "planId": {
+          "$ref": "common.json#/$defs/planId"
+        },
+        "journalDirectory": {
+          "$ref": "common.json#/$defs/pathBytes"
+        },
+        "homeTrashDirectory": {
+          "$ref": "common.json#/$defs/pathBytes"
+        },
+        "destinationDirectory": {
+          "description": "An existing directory, or the empty string for 'beside the source', which is where somebody would put an archive by hand.",
+          "type": "string",
+          "maxLength": 16384
+        },
+        "sourceDisposition": {
+          "type": "string",
+          "enum": [
+            "trash",
+            "permanent"
+          ]
+        },
+        "targets": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "$ref": "common.json#/$defs/mutationTarget"
+          }
         }
       }
     }

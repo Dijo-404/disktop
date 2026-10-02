@@ -3,6 +3,7 @@ import { join } from "node:path";
 import { createDashboardService, type DashboardService, type DashboardSettings } from "../application/dashboard.js";
 import { createExploreService, type ExploreService } from "../application/explore.js";
 import { createApplyService, type ApplyService } from "../application/apply-action.js";
+import { createDuplicateService } from "../application/duplicates.js";
 import { createFindService, type FindService } from "../application/find.js";
 import { createFootprintService, type FootprintService } from "../application/footprint.js";
 import { createPlanService, type PlanService } from "../application/plan-action.js";
@@ -23,7 +24,9 @@ import { NativeHelperClient } from "../native/client.js";
 import type { Accounting } from "../ports/scan.js";
 import type { RetentionLimits } from "../ports/snapshots.js";
 import { loadConfigFile } from "../storage/config.js";
+import { ruleSlug } from "../providers/rules/index.js";
 import { createPlanStore } from "../storage/plans.js";
+import { ruleHash } from "../storage/rules.js";
 import { createSnapshotStore } from "../storage/snapshots.js";
 import { resolveLocations } from "../storage/xdg.js";
 
@@ -49,6 +52,9 @@ export interface Services {
     readonly crossFilesystems: boolean;
     readonly excludes: readonly RawPath[];
     readonly retention: RetentionLimits;
+  };
+  readonly findDefaults: {
+    readonly staleAfterDays: number;
   };
   readonly settings: DashboardSettings;
   readonly startupWarnings: readonly Warning[];
@@ -107,6 +113,13 @@ export async function createServices(options: CompositionOptions = {}): Promise<
     crossFilesystems: config.scan.crossFilesystems,
     excludes,
   });
+  // A rule's identity, by the finding id its provider gives it, so a plan can
+  // carry it and an apply can tell whether the rule has changed since.
+  const ruleHashesByFinding = new Map<string, string>(
+    config.rules.map((rule) => [`rules:${ruleSlug(rule.name)}`, ruleHash(rule)]),
+  );
+  const ruleHashes: ReadonlySet<string> = new Set(ruleHashesByFinding.values());
+
   const tools = createToolPort();
   const discovery = {
     home,
@@ -114,6 +127,7 @@ export async function createServices(options: CompositionOptions = {}): Promise<
     userId: BigInt(process.getuid?.() ?? 0),
     now: new Date(),
     staleAfterDays: config.find.staleAfterDays,
+    rules: config.rules,
     appImageRoots: config.providers.appImageRoots.map(rawPathFromUtf8),
     artifactDirectories: config.providers.artifactDirectories,
     largeLogBytes: BigInt(config.providers.largeLogBytes),
@@ -168,10 +182,16 @@ export async function createServices(options: CompositionOptions = {}): Promise<
         expiryMinutes: config.cleanup.planExpiryMinutes,
       },
       now: () => new Date(),
+      ruleHashFor: (findingId) => ruleHashesByFinding.get(findingId),
     }),
-    apply: createApplyService({ store: planStore, actions, now: () => new Date() }),
+    apply: createApplyService({
+      store: planStore,
+      actions,
+      now: () => new Date(),
+      currentRuleHashes: () => ruleHashes,
+    }),
     undo: createUndoService({ journal: actions, actions }),
-    find: createFindService(explore),
+    find: createFindService(explore, createDuplicateService(scanner), inventory),
     scan: createScanService(scanner, {
       crossFilesystems: config.scan.crossFilesystems,
       accounting: config.scan.accounting,
@@ -186,6 +206,7 @@ export async function createServices(options: CompositionOptions = {}): Promise<
       excludes,
       retention: { keepLatest: config.snapshots.keepLatest },
     },
+    findDefaults: { staleAfterDays: config.find.staleAfterDays },
     settings,
     startupWarnings,
   };

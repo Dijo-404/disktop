@@ -18,8 +18,7 @@
       "additionalProperties": false,
       "required": [
         "kind",
-        "scanId",
-        "entries"
+        "scanId"
       ],
       "properties": {
         "kind": {
@@ -39,14 +38,257 @@
           "maxItems": 1000,
           "items": {
             "$ref": "common.json#/$defs/indexedEntry"
-          }
+          },
+          "description": "Present for 'empty' and 'broken', which are a filter over the scan index."
         },
         "nextCursor": {
           "type": "string",
           "minLength": 1,
           "maxLength": 512
+        },
+        "groups": {
+          "description": "Present for 'duplicates'. Groups rather than rows, because a flat list would lose which copy pairs with which.",
+          "type": "array",
+          "maxItems": 1000,
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "apparentBytes",
+              "digest",
+              "reclaimableBytes",
+              "files",
+              "decision"
+            ],
+            "properties": {
+              "apparentBytes": {
+                "$ref": "common.json#/$defs/decimalInteger"
+              },
+              "digest": {
+                "description": "SHA-256 of the group's content, lowercase hexadecimal. It identifies this group within this result; it is not a stable identifier across scans, and it never authorises a mutation.",
+                "type": "string",
+                "pattern": "^[0-9a-f]{64}$"
+              },
+              "reclaimableBytes": {
+                "description": "What removing this group's other copies would free: the group's size times one fewer than its members, and zero when no keeper was chosen.",
+                "$ref": "common.json#/$defs/decimalInteger"
+              },
+              "files": {
+                "type": "array",
+                "minItems": 2,
+                "items": {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "required": [
+                    "path",
+                    "device",
+                    "inode",
+                    "apparentBytes",
+                    "modifiedNanoseconds",
+                    "ownerId",
+                    "groupId",
+                    "permissions"
+                  ],
+                  "properties": {
+                    "path": {
+                      "$ref": "common.json#/$defs/rawPath"
+                    },
+                    "device": {
+                      "$ref": "common.json#/$defs/decimalInteger"
+                    },
+                    "inode": {
+                      "$ref": "common.json#/$defs/decimalInteger"
+                    },
+                    "apparentBytes": {
+                      "$ref": "common.json#/$defs/decimalInteger"
+                    },
+                    "modifiedNanoseconds": {
+                      "$ref": "common.json#/$defs/decimalInteger"
+                    },
+                    "ownerId": {
+                      "$ref": "common.json#/$defs/decimalInteger"
+                    },
+                    "groupId": {
+                      "$ref": "common.json#/$defs/decimalInteger"
+                    },
+                    "permissions": {
+                      "type": "integer",
+                      "minimum": 0,
+                      "maximum": 4095
+                    }
+                  }
+                }
+              },
+              "decision": {
+                "oneOf": [
+                  {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "required": [
+                      "kind",
+                      "keep",
+                      "basis",
+                      "arbitrary"
+                    ],
+                    "properties": {
+                      "kind": {
+                        "const": "decided"
+                      },
+                      "keep": {
+                        "$ref": "common.json#/$defs/rawPath"
+                      },
+                      "basis": {
+                        "description": "What the choice rests on, naming the timestamp it read. Never an access time: no scan column holds one.",
+                        "type": "string",
+                        "minLength": 1
+                      },
+                      "arbitrary": {
+                        "description": "True when the rule could not separate the copies and path order decided.",
+                        "type": "boolean"
+                      }
+                    }
+                  },
+                  {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "required": [
+                      "kind",
+                      "reason"
+                    ],
+                    "properties": {
+                      "kind": {
+                        "const": "undecidable"
+                      },
+                      "reason": {
+                        "type": "string",
+                        "minLength": 1
+                      }
+                    }
+                  }
+                ]
+              }
+            }
+          }
+        },
+        "reclaimableBytes": {
+          "$ref": "common.json#/$defs/decimalInteger"
+        },
+        "candidatesRead": {
+          "description": "Index rows that shared a size with another file, so had to be considered.",
+          "$ref": "common.json#/$defs/decimalInteger"
+        },
+        "filesHashed": {
+          "description": "Files whose content was actually read. Never more than candidatesRead.",
+          "$ref": "common.json#/$defs/decimalInteger"
+        },
+        "basis": {
+          "description": "Present for 'stale'. What the dates measure, and what the mount holding them lets Disktop say about access times. The field is always 'modified': no column in the scan index holds an access time, and on a relatime or noatime mount one would not mean what a reader would take it to mean.",
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "field",
+            "confidence",
+            "label"
+          ],
+          "properties": {
+            "field": {
+              "const": "modified"
+            },
+            "confidence": {
+              "description": "What the mount's options say about its access times. 'unknown' means the options could not be read, which is not the same as 'maintained'.",
+              "type": "string",
+              "enum": [
+                "maintained",
+                "coarse",
+                "absent",
+                "unknown"
+              ]
+            },
+            "label": {
+              "description": "The sentence shown to a person. It never claims a file was not opened.",
+              "type": "string",
+              "minLength": 1
+            }
+          }
         }
-      }
+      },
+      "allOf": [
+        {
+          "description": "A duplicate search answers with groups and a reclaimable total; a filter over the index answers with entries. One shape or the other, never both and never neither.",
+          "if": {
+            "properties": {
+              "kind": {
+                "const": "duplicates"
+              }
+            },
+            "required": [
+              "kind"
+            ]
+          },
+          "then": {
+            "properties": {
+              "groups": {
+                "type": "array"
+              },
+              "reclaimableBytes": {
+                "type": "string"
+              },
+              "candidatesRead": {
+                "type": "string"
+              },
+              "filesHashed": {
+                "type": "string"
+              },
+              "entries": false
+            },
+            "required": [
+              "groups",
+              "reclaimableBytes",
+              "candidatesRead",
+              "filesHashed"
+            ]
+          },
+          "else": {
+            "properties": {
+              "entries": {
+                "type": "array"
+              },
+              "groups": false
+            },
+            "required": [
+              "entries"
+            ]
+          }
+        },
+        {
+          "description": "A stale listing says what its dates measure. Without that a reader takes 'not modified' for 'not used'.",
+          "if": {
+            "properties": {
+              "kind": {
+                "const": "stale"
+              }
+            },
+            "required": [
+              "kind"
+            ]
+          },
+          "then": {
+            "properties": {
+              "basis": {
+                "type": "object"
+              }
+            },
+            "required": [
+              "basis"
+            ]
+          },
+          "else": {
+            "properties": {
+              "basis": false
+            }
+          }
+        }
+      ]
     }
   }
 }

@@ -1,0 +1,23 @@
+{
+  "protocolVersion": 1,
+  "requestId": "dedup-hardlink-1",
+  "operation": "dedup-hardlink",
+  "arguments": {
+    "planId": "plan-01HQ8Z3M4K5N6P7Q",
+    "journalDirectory": "L2hvbWUvZXhhbXBsZS8ubG9jYWwvc3RhdGUvZGlza3RvcA==",
+    "targets": [
+      {
+        "path": "L2hvbWUvZXhhbXBsZS9Eb3dubG9hZHMvdHJpcC5qcGc=",
+        "expected": {
+          "device": "66306",
+          "inode": "1180512",
+          "mountId": "29",
+          "kind": "file",
+          "apparentBytes": "4096",
+          "modifiedNanoseconds": "1758000000123456789"
+        },
+        "reviewedBytes": "7314112512"
+      }
+    ]
+  }
+}

@@ -447,5 +447,31 @@ export async function createActionTree(home) {
   await mkdir(join(resolved, "projects", "empty"), { recursive: true });
   await symlink(join(resolved, "projects", "nowhere"), join(resolved, "projects", "dangling"));
 
-  return { home: resolved, cache, artifacts, single, odd, holder, linked };
+  // For `find duplicates`. Two real copies of one content, a third file of the
+  // same size holding different bytes, and a second name for one of the copies.
+  // A correct answer groups the two copies, excludes the decoy, and treats the
+  // hardlink as the file it already counted rather than as a third copy.
+  const pictures = join(resolved, "pictures");
+  const copies = join(resolved, "pictures", "copies");
+  await mkdir(copies, { recursive: true });
+  const content = Buffer.alloc(200_000, 0x41);
+  const decoy = Buffer.alloc(200_000, 0x42);
+  const original = join(pictures, "trip.bin");
+  const copy = join(copies, "trip.bin");
+  await writeFile(original, content);
+  await writeFile(copy, content);
+  await writeFile(join(pictures, "other.bin"), decoy);
+  const secondName = join(pictures, "trip-again.bin");
+  await link(original, secondName);
+
+  return {
+    home: resolved,
+    cache,
+    artifacts,
+    single,
+    odd,
+    holder,
+    linked,
+    duplicates: { root: pictures, original, copy, secondName },
+  };
 }

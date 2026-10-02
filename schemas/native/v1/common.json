@@ -835,6 +835,137 @@
           }
         }
       ]
+    },
+    "duplicateFile": {
+      "description": "One file in a duplicate group, as the helper found it live rather than as the index remembered it. This is the identity a plan would fingerprint.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "path",
+        "device",
+        "inode",
+        "apparentBytes",
+        "modifiedNanoseconds",
+        "ownerId",
+        "groupId",
+        "permissions"
+      ],
+      "properties": {
+        "path": {
+          "$ref": "#/$defs/pathBytes"
+        },
+        "device": {
+          "$ref": "#/$defs/decimalInteger"
+        },
+        "inode": {
+          "$ref": "#/$defs/decimalInteger"
+        },
+        "apparentBytes": {
+          "$ref": "#/$defs/decimalInteger"
+        },
+        "modifiedNanoseconds": {
+          "$ref": "#/$defs/decimalInteger"
+        },
+        "ownerId": {
+          "$ref": "#/$defs/decimalInteger"
+        },
+        "groupId": {
+          "$ref": "#/$defs/decimalInteger"
+        },
+        "permissions": {
+          "description": "Permission bits only, without the file-type bits the kind already carries.",
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 4095
+        }
+      }
+    },
+    "duplicateGroup": {
+      "description": "Two or more files that hold the same bytes. A group of one is never reported, and two names reaching one inode are one member, because removing the second frees nothing.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "apparentBytes",
+        "digest",
+        "files"
+      ],
+      "properties": {
+        "apparentBytes": {
+          "$ref": "#/$defs/decimalInteger"
+        },
+        "digest": {
+          "description": "SHA-256 of the group's content, lowercase hexadecimal. It identifies a group within one result and is not a stable identifier across scans. It groups candidates; it never authorises a mutation, which re-reads both files and compares them byte for byte.",
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        },
+        "files": {
+          "type": "array",
+          "minItems": 2,
+          "items": {
+            "$ref": "#/$defs/duplicateFile"
+          }
+        }
+      }
+    },
+    "duplicateResult": {
+      "description": "Every group of identical files one search found. `complete` is false when a cap was reached, a file could not be read, or the search was cancelled, and a warning then says what was missed.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "groups",
+        "complete",
+        "warnings",
+        "candidatesRead",
+        "filesHashed"
+      ],
+      "properties": {
+        "groups": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/duplicateGroup"
+          }
+        },
+        "complete": {
+          "type": "boolean"
+        },
+        "warnings": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "candidatesRead": {
+          "description": "Index rows that shared a size with at least one other file, so had to be considered.",
+          "$ref": "#/$defs/decimalInteger"
+        },
+        "filesHashed": {
+          "description": "Files whose content was actually read. Always no more than candidatesRead.",
+          "$ref": "#/$defs/decimalInteger"
+        }
+      },
+      "allOf": [
+        {
+          "description": "An incomplete answer says what it missed.",
+          "if": {
+            "properties": {
+              "complete": {
+                "const": false
+              }
+            },
+            "required": [
+              "complete"
+            ]
+          },
+          "then": {
+            "properties": {
+              "warnings": {
+                "type": "array",
+                "minItems": 1
+              }
+            }
+          }
+        }
+      ]
     }
   }
 }

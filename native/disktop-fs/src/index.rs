@@ -493,6 +493,71 @@ fn encode_warnings(warnings: &[ScanWarning]) -> Vec<serde_json::Value> {
         .collect()
 }
 
+/// One regular file that might have a twin, as the index remembers it.
+///
+/// `shared` rows are left out at the query, not filtered afterwards: a second
+/// hardlink's bytes were attributed to the first one, and offering it as a
+/// duplicate would offer to free bytes that removing it does not free.
+pub struct SizeCandidate {
+    pub parent_id: Option<i64>,
+    pub name: Vec<u8>,
+}
+
+/// Every regular file in one scan whose apparent size is shared with at least
+/// one other regular file, grouped by that size, largest first.
+///
+/// The grouping happens in SQL because the index already has the sizes and the
+/// alternative is carrying one row per file through Rust to discover that most
+/// of them are alone. Only sizes with two or more members come back, so the
+/// caller never opens a file that had no possible twin.
+pub fn size_candidates(
+    connection: &Connection,
+    scan_id: &str,
+    under: Option<(i64, i64)>,
+    minimum_bytes: u64,
+) -> rusqlite::Result<Vec<(u64, Vec<SizeCandidate>)>> {
+    // The range is always bound, covering every row when no path narrows it,
+    // so one statement serves both shapes and neither can bind the wrong count.
+    let (first, last) = under.unwrap_or((i64::MIN, i64::MAX));
+    let sql = "SELECT apparent_bytes, id, parent_id, name FROM entry
+         WHERE scan_id = ?1 AND kind = ?2 AND shared = 0 AND apparent_bytes >= ?3
+           AND id BETWEEN ?4 AND ?5
+           AND apparent_bytes IN (
+             SELECT apparent_bytes FROM entry
+             WHERE scan_id = ?1 AND kind = ?2 AND shared = 0 AND apparent_bytes >= ?3
+               AND id BETWEEN ?4 AND ?5
+             GROUP BY apparent_bytes HAVING count(*) > 1
+           )
+         ORDER BY apparent_bytes DESC, id ASC";
+
+    let mut statement = connection.prepare(sql)?;
+    let mut rows = statement.query(params![
+        scan_id,
+        EntryKind::File.code(),
+        clamp(minimum_bytes),
+        first,
+        last
+    ])?;
+
+    let mut grouped: Vec<(u64, Vec<SizeCandidate>)> = Vec::new();
+    while let Some(row) = rows.next()? {
+        let apparent_bytes = unclamp(row.get::<_, i64>(0)?);
+        let candidate = SizeCandidate {
+            parent_id: row.get(2)?,
+            name: row.get(3)?,
+        };
+        match grouped.last_mut() {
+            Some((size, members)) if *size == apparent_bytes => members.push(candidate),
+            _ => grouped.push((apparent_bytes, vec![candidate])),
+        }
+    }
+    Ok(grouped)
+}
+
+fn unclamp(value: i64) -> u64 {
+    value.max(0) as u64
+}
+
 /// The primary-key range covering one path and everything below it.
 ///
 /// Returns `None` when the path is not in this scan, which a caller must

@@ -1,11 +1,15 @@
 mod actions;
+mod archive;
 mod base64;
+mod content;
+mod duplicates;
 mod guard;
 mod index;
 mod journal;
 mod protocol;
 mod query;
 mod sys;
+mod transfer;
 mod walk;
 
 #[cfg(test)]

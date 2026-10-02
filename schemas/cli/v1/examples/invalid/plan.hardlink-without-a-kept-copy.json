@@ -1,0 +1,60 @@
+{
+  "schemaVersion": "1",
+  "command": "clean plan",
+  "generatedAt": "2026-10-02T11:00:00.000Z",
+  "status": "complete",
+  "exitCode": 0,
+  "data": {
+    "plan": {
+      "id": "plan-20261001T084119004Z-9f2c1ab0",
+      "operation": "dedup-hardlink",
+      "createdAt": "2026-10-01T08:41:19.004Z",
+      "expiresAt": "2026-10-01T09:41:19.004Z",
+      "providerId": "cache.language",
+      "findingId": "cache.language:cargo-registry",
+      "scopeSummary": "2 entries, starting at /home/example/Pictures/trip.jpg",
+      "reversibility": "irreversible",
+      "permission": "user",
+      "exactItemCount": "2",
+      "selectedBytes": "7314112512",
+      "entries": [
+        {
+          "path": {
+            "bytesBase64": "L2hvbWUvZXhhbXBsZS9QaWN0dXJlcy90cmlwLmpwZw==",
+            "display": "/home/example/Pictures/trip.jpg",
+            "utf8": "/home/example/Pictures/trip.jpg"
+          },
+          "expected": {
+            "device": "66306",
+            "inode": "1179651",
+            "mountId": "29",
+            "kind": "file",
+            "apparentBytes": "4096",
+            "modifiedNanoseconds": "1758000000123456789"
+          },
+          "reviewedBytes": "7314112512"
+        },
+        {
+          "path": {
+            "bytesBase64": "L2hvbWUvZXhhbXBsZS9Eb3dubG9hZHMvdHJpcC5qcGc=",
+            "display": "/home/example/Downloads/trip.jpg",
+            "utf8": "/home/example/Downloads/trip.jpg"
+          },
+          "expected": {
+            "device": "66306",
+            "inode": "1180512",
+            "mountId": "29",
+            "kind": "file",
+            "apparentBytes": "4096",
+            "modifiedNanoseconds": "1758000000123456789"
+          },
+          "reviewedBytes": "7314112512"
+        }
+      ],
+      "regenerationCost": "Re-downloaded on the next build that needs a crate.",
+      "warnings": [
+        "This cannot be undone. The bytes are released rather than moved, and no journal entry can bring them back."
+      ]
+    }
+  }
+}

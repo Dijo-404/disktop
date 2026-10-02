@@ -1,0 +1,30 @@
+{
+  "protocolVersion": 1,
+  "requestId": "hash-candidates-3",
+  "eventId": "2",
+  "event": "complete",
+  "result": {
+    "groups": [
+      {
+        "apparentBytes": "4194304",
+        "digest": "9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08",
+        "files": [
+          {
+            "path": "L2hvbWUvZXhhbXBsZS9QaWN0dXJlcy90cmlwLmpwZw==",
+            "device": "66306",
+            "inode": "1180429",
+            "apparentBytes": "4194304",
+            "modifiedNanoseconds": "1759190400000000000",
+            "ownerId": "1000",
+            "groupId": "1000",
+            "permissions": 420
+          }
+        ]
+      }
+    ],
+    "complete": true,
+    "warnings": [],
+    "candidatesRead": "12",
+    "filesHashed": "1"
+  }
+}

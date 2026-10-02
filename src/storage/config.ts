@@ -1,6 +1,7 @@
 import { readFile } from "node:fs/promises";
 import { posix } from "node:path";
 import { isRefusedAsAllowedRoot } from "../domain/protected-paths.js";
+import { validateRules, type CleanupRule } from "../domain/rules.js";
 import { parseToml, type TomlTable, type TomlValue } from "./toml.js";
 
 export interface DisktopConfig {
@@ -31,6 +32,8 @@ export interface DisktopConfig {
     readonly planExpiryMinutes: number;
     readonly additionalAllowedRoots: readonly string[];
   };
+  /** Cleanup somebody wrote down themselves, in `[[rules]]` blocks. */
+  readonly rules: readonly CleanupRule[];
   readonly providers: {
     /** Directories holding AppImages, which no package manager knows about. */
     readonly appImageRoots: readonly string[];
@@ -56,6 +59,7 @@ export const DEFAULT_CONFIG: DisktopConfig = {
   },
   find: { staleAfterDays: 183 },
   snapshots: { keepLatest: 20 },
+  rules: [],
   cleanup: { defaultOperation: "trash", planExpiryMinutes: 60, additionalAllowedRoots: [] },
   providers: {
     appImageRoots: [],
@@ -98,6 +102,10 @@ export function parseConfigDocument(source: string): DisktopConfig {
         true,
       ),
     },
+    // A rule is validated as it is read, so a configuration error reaches
+    // somebody while they are editing the file rather than while a
+    // confirmation prompt is already on screen.
+    rules: readRules(reader),
     providers: {
       // Discovery roots, never cleanup roots: what may be acted on is decided
       // by the finding, so a system directory is a legitimate place to look.
@@ -126,6 +134,15 @@ export function parseConfigDocument(source: string): DisktopConfig {
 
   reader.rejectUnread();
   return config;
+}
+
+function readRules(reader: Reader): readonly CleanupRule[] {
+  try {
+    return validateRules(reader.tableArray("rules"));
+  } catch (error) {
+    const reason = error instanceof Error ? error.message : String(error);
+    throw new RangeError(`config.toml: ${reason}`);
+  }
 }
 
 /** Tracks which keys were consumed so an unknown or misspelled key is an error. */
@@ -224,6 +241,14 @@ class Reader {
 
   rejectUnread(): void {
     for (const [name, value] of Object.entries(this.#document)) {
+      if (isTableArray(value)) {
+        // An array of tables is read whole by `tableArray`, which validates
+        // every key inside each block itself.
+        if (!this.#read.has(`.${name}`)) {
+          throw new RangeError(`config.toml: unknown section '[[${name}]]'`);
+        }
+        continue;
+      }
       if (!isTable(value)) {
         if (!this.#read.has(`.${name}`)) {
           throw new RangeError(`config.toml: unknown setting '${name}'`);
@@ -241,11 +266,24 @@ class Reader {
     }
   }
 
+  /** The blocks of an array of tables, or an empty list when there are none. */
+  tableArray(name: string): readonly TomlTable[] {
+    this.#read.add(`.${name}`);
+    const value = this.#document[name];
+    if (value === undefined) {
+      return [];
+    }
+    if (!isTableArray(value)) {
+      throw new RangeError(`config.toml: '${name}' must be written as [[${name}]] blocks`);
+    }
+    return value;
+  }
+
   #take(table: string, key: string): TomlValue | undefined {
     this.#read.add(`${table}.${key}`);
     if (table === "") {
       const value = this.#document[key];
-      return isTable(value) ? undefined : value;
+      return isTable(value) || isTableArray(value) ? undefined : value;
     }
     const section = this.#document[table];
     if (section === undefined) {
@@ -255,12 +293,21 @@ class Reader {
       throw new RangeError(`config.toml: '${table}' must be a table`);
     }
     const value = section[key];
-    return isTable(value) ? undefined : value;
+    return isTable(value) || isTableArray(value) ? undefined : value;
   }
 }
 
-function isTable(value: TomlValue | TomlTable | undefined): value is TomlTable {
+function isTable(
+  value: TomlValue | TomlTable | readonly TomlTable[] | undefined,
+): value is TomlTable {
   return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+/** An array of tables, as `[[rules]]` produces. */
+function isTableArray(
+  value: TomlValue | TomlTable | readonly TomlTable[] | undefined,
+): value is readonly TomlTable[] {
+  return Array.isArray(value) && value.every((entry) => isTable(entry));
 }
 
 function invalid(table: string, key: string, message: string): RangeError {

@@ -4,6 +4,35 @@ All public changes will be recorded here when the first complete Linux release i
 
 ## Unreleased
 
+### Phase 5: advanced analysis and the actions that publish something
+
+- `disktop find duplicates` reports groups of files that hold the same bytes, with the
+  copy a `--keep oldest|newest|in-path` rule would keep and what removing the others
+  would free. Two names for one inode are one member of a group. A rule that cannot
+  separate the copies reports the group as undecided rather than guessing.
+- `disktop find stale` lists files by **modification** time and says so. Nothing reads an
+  access time: no index column holds one, and on a `relatime` or `noatime` mount one
+  would not mean what a reader would take it to mean.
+- `disktop clean plan --operation hardlink|move|compress`. A hardlink replacement names
+  the copy it keeps; a move and a compression fix where they publish and what becomes of
+  the source, and a `permanent` disposition makes the whole plan irreversible.
+- The helper gained `hash-candidates`, `dedup-hardlink`, `copy-move`, and `compress`.
+  Everything that publishes an output stages it, verifies it — by reading the written
+  bytes back off the device for a copy, by decompressing it for an archive — publishes it
+  with a rename that refuses to overwrite, and only then touches the source.
+- A digest groups candidates; a byte compare authorises a mutation. Every operation that
+  releases one copy of something because another copy exists re-reads both files in full
+  immediately before the syscall. See
+  [ADR 0006](docs/adr/0006-content-identity-and-archive-dependencies.md).
+- `[[rules]]` blocks in `config.toml` describe cleanup you write yourself: roots,
+  patterns, an age, a size, and hard limits. There is no field for a command. A plan
+  records the rule's hash and an apply refuses it once the rule has been edited.
+- Every action result now says what it checked afterwards, and a check that could not run
+  is reported as unavailable rather than passed. A failed check keeps a result off
+  `complete`.
+- `disktop undo` now restores a move or a compression that trashed its source, and says
+  that the copy or archive it published is still where it was put.
+
 ### Phase 4: the safe action engine
 
 - Disktop can now change files. `disktop clean plan` reviews one finding or path

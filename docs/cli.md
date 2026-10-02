@@ -1,6 +1,6 @@
 # CLI contract
 
-Status: planned `1.0.0` command surface. `devices`, the `--json` dashboard, `alerts check`, `scan`, `explore`, `snapshots list|diff`, `clean`, `clean plan`, `clean apply`, `history`, `undo`, and `find empty|broken` are implemented; `report`, `timer`, `completion`, and `find duplicates|stale` are declared in the parser and refuse with `not-implemented`. The JSON output contract in [`schemas/cli/v1/`](../schemas/cli/v1/) is normative and is validated by `tests/contract/cli-schema.test.mjs` against examples and by `tests/integration/cli-output.test.mjs` against what the CLI actually writes on a running host. The parser and generated help are normative now; completions become normative when they are implemented. See [PLAN.md](../PLAN.md#cli-and-outputs).
+Status: planned `1.0.0` command surface. `devices`, the `--json` dashboard, `alerts check`, `scan`, `explore`, `snapshots list|diff`, `clean`, `clean plan`, `clean apply`, `history`, `undo`, and `find duplicates|stale|empty|broken` are implemented; `report`, `timer`, and `completion` are declared in the parser and refuse with `not-implemented`. The JSON output contract in [`schemas/cli/v1/`](../schemas/cli/v1/) is normative and is validated by `tests/contract/cli-schema.test.mjs` against examples and by `tests/integration/cli-output.test.mjs` against what the CLI actually writes on a running host. The parser and generated help are normative now; completions become normative when they are implemented. See [PLAN.md](../PLAN.md#cli-and-outputs).
 
 ## What works today
 
@@ -19,6 +19,8 @@ Status: planned `1.0.0` command surface. `devices`, the `--json` dashboard, `ale
 | `disktop history [--json]` | The durable action journal, with interrupted records resolved as it is read. |
 | `disktop undo ACTION_ID --yes [--json]` | Puts back what one Trash action moved. |
 | `disktop find empty\|broken [--path PATH] [--limit COUNT] [--json]` | Empty directories and dangling symlinks, read out of the most recent scan covering the path. |
+| `disktop find duplicates [--path PATH] [--min-size SIZE] [--keep oldest\|newest\|in-path] [--keep-under PATH] [--limit COUNT] [--json]` | Groups of files holding the same bytes, with the copy a keep rule would keep. Reads content; changes nothing. |
+| `disktop find stale [--path PATH] [--older-than DAYS] [--limit COUNT] [--json]` | Files not modified for a threshold, with a statement of what that measures on this mount. |
 | `disktop --units iec\|si` | Switches human-readable units. Byte values in JSON never change. |
 | `disktop --help`, `disktop --version` | Generated from the one command table in `src/cli/parser.ts`. |
 
@@ -117,6 +119,50 @@ it is never presented as this action's doing alone.
 An action that skipped or failed anything exits `3`, so a script that never reads the
 JSON still learns that what was reviewed is not what happened.
 
+`--operation move` and `--operation compress` fix two more things that apply time may
+not change: `--destination PATH`, the directory the output is published into, and
+`--source trash|permanent`, what becomes of the original once that output is verified.
+A move has to name a destination — "somewhere else" is the whole point of one and
+there is no disk Disktop may pick on somebody's behalf — while a compress publishes
+beside the source unless told otherwise. A move onto the source's own filesystem is
+refused: it frees nothing, and `mv` already does it.
+
+A destination is judged by its own policy rather than by the one that bounds what
+Disktop may remove, because a cross-disk move means writing outside the user's roots by
+definition. `/mnt/archive` is a legitimate destination and an illegitimate target. What
+still applies is everything that says "not yours to write into": the protected system
+roots, the shared container roots themselves, and Trash and Disktop's own state.
+
+`--operation hardlink` replaces one copy of a file with a second name for another copy,
+freeing the replaced copy's bytes. It is irreversible, so it needs `--permanent` at apply
+time like any other irreversible plan. From an explicit path it takes a pair: `--path` is
+the copy that survives and `--replace PATH` is the copy that becomes a name for it. The
+plan records which one is kept rather than leaving it to the order of its entries. Before
+anything is linked, the helper reads both files in full and refuses unless they hold
+exactly the same bytes, and refuses again if their owner, group, or permissions differ —
+one inode has one set of those, and linking would silently change the replaced file's.
+
+`--source permanent` makes the whole plan irreversible and carries the warning that
+says so, because publishing a copy and then releasing the original's bytes is a
+permanent removal with an extra step.
+
+`--operation compress` writes `<name>.zst` for a file and `<name>.tar.zst` for a
+directory, beside the source unless `--destination` says otherwise. The archive is
+verified by decompressing it and comparing what comes out against what went in, before
+it is published and before the source is touched.
+
+A move is carried out as a staged copy, not a rename: the bytes are written under a
+partial name in the destination, read back off the device and compared against what was
+read from the source, and only then published with a rename that refuses to overwrite.
+The source is not touched until that has happened, so a move that fails at any point
+leaves it exactly where it was.
+
+A plan built from one of your own `[[rules]]` records that rule's identity. If you edit
+the rule before applying the plan, the apply is refused and asks you to review it again:
+what you confirmed was the selection the old rule described. See
+[providers.md](providers.md#cleanup-rules-somebody-wrote-themselves) and
+[config.example.toml](config.example.toml).
+
 Planning by `FINDING_ID` rediscovers first, so it takes as long as `disktop clean`
 does. Planning `--path` does not. A path whose bytes are not valid UTF-8 cannot be
 given as `--path`, because process arguments are UTF-8; such a path is still
@@ -129,8 +175,65 @@ The walk counted each directory's entries as it read them and asked once per sym
 whether its target resolved, so both answers are already in the index. A directory the
 scan could not open carries no child count at all and therefore never answers a search
 for empty ones — "nobody looked" and "nothing is there" are different answers.
-`find duplicates` and `find stale` are declared and refuse; they need the hashing and
-timestamp-confidence work that is not built yet.
+## Finding stale files
+
+The question people ask is "what have I not opened in six months?" and on a normal
+Linux system that question has no answer. Mounts are `relatime` by default, which
+updates a file's access time at most once a day and only when it is already older than
+the modification time; many are `noatime`, which never updates it at all. A listing
+built on that and labelled "not opened since" would be confidently wrong about files
+somebody uses every day.
+
+So `find stale` measures the **modification** time — when the contents last changed —
+and says so. Every answer carries a `basis`, whose `field` is always `modified` and
+whose `confidence` comes from the options of the mount holding the search path:
+`absent` for `noatime`, `coarse` for `relatime`, `maintained` otherwise, and `unknown`
+when the mount table could not be read. `unknown` is deliberately not `maintained`: a
+reading that did not happen is not a reassuring one. The mount's options change the
+sentence, never the measurement, because no column in the scan index holds an access
+time to measure instead.
+
+The threshold is `--older-than DAYS`, defaulting to `find.stale_after_days` in the
+configuration, which is 183 days. The listing covers regular files only.
+
+## Finding duplicates
+
+`find duplicates` reads the same index to decide what is worth opening, then reads
+content, so it costs more than the other three and answers a different kind of
+question. It starts from the sizes more than one regular file shares, narrows those by
+a digest of each file's first and last 64 KiB, and narrows what is left by a digest of
+every byte. A file with no possible twin is never opened.
+
+The answer is a list of groups rather than a page of rows, because which copy pairs
+with which is the only thing anybody reading it is deciding about. Each group carries
+`reclaimableBytes` — the group's size times one fewer than its members, because one
+copy always stays — and the result's own `reclaimableBytes` is the sum over the groups
+that have a keeper.
+
+Two names for one inode are one member of a group, not two: removing the second frees
+nothing. `--min-size` defaults to 1 MiB; without it the listing fills with small files
+whose duplication costs nothing to keep.
+
+`--keep` says which copy survives. `oldest` and `newest` read the **modification**
+time, which is when a file's contents last changed; nothing here reads an access time,
+because no column in the index holds one and on a `relatime` or `noatime` mount it
+would not mean what a reader would take it to mean. When copies share a timestamp the
+first path in byte order is kept and the decision says `arbitrary: true` rather than
+presenting a coin toss as a judgement. `--keep in-path PATH` requires `--keep-under`
+and keeps the single copy under that directory; if no copy is there, or more than one
+is, the group is reported `undecidable` with its reason and contributes nothing to the
+reclaimable total. It never falls back to another rule — somebody who asked to keep
+what is under `~/Pictures` is not asking to keep the oldest instead.
+
+The digests group candidates and authorise nothing. Acting on a group goes through
+`clean plan` and `clean apply` like everything else, and the helper re-opens both files
+and compares them byte for byte before it touches either. See
+[adr/0006](adr/0006-content-identity-and-archive-dependencies.md).
+
+A search that hits a cap, cannot read a file, or is cancelled reports
+`status: incomplete` with a warning saying so, and exits `3`. A scan the index has
+pruned is refused by name with the command that would make a new one; it is never
+answered with no duplicates.
 
 ## Machine output
 
