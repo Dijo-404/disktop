@@ -9,6 +9,7 @@ import { runDevices } from "./commands/devices.js";
 import { runExplore } from "./commands/explore.js";
 import { runScan } from "./commands/scan.js";
 import { runSnapshots } from "./commands/snapshots.js";
+import { runTimer } from "./commands/timer.js";
 
 /** Resolve one argument list to an exit status. Nothing here touches a device. */
 export async function runCli(args: readonly string[], context: CliContext): Promise<number> {
@@ -129,6 +130,9 @@ export async function runCli(args: readonly string[], context: CliContext): Prom
       ...(optional(parsed, "from")),
       ...(optional(parsed, "to")),
     });
+  }
+  if (name === "timer") {
+    return runTimer(withUnits, { asJson, action: parsed.operand ?? "" });
   }
   if (name === "alerts check") {
     const threshold = parseThreshold(parsed.values.get("threshold"));

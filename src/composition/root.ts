@@ -1,5 +1,8 @@
+import { realpathSync } from "node:fs";
 import { homedir, release } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
+import { createTimerService, type TimerService } from "../application/timer.js";
+import { createSystemdUserTimer } from "../platform/linux/notifications/systemd-timer.js";
 import { createDashboardService, type DashboardService, type DashboardSettings } from "../application/dashboard.js";
 import { createExploreService, type ExploreService } from "../application/explore.js";
 import { createApplyService, type ApplyService } from "../application/apply-action.js";
@@ -74,6 +77,7 @@ export interface Services {
   };
   readonly settings: DashboardSettings;
   readonly startupWarnings: readonly Warning[];
+  readonly timer: TimerService;
   readonly alertNotifications: {
     readonly enabled: boolean;
     notify(alerts: readonly Alert[]): Promise<NotificationOutcome | undefined>;
@@ -260,6 +264,10 @@ export async function createServices(options: CompositionOptions = {}): Promise<
     findDefaults: { staleAfterDays: config.find.staleAfterDays },
     settings,
     startupWarnings,
+    timer: createTimerService({
+      port: createSystemdUserTimer({ unitDirectory: join(dirname(locations.configDirectory), "systemd", "user") }),
+      entry: () => ({ node: process.execPath, script: realpathSync(process.argv[1] ?? "") }),
+    }),
     alertNotifications: {
       enabled: config.alerts.notify,
       notify: (alerts) => notifyAlerts(notifier, alerts),

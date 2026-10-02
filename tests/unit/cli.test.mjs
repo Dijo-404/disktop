@@ -140,7 +140,7 @@ test("a declared but unbuilt command refuses in the same envelope shape", async 
   assert.equal(envelope.error.code, "not-implemented");
 
   const text = fakeContext();
-  assert.equal(await runCli(["timer", "install"], text), 2);
+  assert.equal(await runCli(["completion", "bash"], text), 2);
   assert.equal(text.captured.stdout, "");
   assert.match(text.captured.stderr, /not implemented yet/);
 });

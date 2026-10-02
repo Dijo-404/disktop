@@ -50,6 +50,7 @@ async function buildContext(): Promise<CliContext> {
     // tear the process down and leave the work unreported.
     startupWarnings: services.startupWarnings,
     notifications: services.alertNotifications,
+    timer: services.timer,
     signals: {
       listen: (handler) => {
         process.on("SIGINT", handler);
