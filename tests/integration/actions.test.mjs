@@ -10,7 +10,7 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
 import { existsSync, readdirSync } from "node:fs";
-import { mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
+import { mkdtemp, readFile, rm, stat, utimes, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { after, test } from "node:test";
@@ -454,4 +454,59 @@ test("find duplicates with --keep in-path and no directory refuses rather than g
   const document = JSON.parse(result.stdout);
   assert.equal(document.status, "error");
   assert.match(document.error.message, /--keep-under/);
+});
+
+test("find stale lists files by modification time and says that is what it measured", async () => {
+  const home = await disktopHome();
+  const tree = await createActionTree(home);
+  const old = new Date(Date.now() - 400 * 86_400_000);
+  await utimes(tree.single, old, old);
+  disktop(home, ["scan", home, "--json"]);
+
+  const found = envelope(
+    disktop(home, ["find", "stale", "--path", home, "--older-than", "365", "--json"]),
+    "find",
+  );
+
+  assert.equal(found.data.kind, "stale");
+  assert.ok(
+    found.data.entries.some((entry) => entry.path.display === tree.single),
+    `stale files were ${JSON.stringify(found.data.entries.map((entry) => entry.path.display))}`,
+  );
+  for (const entry of found.data.entries) {
+    assert.equal(entry.kind, "file", "a stale listing is about files, not directories");
+  }
+
+  assert.equal(found.data.basis.field, "modified");
+  assert.ok(["maintained", "coarse", "absent", "unknown"].includes(found.data.basis.confidence));
+  assert.match(found.data.basis.label, /not modified since/i);
+  assert.doesNotMatch(found.data.basis.label, /not opened|last opened/i);
+});
+
+test("find stale leaves recently modified files out", async () => {
+  const home = await disktopHome();
+  const tree = await createActionTree(home);
+  disktop(home, ["scan", home, "--json"]);
+
+  const found = envelope(
+    disktop(home, ["find", "stale", "--path", home, "--older-than", "365", "--json"]),
+    "find",
+  );
+
+  assert.equal(
+    found.data.entries.some((entry) => entry.path.display === tree.linked),
+    false,
+    "a file written moments ago is not six months stale",
+  );
+});
+
+test("find stale text output leads with what the dates mean", async () => {
+  const home = await disktopHome();
+  await createActionTree(home);
+  disktop(home, ["scan", home, "--json"]);
+
+  const result = disktop(home, ["find", "stale", "--path", home, "--older-than", "1"]);
+
+  assert.match(result.stdout, /not modified since/i);
+  assert.doesNotMatch(result.stdout, /not opened|last opened/i);
 });

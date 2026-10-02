@@ -110,6 +110,7 @@ export async function runCli(args: readonly string[], context: CliContext): Prom
       ...(optional(parsed, "keep")),
       ...(optional(parsed, "keep-under", "keepUnder")),
       ...(optional(parsed, "min-size", "minSize")),
+      ...(optional(parsed, "older-than", "olderThan")),
     });
   }
   if (name === "snapshots") {

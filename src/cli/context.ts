@@ -31,6 +31,12 @@ export interface StorageServices {
   readonly explore: ExploreService;
   readonly snapshots: SnapshotService;
   readonly defaults: ScanDefaults;
+  readonly find: FindDefaults;
+}
+
+/** What a search assumes when the command line does not say. */
+export interface FindDefaults {
+  readonly staleAfterDays: number;
 }
 
 /**

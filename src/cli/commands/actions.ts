@@ -1,10 +1,14 @@
 import type { ActionOperation } from "../../domain/actions.js";
 import { KEEP_RULES, type KeepRule } from "../../domain/duplicates.js";
 import type { OperationFailure } from "../../domain/errors.js";
-import type { ScanCompleteness, Warning } from "../../domain/models.js";
+import type { IndexedEntry, ScanCompleteness, Warning } from "../../domain/models.js";
 import { rawPathFromUtf8 } from "../../domain/paths.js";
 import type { DuplicateOutcome } from "../../application/duplicates.js";
 import { parseSize } from "../../application/explore.js";
+import {
+  staleBeforeNanoseconds as staleBeforeNanoseconds_,
+  type StalenessBasis,
+} from "../../domain/staleness.js";
 import { FIND_KINDS, type FindKind } from "../../application/find.js";
 import type { CliContext } from "../context.js";
 import {
@@ -55,6 +59,7 @@ export interface FindOptions {
   readonly keep?: string;
   readonly keepUnder?: string;
   readonly minSize?: string;
+  readonly olderThan?: string;
 }
 
 /** The operations `clean plan` can fix today. The rest belong to later phases. */
@@ -360,6 +365,18 @@ export async function runFind(context: CliContext, options: FindOptions): Promis
     }
   }
 
+  let staleBeforeNanoseconds: bigint | undefined;
+  if (options.kind === "stale") {
+    const days = options.olderThan ?? String(context.storage.find.staleAfterDays);
+    if (!/^[1-9][0-9]{0,3}$/.test(days)) {
+      return refuse(context, "find", options.asJson, {
+        code: "invalid-input",
+        message: "'--older-than' accepts a whole number of days from 1 to 9999.",
+      });
+    }
+    staleBeforeNanoseconds = staleBeforeNanoseconds_(context.now(), Number(days));
+  }
+
   const outcome = await context.actions.find({
     kind: options.kind as FindKind,
     scanId: scan.scanId,
@@ -370,6 +387,7 @@ export async function runFind(context: CliContext, options: FindOptions): Promis
       ? {}
       : { keepUnder: rawPathFromUtf8(context.resolvePath(options.keepUnder)) }),
     ...(minimumBytes === undefined ? {} : { minimumBytes }),
+    ...(staleBeforeNanoseconds === undefined ? {} : { staleBeforeNanoseconds }),
   });
 
   if (outcome.kind === "refused") {
@@ -383,6 +401,9 @@ export async function runFind(context: CliContext, options: FindOptions): Promis
   }
   if (outcome.kind === "duplicates") {
     return renderDuplicates(context, options, scan.scanId, scan.completeness, outcome.result);
+  }
+  if (outcome.kind === "stale") {
+    return renderStale(context, options, scan.scanId, scan.completeness, outcome);
   }
 
   // A page of a partial scan is not a picture of the whole tree, and says so.
@@ -410,6 +431,60 @@ export async function runFind(context: CliContext, options: FindOptions): Promis
     return exitCode;
   }
 
+  for (const line of entryLines(outcome.entries, context.settings.units, "allocated")) {
+    context.output.stdout(`${line}\n`);
+  }
+  for (const line of warningLines(warnings)) {
+    context.output.stderr(`${line}\n`);
+  }
+  return exitCode;
+}
+
+/**
+ * A stale listing's answer.
+ *
+ * It carries the basis beside the entries, because the dates are only half the
+ * answer: what makes them useful or misleading is what the mount holding them
+ * does about access times, and a reader who is not told that will read "not
+ * modified" as "not used".
+ */
+function renderStale(
+  context: CliContext,
+  options: FindOptions,
+  scanId: string,
+  completeness: ScanCompleteness,
+  outcome: { readonly entries: readonly IndexedEntry[]; readonly nextCursor?: string; readonly basis: StalenessBasis },
+): number {
+  const complete = completeness.complete;
+  const exitCode = complete ? EXIT.complete : EXIT.incomplete;
+  const warnings = complete ? [] : completeness.warnings;
+
+  if (options.asJson) {
+    writeEnvelope(
+      context.output.stdout,
+      buildEnvelope({
+        command: "find",
+        generatedAt: context.now(),
+        status: complete ? "complete" : "incomplete",
+        exitCode,
+        warnings,
+        data: {
+          kind: "stale",
+          scanId,
+          entries: outcome.entries.map(encodeIndexedEntry),
+          ...(outcome.nextCursor === undefined ? {} : { nextCursor: outcome.nextCursor }),
+          basis: {
+            field: outcome.basis.field,
+            confidence: outcome.basis.confidence,
+            label: outcome.basis.label,
+          },
+        },
+      }),
+    );
+    return exitCode;
+  }
+
+  context.output.stdout(`These files were ${outcome.basis.label}\n`);
   for (const line of entryLines(outcome.entries, context.settings.units, "allocated")) {
     context.output.stdout(`${line}\n`);
   }

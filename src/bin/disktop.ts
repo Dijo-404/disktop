@@ -36,6 +36,7 @@ async function buildContext(): Promise<CliContext> {
       explore: services.explore,
       snapshots: services.snapshots,
       defaults: services.scanDefaults,
+      find: services.findDefaults,
     },
     footprint: services.footprint,
     actions: {
