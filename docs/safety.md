@@ -68,11 +68,16 @@ it never came from.
 
 ### Limits this phase does not remove
 
-A reviewed directory is revalidated by its own identity, not by a manifest of
-everything beneath it. An entry added to it since review changes its modification
-time, so the item is skipped; a file changed *below* a reviewed subdirectory is not
-separately detected, and the preview says that a directory's contents can change
-between review and commit.
+A reviewed directory carries a digest of everything beneath it: each entry's
+relative path bytes, kind, inode, size, and modification time, children in byte
+order. The helper takes it with `inspect` when the plan is made and takes it again
+immediately before the directory is moved to Trash, erased, copied, compressed, or
+disposed of after a copy, and skips the item as `changed-target` when anything below
+it was added, removed, renamed, or rewritten. Emptying Trash does the same, so
+something trashed after the review is not released by it. A directory with another
+filesystem mounted anywhere inside it, or one Disktop cannot read all the way down,
+is refused at planning time. The window between that last digest and the syscall
+remains, as the race below describes.
 
 The identity comparison is the device, inode, type, size, and modification time. The
 kernel's mount id travels with them as context and is not compared, because the Node

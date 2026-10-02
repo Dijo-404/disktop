@@ -19,9 +19,17 @@ export interface EntryFingerprint {
   readonly modifiedNanoseconds: bigint;
 }
 
+export interface SubtreeManifest {
+  readonly entries: bigint;
+  /** SHA-256 over every entry below a directory, as 64 lowercase hex characters. */
+  readonly digest: string;
+}
+
 export interface PlannedEntry {
   readonly path: RawPath;
   readonly expected: EntryFingerprint;
+  /** What a reviewed directory held; absent for anything that is not one. */
+  readonly subtree?: SubtreeManifest;
   /**
    * What this entry measured at review time. The helper renames a subtree in
    * one syscall rather than re-measuring it, so this is the number a result

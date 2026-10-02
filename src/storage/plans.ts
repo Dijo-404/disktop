@@ -6,6 +6,7 @@ import type {
   ActionPlan,
   EntryFingerprint,
   PlannedEntry,
+  SubtreeManifest,
 } from "../domain/actions.js";
 import {
   ACTION_OPERATIONS,
@@ -164,6 +165,9 @@ function encodeEntry(entry: PlannedEntry): Record<string, unknown> {
       modifiedNanoseconds: decimalBytes(entry.expected.modifiedNanoseconds),
     },
     reviewedBytes: decimalBytes(entry.reviewedBytes),
+    ...(entry.subtree === undefined
+      ? {}
+      : { subtree: { entries: decimalBytes(entry.subtree.entries), digest: entry.subtree.digest } }),
   };
 }
 
@@ -278,7 +282,15 @@ function decodeEntry(value: unknown): PlannedEntry {
     path: decodePath(text(value.path)),
     expected: fingerprint,
     reviewedBytes: parseDecimalBytes(text(value.reviewedBytes)),
+    ...(value.subtree === undefined ? {} : { subtree: subtreeOf(value.subtree) }),
   };
+}
+
+function subtreeOf(value: unknown): SubtreeManifest {
+  if (!isRecord(value) || !/^[0-9a-f]{64}$/.test(text(value.digest))) {
+    throw new RangeError("A stored plan's subtree is not a digest");
+  }
+  return { entries: parseDecimalBytes(text(value.entries)), digest: text(value.digest) };
 }
 
 const ENTRY_KINDS: readonly EntryFingerprint["kind"][] = ["file", "directory", "symlink"];

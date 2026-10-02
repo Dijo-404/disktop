@@ -22,9 +22,8 @@ Device and inode IDs, counts, byte sizes, and nanosecond timestamps will cross I
 | --- | --- | --- |
 | Handshake | `hello`, `probe` | Version, platform, checksum field, supported-operation list, and `openat2` capability probe only. |
 | Control | `cancel` | Stop a named in-flight request at a safe item boundary; the cancelled request still emits a final event. |
-| Implemented read | `scan`, `query-index`, `hash-candidates` | Bounded `openat2` traversal into a SQLite index, keyset-paginated pages out of it, and the staged duplicate pipeline over it. |
+| Implemented read | `scan`, `query-index`, `hash-candidates`, `inspect` | Bounded `openat2` traversal into a SQLite index, keyset-paginated pages out of it, the staged duplicate pipeline over it, and a digest of everything below a reviewed directory. |
 | Implemented actions | `trash`, `erase`, `empty-trash`, `restore`, `dedup-hardlink`, `copy-move`, `compress` | Recheck plan and target, perform one constrained syscall or a staged and verified output, journal per-item outcome. |
-| Planned read | `inspect` | Live metadata for one path. |
 | Manager journal | `manager-begin`, `manager-append`, `manager-finish` | Record intent, progress, command result, and verification for a fixed-argument Linux manager adapter. The helper does not invent or execute manager commands. |
 | Recovery | `journal-reconcile` | Resolve interrupted records into honest completed, partial, or uncertain states, and return a page of history. Reconciling and listing are one operation because a caller that could list without reconciling would read a history still claiming an abandoned action is running. |
 

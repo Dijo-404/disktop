@@ -1,13 +1,11 @@
 {
   "protocolVersion": 1,
-  "requestId": "compress-1",
-  "operation": "compress",
+  "requestId": "trash-no-subtree",
+  "operation": "trash",
   "arguments": {
     "planId": "plan-01HQ8Z3M4K5N6P7Q",
     "journalDirectory": "L2hvbWUvZXhhbXBsZS8ubG9jYWwvc3RhdGUvZGlza3RvcA==",
     "homeTrashDirectory": "L2hvbWUvZXhhbXBsZS8ubG9jYWwvc2hhcmUvVHJhc2g=",
-    "destinationDirectory": "",
-    "sourceDisposition": "trash",
     "targets": [
       {
         "path": "L2hvbWUvZXhhbXBsZS8uY2FjaGUvcGlwL2h0dHAtdjIvYTE=",
@@ -19,11 +17,7 @@
           "apparentBytes": "4096",
           "modifiedNanoseconds": "1758000000123456789"
         },
-        "reviewedBytes": "7314112512",
-        "subtree": {
-          "entries": "1284",
-          "digest": "5f2c00000000000000000000000000000000000000000000000000000000a1b9"
-        }
+        "reviewedBytes": "7314112512"
       }
     ]
   }

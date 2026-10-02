@@ -1,0 +1,10 @@
+{
+  "protocolVersion": 1,
+  "requestId": "inspect-2",
+  "operation": "inspect",
+  "arguments": {
+    "paths": [
+      "/home/example/.cache/pip"
+    ]
+  }
+}

@@ -300,3 +300,58 @@ test("a journal item's message reaches Disktop with its control characters made 
   const page = await actions.list();
   assert.doesNotMatch(page.records[0].items[0].message, /[\u001b\n]/);
 });
+
+test("a directory target carries its reviewed subtree to the helper", async () => {
+  const helper = fakeHelper([COMPLETED]);
+  const actions = createNativeActions({ journalDirectory: JOURNAL_DIRECTORY, homeTrashDirectory: HOME_TRASH_DIRECTORY, start: helper.start });
+  const reviewed = plan();
+  const withSubtree = { ...reviewed, entries: [{ ...reviewed.entries[0], subtree: { entries: 9n, digest: "b".repeat(64) } }] };
+  await actions.apply(withSubtree, new AbortController().signal);
+  assert.deepEqual(helper.sent[0].arguments.targets[0].subtree, { entries: "9", digest: "b".repeat(64) });
+});
+
+test("inspect asks the helper once and answers per path", async () => {
+  const pip = rawPathFromUtf8("/home/example/.cache/pip");
+  const etc = rawPathFromUtf8("/home/example/mnt");
+  const helper = fakeHelper([
+    {
+      protocolVersion: 1,
+      requestId: "inspect-1",
+      eventId: "2",
+      event: "complete",
+      result: {
+        paths: [
+          { path: pip.bytesBase64, subtree: { entries: "4", digest: "c".repeat(64) } },
+          { path: etc.bytesBase64, refusal: { code: "protected-path", message: "Another filesystem is mounted inside this directory." } },
+        ],
+      },
+    },
+  ]);
+  const actions = createNativeActions({ journalDirectory: JOURNAL_DIRECTORY, homeTrashDirectory: HOME_TRASH_DIRECTORY, start: helper.start });
+  const answers = await actions.inspect([pip, etc], new AbortController().signal);
+  assert.equal(helper.sent[0].operation, "inspect");
+  assert.deepEqual(answers.get(pip.bytesBase64), { kind: "inspected", subtree: { entries: 4n, digest: "c".repeat(64) } });
+  assert.equal(answers.get(etc.bytesBase64).kind, "refused");
+  assert.equal(answers.get(etc.bytesBase64).code, "protected-path");
+});
+
+test("emptying Trash names each Trash directory with what it held at review", async () => {
+  const helper = fakeHelper([COMPLETED]);
+  const actions = createNativeActions({ journalDirectory: JOURNAL_DIRECTORY, homeTrashDirectory: HOME_TRASH_DIRECTORY, start: helper.start });
+  const trash = rawPathFromUtf8(HOME_TRASH_DIRECTORY);
+  const emptying = plan({
+    operation: "empty-trash",
+    entries: [
+      {
+        path: trash,
+        expected: { device: 1n, inode: 2n, mountId: "1", kind: "directory", apparentBytes: 4096n, modifiedNanoseconds: 1n },
+        reviewedBytes: 0n,
+        subtree: { entries: 2n, digest: "d".repeat(64) },
+      },
+    ],
+  });
+  await actions.apply(emptying, new AbortController().signal);
+  assert.deepEqual(helper.sent[0].arguments.trashDirectories, [
+    { path: trash.bytesBase64, subtree: { entries: "2", digest: "d".repeat(64) } },
+  ]);
+});

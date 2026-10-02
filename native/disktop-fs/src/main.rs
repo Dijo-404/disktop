@@ -8,6 +8,7 @@ mod index;
 mod journal;
 mod protocol;
 mod query;
+mod subtree;
 mod sys;
 mod transfer;
 mod walk;

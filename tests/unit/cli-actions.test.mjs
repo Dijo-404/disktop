@@ -38,6 +38,7 @@ const PLAN = {
         modifiedNanoseconds: 1_759_190_400_123_456_789n,
       },
       reviewedBytes: 7_314_112_512n,
+      subtree: { entries: 1284n, digest: "5f2c".padEnd(64, "0") },
     },
   ],
   regenerationCost: "Re-downloaded on the next build that needs a crate.",

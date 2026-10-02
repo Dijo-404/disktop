@@ -15,6 +15,10 @@
           "kind": "directory",
           "apparentBytes": "4096",
           "modifiedNanoseconds": "1758000000123456789"
+        },
+        "subtree": {
+          "entries": "1284",
+          "digest": "5f2c00000000000000000000000000000000000000000000000000000000a1b9"
         }
       }
     ]

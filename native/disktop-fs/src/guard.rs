@@ -43,7 +43,7 @@ pub struct Refusal {
 }
 
 impl Refusal {
-    fn new(code: &'static str, message: impl Into<String>) -> Refusal {
+    pub(crate) fn new(code: &'static str, message: impl Into<String>) -> Refusal {
         Refusal {
             code,
             message: message.into(),

@@ -166,6 +166,7 @@ export async function createServices(options: CompositionOptions = {}): Promise<
       paths: discovery.paths,
       footprints,
       store: planStore,
+      inspect: actions,
       settings: {
         home,
         // Home is the scope cleanup acts inside; it is never a target itself,

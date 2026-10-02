@@ -36,6 +36,8 @@ pub struct Target {
     /// re-measure a subtree it is about to rename in one syscall; it reports
     /// the plan's own number, partitioned by what actually happened to it.
     pub reviewed_bytes: u64,
+    /// What a reviewed directory held, to be compared before it is touched.
+    pub subtree: Option<crate::subtree::Subtree>,
 }
 
 /// A permanent removal. There is no Trash here and no undo; the plan that
@@ -56,7 +58,7 @@ pub struct EmptyTrashRequest {
     /// `$XDG_DATA_HOME/Trash`, so the helper can recognise it without asking
     /// Node which directories it is allowed to empty.
     pub home_trash_directory: Vec<u8>,
-    pub trash_directories: Vec<Vec<u8>>,
+    pub trash_directories: Vec<(Vec<u8>, crate::subtree::Subtree)>,
 }
 
 /// Putting back what a Trash move moved. The journal is the authority for
@@ -328,6 +330,9 @@ fn hardlink_one(
             return refuse(refusal.code, refusal.message, outcome);
         }
     };
+    if let Err((code, message)) = subtree_unchanged(&parent, target) {
+        return refuse(code, message, outcome_for(code));
+    }
 
     if live.kind != EntryKind::File {
         return refuse(
@@ -764,6 +769,9 @@ fn compress_one(
             return refuse(refusal.code, refusal.message, outcome);
         }
     };
+    if let Err((code, message)) = subtree_unchanged(&parent, target) {
+        return refuse(code, message, outcome_for(code));
+    }
     if live.kind != EntryKind::File && live.kind != EntryKind::Directory {
         return refuse(
             "invalid-arguments",
@@ -1034,6 +1042,9 @@ fn move_one(
             return refuse(refusal.code, refusal.message, outcome);
         }
     };
+    if let Err((code, message)) = subtree_unchanged(&parent, target) {
+        return refuse(code, message, outcome_for(code));
+    }
     if live.kind != EntryKind::File && live.kind != EntryKind::Directory {
         return refuse(
             "invalid-arguments",
@@ -1311,6 +1322,9 @@ fn dispose_of_source(
     if let Err(refusal) = guard::revalidate(&parent, &target.expected) {
         return published_but_kept(target, &refusal.message);
     }
+    if let Err((_, message)) = subtree_unchanged(&parent, target) {
+        return published_but_kept(target, &message);
+    }
 
     let removed = match context.disposition {
         SourceDisposition::Trash => {
@@ -1572,6 +1586,9 @@ fn trash_one(
             return refuse(refusal.code, refusal.message, outcome);
         }
     };
+    if let Err((code, message)) = subtree_unchanged(&parent, target) {
+        return refuse(code, message, outcome_for(code));
+    }
 
     let destination = match choose_trash(guard, home_trash, &target.path, live.device) {
         Ok(destination) => destination,
@@ -1699,6 +1716,9 @@ fn erase_one(
             return refuse(refusal.code, refusal.message, outcome);
         }
     };
+    if let Err((code, message)) = subtree_unchanged(&parent, target) {
+        return refuse(code, message, outcome_for(code));
+    }
 
     if let Err(error) = journal.record_intent(journal_id, position, &target.path, None) {
         return refuse(
@@ -1802,6 +1822,7 @@ pub fn run_restore(
             path: item.path.clone(),
             expected: UNCHECKED,
             reviewed_bytes: item.bytes,
+            subtree: None,
         })
         .collect();
     let destinations: Vec<(Vec<u8>, Option<Identity>)> = restorable
@@ -2029,10 +2050,11 @@ pub fn run_empty_trash(
     let targets: Vec<Target> = request
         .trash_directories
         .iter()
-        .map(|path| Target {
+        .map(|(path, subtree)| Target {
             path: path.clone(),
             expected: UNCHECKED,
             reviewed_bytes: 0,
+            subtree: Some(*subtree),
         })
         .collect();
 
@@ -2121,6 +2143,15 @@ fn empty_one(
         Ok(parent) => parent,
         Err(refusal) => return refuse(refusal.code, refusal.message),
     };
+    if let Err((code, message)) = subtree_unchanged(&parent, target) {
+        return ItemReport {
+            path: target.path.clone(),
+            outcome: outcome_for(code),
+            reason: Some(code),
+            message: Some(message),
+            bytes: 0,
+        };
+    }
     let directory = match sys::open_directory_no_symlinks(parent.descriptor(), &parent.name) {
         Ok(descriptor) => descriptor,
         Err(error) => {
@@ -2382,6 +2413,25 @@ fn unrecorded(target: &Target, error: &str) -> ItemReport {
 /// thing it named is not what the plan reviewed, so the item is skipped and
 /// everything else goes ahead. A protected path or a denied permission is a
 /// failure, because the plan asked for something it may not have.
+static NEVER_CANCELLED: AtomicBool = AtomicBool::new(false);
+
+fn subtree_unchanged(
+    parent: &guard::ResolvedParent,
+    target: &Target,
+) -> Result<(), (&'static str, String)> {
+    let Some(reviewed) = &target.subtree else {
+        return Ok(());
+    };
+    match crate::subtree::digest(parent.descriptor(), &parent.name, &NEVER_CANCELLED) {
+        Ok(live) if live == *reviewed => Ok(()),
+        Ok(_) => Err((
+            "changed-target",
+            "Something inside it changed since it was reviewed, so it was left alone.".to_owned(),
+        )),
+        Err(refusal) => Err((refusal.code, refusal.message)),
+    }
+}
+
 fn outcome_for(code: &str) -> Outcome {
     match code {
         "changed-target" => Outcome::Skipped,

@@ -33,13 +33,14 @@ use std::thread::JoinHandle;
 
 const PROTOCOL_VERSION: u16 = 1;
 const MAX_REQUEST_BYTES: usize = 1024 * 1024;
-const SUPPORTED_OPERATIONS: [&str; 14] = [
+const SUPPORTED_OPERATIONS: [&str; 15] = [
     "hello",
     "probe",
     "cancel",
     "scan",
     "query-index",
     "hash-candidates",
+    "inspect",
     "trash",
     "erase",
     "empty-trash",
@@ -49,12 +50,7 @@ const SUPPORTED_OPERATIONS: [&str; 14] = [
     "compress",
     "journal-reconcile",
 ];
-const PLANNED_OPERATIONS: [&str; 4] = [
-    "inspect",
-    "manager-begin",
-    "manager-append",
-    "manager-finish",
-];
+const PLANNED_OPERATIONS: [&str; 3] = ["manager-begin", "manager-append", "manager-finish"];
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -89,6 +85,21 @@ struct TargetArguments {
     expected: FingerprintArguments,
     #[serde(default)]
     reviewed_bytes: Option<String>,
+    #[serde(default)]
+    subtree: Option<SubtreeArguments>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct SubtreeArguments {
+    entries: String,
+    digest: String,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct InspectArguments {
+    paths: Vec<String>,
 }
 
 #[derive(Deserialize)]
@@ -154,7 +165,14 @@ struct EmptyTrashArguments {
     plan_id: String,
     journal_directory: String,
     home_trash_directory: String,
-    trash_directories: Vec<String>,
+    trash_directories: Vec<TrashDirectoryArguments>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct TrashDirectoryArguments {
+    path: String,
+    subtree: SubtreeArguments,
 }
 
 #[derive(Deserialize)]
@@ -457,6 +475,7 @@ fn handle_request(server: &Arc<Server>, line: &[u8]) {
         "scan" => scan(server, responder, request.arguments),
         "query-index" => query_index(&responder, request.arguments),
         "hash-candidates" => hash_candidates(server, responder, request.arguments),
+        "inspect" => inspect(server, responder, request.arguments),
         operation if PLANNED_OPERATIONS.contains(&operation) => fail(
             &responder,
             "unsupported-operation",
@@ -1248,6 +1267,76 @@ fn restore(server: &Arc<Server>, responder: Responder, arguments: Map<String, Va
     );
 }
 
+fn inspect(server: &Arc<Server>, responder: Responder, arguments: Map<String, Value>) {
+    let arguments: InspectArguments = match decode(arguments) {
+        Ok(arguments) => arguments,
+        Err(message) => return fail(&responder, "invalid-arguments", &message),
+    };
+    if arguments.paths.is_empty() || arguments.paths.len() > 1000 {
+        return fail(
+            &responder,
+            "invalid-arguments",
+            "inspect takes between 1 and 1000 paths",
+        );
+    }
+    let mut paths = Vec::with_capacity(arguments.paths.len());
+    for encoded in &arguments.paths {
+        match decode_path(encoded) {
+            Ok(path) => paths.push(path),
+            Err(message) => return fail(&responder, "invalid-arguments", &message),
+        }
+    }
+    if let Err(message) = require_containment() {
+        return fail(&responder, "unsupported-kernel", &message);
+    }
+
+    spawn_cancellable(
+        server,
+        responder,
+        "inspect",
+        SEARCH_ABANDONED,
+        move |responder, cancelled| {
+            let answers: Vec<Value> = paths
+                .iter()
+                .map(|path| {
+                    let encoded = crate::base64::encode(path);
+                    match inspect_one(path, cancelled) {
+                        Ok(subtree) => json!({
+                            "path": encoded,
+                            "subtree": { "entries": subtree.entries.to_string(), "digest": subtree.hex() },
+                        }),
+                        Err(refusal) => json!({
+                            "path": encoded,
+                            "refusal": { "code": refusal.code, "message": refusal.message },
+                        }),
+                    }
+                })
+                .collect();
+            responder.emit("complete", json!({ "result": { "paths": answers } }));
+        },
+    );
+}
+
+fn inspect_one(
+    path: &[u8],
+    cancelled: &AtomicBool,
+) -> Result<crate::subtree::Subtree, crate::guard::Refusal> {
+    let parent = crate::guard::resolve_parent(path)?;
+    let live = crate::sys::metadata_at(parent.descriptor(), &parent.name).map_err(|error| {
+        crate::guard::Refusal::new(
+            "changed-target",
+            format!("It is not there any more: {error}"),
+        )
+    })?;
+    if live.kind != crate::sys::EntryKind::Directory {
+        return Err(crate::guard::Refusal::new(
+            "invalid-arguments",
+            "Only a directory has contents to inspect.",
+        ));
+    }
+    crate::subtree::digest(parent.descriptor(), &parent.name, cancelled)
+}
+
 fn require_containment() -> Result<(), String> {
     crate::sys::openat2_available().map_err(|error| {
         format!(
@@ -1471,12 +1560,12 @@ fn empty_trash_request(
         return Err("Emptying Trash needs at least one directory".to_owned());
     }
     let mut directories = Vec::with_capacity(arguments.trash_directories.len());
-    for encoded in &arguments.trash_directories {
-        let path = decode_path(encoded)?;
+    for directory in &arguments.trash_directories {
+        let path = decode_path(&directory.path)?;
         if path.first() != Some(&b'/') {
             return Err("A Trash directory must be an absolute path".to_owned());
         }
-        directories.push(path);
+        directories.push((path, subtree_from(&directory.subtree)?));
     }
     let home_trash_directory = decode_path(&arguments.home_trash_directory)?;
     if home_trash_directory.first() != Some(&b'/') {
@@ -1497,14 +1586,32 @@ fn decoded_directory(encoded: &str) -> Result<PathBuf, String> {
 fn decoded_targets(arguments: &[TargetArguments]) -> Result<Vec<actions::Target>, String> {
     let mut targets = Vec::with_capacity(arguments.len());
     for target in arguments {
+        let expected = fingerprint(&target.expected)?;
+        let subtree = match &target.subtree {
+            None => None,
+            Some(reviewed) => Some(subtree_from(reviewed)?),
+        };
+        if expected.kind == crate::sys::EntryKind::Directory && subtree.is_none() {
+            return Err(
+                "A directory target needs the subtree it was reviewed with, so its contents can be checked again".to_owned(),
+            );
+        }
         targets.push(actions::Target {
             path: decode_path(&target.path)?,
-            expected: fingerprint(&target.expected)?,
+            expected,
             reviewed_bytes: optional_u64(target.reviewed_bytes.as_deref(), "reviewedBytes")?
                 .unwrap_or(0),
+            subtree,
         });
     }
     Ok(targets)
+}
+
+fn subtree_from(arguments: &SubtreeArguments) -> Result<crate::subtree::Subtree, String> {
+    let entries = parse_u64(Some(&arguments.entries))
+        .ok_or_else(|| "subtree.entries must be a decimal integer".to_owned())?;
+    crate::subtree::Subtree::from_hex(entries, &arguments.digest)
+        .ok_or_else(|| "subtree.digest must be 64 lowercase hexadecimal characters".to_owned())
 }
 
 fn fingerprint(arguments: &FingerprintArguments) -> Result<Fingerprint, String> {
@@ -1995,6 +2102,7 @@ mod tests {
                 "scan",
                 "query-index",
                 "hash-candidates",
+                "inspect",
                 "trash",
                 "erase",
                 "empty-trash",
@@ -2080,10 +2188,10 @@ mod tests {
     #[test]
     fn a_planned_operation_is_explicitly_unsupported() {
         let output = responses(
-            "{\"protocolVersion\":1,\"requestId\":\"inspect-1\",\"operation\":\"inspect\",\"arguments\":{}}\n",
+            "{\"protocolVersion\":1,\"requestId\":\"manager-1\",\"operation\":\"manager-begin\",\"arguments\":{}}\n",
         );
         assert_eq!(output[0]["event"], "error");
-        assert_eq!(output[0]["requestId"], "inspect-1");
+        assert_eq!(output[0]["requestId"], "manager-1");
         assert_eq!(output[0]["error"]["code"], "unsupported-operation");
     }
 
@@ -2345,11 +2453,31 @@ mod tests {
         )
     }
 
+    fn subtree_of(path: &[u8]) -> Option<String> {
+        let parent = crate::guard::resolve_parent(path).expect("the path resolves");
+        let live = crate::sys::metadata_at(parent.descriptor(), &parent.name).expect("it is there");
+        if live.kind != crate::sys::EntryKind::Directory {
+            return None;
+        }
+        let subtree = crate::subtree::digest(
+            parent.descriptor(),
+            &parent.name,
+            &std::sync::atomic::AtomicBool::new(false),
+        )
+        .expect("the reviewed directory reads");
+        Some(format!(
+            ",\"subtree\":{{\"entries\":\"{}\",\"digest\":\"{}\"}}",
+            subtree.entries,
+            subtree.hex()
+        ))
+    }
+
     fn target(path: &[u8], reviewed_bytes: u64) -> String {
         format!(
-            "{{\"path\":\"{}\",\"expected\":{},\"reviewedBytes\":\"{reviewed_bytes}\"}}",
+            "{{\"path\":\"{}\",\"expected\":{},\"reviewedBytes\":\"{reviewed_bytes}\"{}}}",
             crate::base64::encode(path),
             fingerprint(path),
+            subtree_of(path).unwrap_or_default(),
         )
     }
 
@@ -2560,6 +2688,68 @@ mod tests {
         assert_eq!(record["items"].as_array().unwrap().len(), 1);
         assert_eq!(record["items"][0]["outcome"], "completed");
         assert!(record["items"][0]["destination"].is_string());
+    }
+
+    // --- A reviewed directory's contents --------------------------------------
+
+    #[test]
+    fn a_directory_whose_contents_changed_since_review_is_not_trashed() {
+        let sandbox = Sandbox::new("subtree-trash");
+        sandbox.directory(b"state");
+        sandbox.directory(b"cache/inner");
+        sandbox.file(b"cache/inner/a.bin", 64);
+        let mut cache = sandbox.bytes();
+        cache.extend_from_slice(b"/cache");
+        let reviewed = target(&cache, 64);
+        sandbox.file(b"cache/inner/new.bin", 1);
+
+        let events = run_trash("subtree-1", &sandbox, &[reviewed]);
+        let item = item_results(&events, "subtree-1")[0];
+        assert_eq!(item["itemResult"]["outcome"], "skipped");
+        assert_eq!(item["itemResult"]["reason"], "changed-target");
+        assert!(sandbox.path().join("cache/inner/new.bin").exists());
+    }
+
+    #[test]
+    fn a_directory_target_without_its_reviewed_subtree_is_refused() {
+        let sandbox = Sandbox::new("subtree-missing");
+        sandbox.directory(b"state");
+        sandbox.directory(b"cache");
+        let mut cache = sandbox.bytes();
+        cache.extend_from_slice(b"/cache");
+        let bare = format!(
+            "{{\"path\":\"{}\",\"expected\":{},\"reviewedBytes\":\"0\"}}",
+            crate::base64::encode(&cache),
+            fingerprint(&cache),
+        );
+        let events = run_trash("subtree-2", &sandbox, &[bare]);
+        let last = events.last().unwrap();
+        assert_eq!(last["event"], "error");
+        assert_eq!(last["error"]["code"], "invalid-arguments");
+        assert!(sandbox.path().join("cache").exists());
+    }
+
+    #[test]
+    fn inspect_answers_with_a_digest_for_a_directory_and_a_refusal_for_a_file() {
+        let sandbox = Sandbox::new("inspect");
+        sandbox.directory(b"tree");
+        sandbox.file(b"tree/a.bin", 8);
+        sandbox.file(b"plain.bin", 8);
+        let mut tree = sandbox.bytes();
+        tree.extend_from_slice(b"/tree");
+        let mut plain = sandbox.bytes();
+        plain.extend_from_slice(b"/plain.bin");
+        let request = format!(
+            "{{\"protocolVersion\":1,\"requestId\":\"inspect-1\",\"operation\":\"inspect\",\
+               \"arguments\":{{\"paths\":[\"{}\",\"{}\"]}}}}\n",
+            crate::base64::encode(&tree),
+            crate::base64::encode(&plain),
+        );
+        let events = session(&[request], |events| terminal(events, "inspect-1"));
+        let result = &completion(&events, "inspect-1")["result"]["paths"];
+        assert_eq!(result[0]["subtree"]["entries"], "1");
+        assert_eq!(result[0]["subtree"]["digest"].as_str().unwrap().len(), 64);
+        assert_eq!(result[1]["refusal"]["code"], "invalid-arguments");
     }
 
     // --- What a crash left staged ------------------------------------------
@@ -3980,8 +4170,10 @@ mod tests {
 
         let protected = format!(
             "{{\"path\":\"{}\",\"expected\":{{\"device\":\"1\",\"inode\":\"2\",\"mountId\":\"3\",\
-               \"kind\":\"directory\",\"apparentBytes\":\"4\",\"modifiedNanoseconds\":\"5\"}}}}",
+               \"kind\":\"directory\",\"apparentBytes\":\"4\",\"modifiedNanoseconds\":\"5\"}},\
+               \"subtree\":{{\"entries\":\"0\",\"digest\":\"{}\"}}}}",
             crate::base64::encode(b"/usr/lib"),
+            "0".repeat(64),
         );
 
         let events = run_erase("erase-3", &sandbox, &[reviewed, protected]);
@@ -4020,7 +4212,22 @@ mod tests {
         state.extend_from_slice(b"/state");
         let encoded: Vec<String> = directories
             .iter()
-            .map(|directory| format!("\"{}\"", crate::base64::encode(directory)))
+            .map(|directory| {
+                let parent = crate::guard::resolve_parent(directory).expect("the Trash resolves");
+                let subtree = crate::subtree::digest(
+                    parent.descriptor(),
+                    &parent.name,
+                    &std::sync::atomic::AtomicBool::new(false),
+                )
+                .map(|subtree| (subtree.entries, subtree.hex()))
+                .unwrap_or((0, "0".repeat(64)));
+                format!(
+                    "{{\"path\":\"{}\",\"subtree\":{{\"entries\":\"{}\",\"digest\":\"{}\"}}}}",
+                    crate::base64::encode(directory),
+                    subtree.0,
+                    subtree.1
+                )
+            })
             .collect();
         let mut home_trash = sandbox.bytes();
         home_trash.extend_from_slice(b"/trash-home");
@@ -4066,6 +4273,30 @@ mod tests {
             sandbox.path().join("trash-home/files").exists(),
             "the Trash itself stays; only its contents go"
         );
+    }
+
+    #[test]
+    fn something_trashed_after_the_review_is_not_released_by_emptying_trash() {
+        let sandbox = Sandbox::new("empty-trash-addition");
+        sandbox.directory(b"work");
+        sandbox.file(b"work/one.bin", 1024);
+        sandbox.file(b"work/two.bin", 1024);
+        let mut one = sandbox.bytes();
+        one.extend_from_slice(b"/work/one.bin");
+        let mut two = sandbox.bytes();
+        two.extend_from_slice(b"/work/two.bin");
+        run_trash("trash-21", &sandbox, &[target(&one, 1024)]);
+
+        let mut trash = sandbox.bytes();
+        trash.extend_from_slice(b"/trash-home");
+        let reviewed = empty_trash_request("empty-late", &sandbox, &[trash]);
+        run_trash("trash-22", &sandbox, &[target(&two, 1024)]);
+
+        let events = session(&[reviewed], |events| terminal(events, "empty-late"));
+        let result = &completion(&events, "empty-late")["result"];
+        assert_eq!(result["skipped"], "1");
+        assert!(sandbox.path().join("trash-home/files/one.bin").exists());
+        assert!(sandbox.path().join("trash-home/files/two.bin").exists());
     }
 
     #[test]

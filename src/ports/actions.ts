@@ -1,4 +1,4 @@
-import type { ActionPlan, ActionResult } from "../domain/actions.js";
+import type { ActionPlan, ActionResult, SubtreeManifest } from "../domain/actions.js";
 import type { Bytes, RawPath } from "../domain/models.js";
 
 /**
@@ -12,6 +12,15 @@ export interface ActionPort {
   apply(plan: ActionPlan, signal: AbortSignal): Promise<ActionResult>;
   /** Put back what one Trash action moved, identified by its journal record. */
   restore(journalId: string, signal: AbortSignal): Promise<ActionResult>;
+}
+
+export type InspectOutcome =
+  | { readonly kind: "inspected"; readonly subtree: SubtreeManifest }
+  | { readonly kind: "refused"; readonly code: string; readonly message: string };
+
+/** What is inside reviewed directories, keyed by each path's `bytesBase64`. */
+export interface InspectPort {
+  inspect(paths: readonly RawPath[], signal: AbortSignal): Promise<ReadonlyMap<string, InspectOutcome>>;
 }
 
 export type ItemOutcome = "in-progress" | "completed" | "skipped" | "failed" | "uncertain";
