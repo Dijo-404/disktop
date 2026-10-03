@@ -131,6 +131,24 @@ phases that were never published; this is the first version anybody can install.
     again instead of failing as an internal error.
 - Category totals no longer compare every finding with every other: at the most
   findings discovery returns, a findings tab redraws in 3 ms instead of half a second.
+- Ctrl+C typed at a terminal reached the helper too (it shared the terminal's process
+  group) and killed it mid-item, so a scan could not report and an action could not
+  journal its item. The helper now runs in its own process group and is asked to stop
+  by request ID; it still ends when Disktop is killed, because its stdin closes.
+- TUI fixes from an independent review, each with a test that failed first:
+  - A signal never abandons an action on a timer: it is asked to stop after its
+    current item and waited for. Ctrl+C at a sudo or pkexec password prompt cancels
+    that action and the TUI carries on.
+  - A plan answered late can no longer replace an open dialog, so a key meant for one
+    dialog cannot confirm another; a confirming key within 400 ms of a dialog
+    appearing is ignored; a stopped plan's answer is dropped.
+  - A duplicate copy is offered Trash or a byte-compared hardlink, never a plain
+    permanent removal.
+  - A plan is confirmed only at 60×20 or larger, where all of it is on screen; a
+    manager review counts every command it will run.
+  - One change to the disk at a time; History refreshes when an action finishes; a
+    failed or superseded scan no longer leaves or steals the progress panel; cursors
+    never outlive their query; flag and keycap emoji are measured two cells wide.
 
 ### Phase 6: manager cleanup, alerts, and the gaps earlier phases left
 
