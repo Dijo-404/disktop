@@ -1,8 +1,84 @@
 # Changelog
 
-All public changes will be recorded here when the first complete Linux release is published.
+All notable changes to Disktop are recorded here. Versions follow [Semantic Versioning](https://semver.org/).
 
-## Unreleased
+## 1.0.0 — unreleased (release candidate)
+
+The first public release. Everything below the Phase headings was built in internal
+phases that were never published; this is the first version anybody can install.
+
+### Phase 7: the complete terminal UI, reports, and completions
+
+- The TUI is the whole product in a terminal, at 80×24 and down to 40×10:
+  - **Disks**: usage bars per filesystem, and for the selected one a stacked bar that
+    separates used, root-reserved, and available space, with its device, inodes, and
+    every mount.
+  - **Explore**: a stored scan, a directory at a time, with each entry's share of its
+    parent, growth since the previous comparable snapshot, a trend sparkline of the
+    total, and a file-type distribution. `f` cycles largest files, duplicates, stale
+    files, empty directories, and broken links; `/` filters with
+    `words ext:log >1GiB age>30 type:dir`, compiled to the same filter as `explore`.
+  - **Clean**, **Dev**, **Apps**: findings with sizes that never pass an estimate (`~`)
+    or an unmeasured size (`unknown`) off as a measurement, actionable findings totalled
+    by category apart from informational ones, and which detectors could not run.
+  - **History**: the journal item by item, with undo behind its own confirmation.
+  - Reviewed plans: `c` reviews, `y` applies a reversible plan, an irreversible one
+    needs `yes` typed. A plan that needs root suspends the TUI for the password prompt.
+    Results keep selected bytes, bytes moved to Trash, and observed free space apart.
+  - Scans with live progress; Esc stops a scan and keeps what it read.
+  - Vim keys, arrows, number keys, mouse (rows, tabs, wheel), and `?` help.
+  - `NO_COLOR` removes colour and keeps bold and inverse; a non-UTF-8 locale, the
+    kernel console, or `DISKTOP_ASCII=1` get ASCII glyphs; `TERM=dumb` gets the text
+    dashboard. The palette keeps the terminal's own foreground for text so a light
+    terminal stays legible.
+- The renderer writes only the rows that changed, in one write, and measures terminal
+  cells so wide and emoji names keep columns aligned. terminal-kit read `%s` and `^r`
+  in a filename as its own format and markup syntax; frames now go through `noFormat`.
+- Every piece of TUI work is cancellable and generation-checked, so a slow answer to an
+  old question never replaces a newer one; leaving waits for an action to journal its
+  current item. The TUI holds at most 10,000 rows of a directory and asks for a filter
+  beyond that.
+- `disktop report --format json|csv|html [--output FILE]` exports capacity, a stored
+  scan (`--path`), and findings (`--findings`). CSV neutralises formulas and carries raw
+  path bytes; HTML is one escaped file with no scripts and a restrictive CSP. A report
+  never replaces an existing file.
+- `disktop completion bash|zsh|fish`, generated from the command table that drives
+  `--help`.
+- The README carries a demo rendered from the TUI's own frames.
+
+### Phase 8: hardening and release engineering
+
+- The package is `disktop@1.0.0`: only compiled JavaScript, the four helpers and their
+  `SHA256SUMS`, the public CLI schemas, README, LICENSE, and this changelog. No install
+  script; `prepublishOnly` refuses outside the guarded publish workflow.
+- Four prebuilt helpers (x86-64 and ARM64, glibc 2.28+ and static musl) are built by
+  `scripts/build-release.mjs`. The locator, the build, and both workflows agree on their
+  names and on `SHA256SUMS`, and a test fails if they ever disagree again; before, a
+  packaged install would never have found its helper.
+- `npm run test:package` packs the tarball, checks it against an allowlist, installs it
+  into a clean prefix, runs it, and proves a tampered helper is refused. CI builds all
+  four helpers, runs the musl one on Alpine and the glibc one on the 2.28 floor, runs
+  the recovery and performance suites, and tests the packed package on each target.
+- Node side:
+  - The helper client no longer crashes on a helper that stops reading (EPIPE), keeps a
+    bounded line buffer, times out a handshake that never comes, and always reaps the
+    process.
+  - `--help` and `--version` answer without reading any configuration; a closed pipe
+    (`disktop devices | head -1`) exits quietly with the command's own status; an
+    unexpected error is one sanitized line and exit `2`.
+  - Ctrl+C makes every long command stop at a safe boundary, report what it did, and
+    exit `130`; a second Ctrl+C never abandons an item in progress.
+  - Every external tool is bounded in output and time and killed if it overstays;
+    preview and apply now reach the same Docker daemon; a manager command stopped before
+    it started is reported as never run.
+  - A dead network mount no longer hangs the dashboard; device and filesystem names
+    cannot carry terminal escapes.
+  - A snapshot whose recorded id did not match its file name could make pruning delete
+    outside the snapshot store; it is now refused. Disktop's own files are read as
+    regular files only, bounded, and written atomically with a directory fsync.
+  - Under root, every file of the install, every symlink in it, and the Node binary
+    itself must be root-owned.
+  - Empty, repeated, and undecodable arguments are refused instead of guessed at.
 
 ### Phase 6: manager cleanup, alerts, and the gaps earlier phases left
 
