@@ -175,8 +175,8 @@ reads and writes stays on your machine; reports go only where you ask.
 - Scanning and cleanup need kernel 5.6+ (`openat2`); there is deliberately no less safe
   fallback.
 - Move and compress plans need a destination, so the TUI plans Trash, permanent removal,
-  and manager actions; use `disktop clean plan --operation move|compress|hardlink` for
-  the rest.
+  manager actions, and (for a duplicate copy) hardlink replacement; use
+  `disktop clean plan --operation move|compress` for the rest.
 - Sizes from package managers are their own estimates, and the free-space change after
   an action includes whatever else wrote to the filesystem meanwhile.
 - See [docs/support-matrix.md](docs/support-matrix.md) for what has been checked on
