@@ -45,6 +45,10 @@ import type { MouseEvent } from "./render.js";
 /** How many rows one request for a list asks the index for. */
 export const PAGE_ROWS = 200;
 
+/** The most list rows the TUI holds at once; past this it asks for a filter. */
+export const MAX_ROWS = 10_000;
+const MAX_RECORDS = 2_000;
+
 /** Operations the TUI can plan without asking for a destination or a pair. */
 const PLANNABLE: readonly ActionOperation[] = ["trash", "permanent", "empty-trash", "manager"];
 
@@ -653,11 +657,25 @@ export class TuiController {
     }
   }
 
+  /**
+   * Fetch the next page, up to a bound. A directory can hold millions of
+   * entries; the TUI keeps at most `MAX_ROWS` of them in memory and says so,
+   * rather than growing with every page somebody scrolls past.
+   */
   #loadMore(): void {
-    if (this.#state.tab === "Explore" && this.#state.explore.nextCursor !== undefined && !this.#running.has("explore")) {
-      this.#reloadExplore(false, this.#state.explore.nextCursor);
+    const state = this.#state;
+    if (state.tab === "Explore" && state.explore.nextCursor !== undefined && !this.#running.has("explore")) {
+      if (state.explore.rows.length >= MAX_ROWS) {
+        this.#set(withNotice(state, `Showing the first ${MAX_ROWS.toLocaleString("en")} rows. Press / to narrow the list.`, "info"));
+        return;
+      }
+      this.#reloadExplore(false, state.explore.nextCursor);
     }
-    if (this.#state.tab === "History" && this.#state.history.nextCursor !== undefined && !this.#running.has("history")) {
+    if (state.tab === "History" && state.history.nextCursor !== undefined && !this.#running.has("history")) {
+      if (state.history.records.length >= MAX_RECORDS) {
+        this.#set(withNotice(state, `Showing the newest ${MAX_RECORDS.toLocaleString("en")} actions; 'disktop history --json' pages through them all.`, "info"));
+        return;
+      }
       this.#loadHistory(true);
     }
   }
@@ -911,10 +929,14 @@ export class TuiController {
             this.#ifCurrent("explore", generation, (current) => ({ ...current, explore: { ...current.explore, staleBasis: basis } }));
           }
         } else {
+          // Browsing pages through one directory's children; the other modes
+          // rank everything below the current place.
           const filter: EntryFilter =
-            mode === "largest"
-              ? { underPath: place, kinds: ["file"] }
-              : { underPath: place, ...(explore.search === undefined ? {} : searchFilter(explore.search, now)) };
+            mode === "browse"
+              ? { parentId: explore.directory?.id ?? "" }
+              : mode === "largest"
+                ? { underPath: place, kinds: ["file"] }
+                : { underPath: place, ...(explore.search === undefined ? {} : searchFilter(explore.search, now)) };
           const sort = mode === "largest" ? "allocated" : explore.sort;
           const outcome = await this.#services.explore.page({
             scanId: snapshot.scanId,

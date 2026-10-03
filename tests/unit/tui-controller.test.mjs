@@ -308,3 +308,33 @@ test("quitting reports an incomplete inventory as 3 and a complete one as 0", as
   partial.handleKey("q");
   assert.deepEqual(partialHooks.exits, [3]);
 });
+
+test("paging a directory asks for the same directory's children from the cursor, and stops at the memory bound", async () => {
+  const { MAX_ROWS } = await import("../../dist/tui/controller.js");
+  let served = 0;
+  const { controller, services } = await setup({
+    explorePage: (request) => {
+      if (request.filter.atPath !== undefined) {
+        return { kind: "page", page: { entries: [ROOT_ENTRY] } };
+      }
+      if (request.includeTypeTotals) {
+        return { kind: "page", page: { entries: [] } };
+      }
+      served += 1;
+      const entries = Array.from({ length: 200 }, (_, index) => ({ ...CHILDREN[3], id: `${served}-${index}`, path: { ...CHILDREN[3].path, bytesBase64: `${served}-${index}` } }));
+      return { kind: "page", page: { entries, nextCursor: `cursor-${served}` } };
+    },
+  });
+  await press(controller, "2", "n");
+  const more = calls(services, "page").at(-1)[1];
+  assert.equal(more.parentId, ROOT_ENTRY.id, "the next page is the same directory's children");
+  assert.equal(more.underPath, undefined);
+  assert.equal(controller.state.explore.rows.length, 400);
+  while (controller.state.explore.rows.length < MAX_ROWS) {
+    await press(controller, "n");
+  }
+  const pages = served;
+  await press(controller, "n");
+  assert.equal(served, pages, "nothing more is fetched past the bound");
+  assert.match(controller.state.notice.text, /Press \/ to narrow/);
+});
