@@ -945,7 +945,7 @@ fn compress_one(
         );
     }
 
-    if sys::target_exists(destination, &archive_name) {
+    if occupied(destination, &archive_name) {
         return refuse(
             "destination-exists",
             format!(
@@ -1078,7 +1078,7 @@ fn stage_archive(
 ) -> Result<Staged, (&'static str, String)> {
     for attempt in 0..64u32 {
         let staging = staging_name(archive_name, attempt);
-        if sys::target_exists(destination, &staging) {
+        if occupied(destination, &staging) {
             continue;
         }
         checkpoint(Checkpoint::NameChosen);
@@ -1272,7 +1272,7 @@ fn move_one(
     // The published name is checked before a byte is copied, so a collision
     // costs nothing. It is checked again by the publish itself, which is what
     // actually decides: a name that appears in between fails there.
-    if sys::target_exists(context.destination, &parent.name) {
+    if occupied(context.destination, &parent.name) {
         return refuse(
             "destination-exists",
             format!(
@@ -1393,6 +1393,17 @@ fn move_one(
     dispose_of_source(guard, context, journal, journal_id, position, target, &live)
 }
 
+/// Whether anything at all holds this name in `parent`.
+///
+/// Asked of the name itself and never through it: a dangling symlink is a name
+/// that is taken, and a check that followed it would call the name free, start
+/// a copy, and have the publish refuse it only at the end. A name that could
+/// not be looked up at all is not called taken here: the exclusive create or
+/// the no-replace publish makes the final decision, and reports the real reason.
+fn occupied(parent: libc::c_int, name: &[u8]) -> bool {
+    sys::metadata_at(parent, name).is_ok()
+}
+
 /// Whether the source is still exactly what the plan reviewed, asked once its
 /// copy or archive is staged and before that is published.
 ///
@@ -1493,7 +1504,7 @@ fn stage_copy(
 ) -> Result<Staged, (&'static str, String)> {
     for attempt in 0..64u32 {
         let name = staging_name(&parent.name, attempt);
-        if sys::target_exists(destination, &name) {
+        if occupied(destination, &name) {
             continue;
         }
         checkpoint(Checkpoint::NameChosen);
@@ -4100,6 +4111,43 @@ mod tests {
             .map(|entry| entry.file_name())
             .collect();
         assert_eq!(inside, vec![std::ffi::OsString::from("file")]);
+    }
+
+    /// A dangling symlink is a name that is taken. Asking through it says the
+    /// name is free, and the whole copy then runs only for the publish to
+    /// refuse it at the end.
+    #[test]
+    fn a_dangling_symlink_at_the_destination_refuses_before_anything_is_copied() {
+        let sandbox = Sandbox::new("move-onto-dangling-link");
+        sandbox.directory(b"state");
+        sandbox.directory(b"elsewhere");
+        sandbox.directory(b"work");
+        sandbox.file(b"work/data.bin", 4096);
+        sandbox.symlink(b"/nonexistent/disktop-target", b"elsewhere/data.bin");
+        let request = moving(&sandbox, b"work/data.bin", SourceDisposition::Permanent);
+
+        let staged = std::rc::Rc::new(std::cell::Cell::new(0));
+        let counted = std::rc::Rc::clone(&staged);
+        at_checkpoint(move |at| {
+            if at == Checkpoint::NameChosen {
+                counted.set(counted.get() + 1);
+            }
+        });
+        let (summary, items) =
+            collect(|report| run_copy_move(&request, report, &AtomicBool::new(false)));
+        summary.ok().expect("the move ran");
+
+        assert_eq!(items[0].outcome, Outcome::Failed);
+        assert_eq!(items[0].reason, Some("destination-exists"));
+        assert_eq!(staged.get(), 0, "nothing was staged");
+        assert!(
+            std::fs::symlink_metadata(sandbox.path().join("elsewhere/data.bin"))
+                .unwrap()
+                .file_type()
+                .is_symlink(),
+            "the link is still there"
+        );
+        assert!(sandbox.path().join("work/data.bin").exists());
     }
 
     fn linking(sandbox: &Sandbox, keep: &[u8], targets: &[&[u8]]) -> DedupHardlinkRequest {
