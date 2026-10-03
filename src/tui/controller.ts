@@ -193,6 +193,7 @@ export class TuiController {
       }
       if (dialog === undefined && !this.#state.showHelp) {
         this.#set(moveSelection(this.#state, delta));
+        this.#maybeLoadMore();
       }
       return;
     }
