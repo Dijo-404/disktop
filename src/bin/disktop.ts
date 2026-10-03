@@ -68,6 +68,7 @@ async function buildContext(): Promise<CliContext> {
     resolvePath: (path) => resolve(process.cwd(), path),
     now: () => new Date(),
     interactive,
+    progress: process.stderr.isTTY === true,
     launchTui: (settings) =>
       runTui({
         dashboard: services.dashboard,

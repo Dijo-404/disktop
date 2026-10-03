@@ -72,7 +72,7 @@ disktop timer install|uninstall
 disktop completion bash|zsh|fish
 ```
 
-The parser in `src/cli/parser.ts` will define commands and options once, and drive help plus completions. The CLI and TUI invoke the same application use cases. Any command that scans shows progress on stderr, can be cancelled, and reports an incomplete result when it could not inspect the full selected scope. Disktop does not use an interactive prompt when `--json` is requested or stdout is not a TTY.
+The parser in `src/cli/parser.ts` will define commands and options once, and drive help plus completions. The CLI and TUI invoke the same application use cases. Any command that scans shows progress on stderr, and only when stderr is a terminal: redirected into a log or a pipe, a carriage-return progress line is noise, and `--json` never draws one. It can be cancelled, and reports an incomplete result when it could not inspect the full selected scope. Disktop does not use an interactive prompt when `--json` is requested or stdout is not a TTY.
 
 ## Listing what was found
 

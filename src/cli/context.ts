@@ -103,6 +103,11 @@ export interface CliContext {
   resolvePath(path: string): string;
   /** False when stdout is redirected, which also means no interactive surface. */
   readonly interactive: boolean;
+  /**
+   * Whether stderr is a terminal. Progress is drawn there and nowhere else:
+   * written into a log or a pipe, a carriage-return progress line is noise.
+   */
+  readonly progress: boolean;
   /** Settings are passed in, so a `--units` given on the command line reaches the TUI. */
   launchTui(settings: CliSettings): Promise<number>;
 }
