@@ -579,8 +579,19 @@ fn nanoseconds(seconds: i64, nanoseconds: u32) -> u64 {
         .saturating_add(u64::from(nanoseconds))
 }
 
+/// Close a descriptor this code owns, exactly once.
+///
+/// A second close of the same number is not harmless: between the two, any
+/// other thread may have been handed that number for something else — the
+/// journal's database, a file being copied — and the second close would take
+/// it away from under it. `EBADF` is the only trace a double close leaves when
+/// nothing reused the number, so a debug build treats it as the bug it is.
 pub fn close(descriptor: RawFd) {
-    unsafe { libc::close(descriptor) };
+    let result = unsafe { libc::close(descriptor) };
+    debug_assert!(
+        result == 0 || io::Error::last_os_error().raw_os_error() != Some(libc::EBADF),
+        "descriptor {descriptor} was closed although nothing owned it any more",
+    );
 }
 
 fn cstring(bytes: &[u8]) -> io::Result<CString> {
@@ -655,3 +666,24 @@ impl Drop for Directory {
 // The stream is only ever touched by the thread that owns the walk; the raw
 // pointer is what keeps `Directory` from deriving this on its own.
 unsafe impl Send for Directory {}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::testing::Sandbox;
+
+    /// The check every other test relies on to catch a descriptor closed by two
+    /// owners: without it, a double close only shows up as some other thread's
+    /// file vanishing, which is a flaky test rather than a failing one.
+    #[test]
+    #[should_panic(expected = "closed although nothing owned it")]
+    fn closing_a_descriptor_twice_is_caught_in_a_debug_build() {
+        let sandbox = Sandbox::new("sys-double-close");
+        sandbox.file(b"file", 1);
+        let parent = open_root(&sandbox.bytes()).unwrap();
+        let descriptor = openat_read_no_symlinks(parent, b"file").unwrap();
+        close(parent);
+        close(descriptor);
+        close(descriptor);
+    }
+}
