@@ -214,3 +214,13 @@ Normal UI, scans, and user cleanup run unprivileged. A privileged manager action
 The helper records completed, skipped, failed, and remaining items after Ctrl+C or a process crash. `tests/recovery/journal.test.mjs` kills the real helper partway through a list of targets and asserts that the record never reads as complete, that no item is left claiming to be running once reconciliation has looked at it, and that nothing left its original path without the journal accounting for it. Tests for file deletion, Trash, undo, move, and compression run only in temporary sandboxes; mount tests use a namespace or VM.
 
 There is a remaining Linux race when another actor with write access to the same parent directory swaps the final component between verification and operation. The implementation must minimize and test this window, and must refuse unsafe shared-writable parents. Do not claim perfect race elimination.
+
+How small the window is depends on the operation. A Trash move and a hardlink replacement check what their rename or exchange actually took and put anything else straight back, so a swap costs nothing but a skipped item. A permanent erase has no way back: `unlinkat` removes whatever holds the name at that instant, and a file renamed over the reviewed one in the microseconds after its last check is removed with it. That is the same exposure `rm` has, it needs an actor already able to write in the target's parent, and closing it would need a removal primitive the kernel does not offer.
+
+### Known limits of a copy
+
+These do not lose data; they are recorded so nobody is surprised by them.
+
+- A copy writes every byte, so a sparse file arrives fully allocated. The free-space check before a move asks for the size the plan measured, which is the source's allocated size, so a sparse source can still fill its destination partway. When that happens the copy stops with `no-space`, what was staged is removed, and the source is untouched.
+- Hardlinks inside a moved or compressed tree are copied as separate files, so the copy can need more room than the measured tree. The same `no-space` unwinding applies.
+- The rename into Trash and an undo's rename out of it are not followed by a directory `fsync`. A power cut just after one can leave the journal saying an item moved while the file is still where it was; nothing is lost, and an undo then reports that Trash no longer holds it. The `.trashinfo` written before the move is durable either way.
