@@ -6,7 +6,7 @@ Status: planned `1.0.0` command surface. Every command the parser declares is im
 
 | Command | Behaviour |
 | --- | --- |
-| `disktop` | Opens the 80×24 dashboard when stdin and stdout are both terminals, and prints the text dashboard otherwise. |
+| `disktop` | Opens the [terminal UI](#terminal-ui) when stdin and stdout are both terminals and `TERM` can address the cursor, and prints the text dashboard otherwise (a pipe, `TERM=dumb`, or no `TERM`). |
 | `disktop --json` | One `dashboard.json` envelope: capability, filesystems, and alerts. |
 | `disktop devices [--json]` | Physical disks counted once with their partitions, plus every mounted filesystem joined to its backing disk. |
 | `disktop alerts check [--threshold PERCENT] [--notify] [--json]` | Space and inode thresholds. Exits `1` when one is reached. `--notify`, or `alerts.notify` in the configuration, also sends one desktop notification; one that could not be sent is a warning and never changes the exit status. |
@@ -99,8 +99,10 @@ Asking for sizes and getting none is an incomplete result, not a complete one.
 `--no-sizes` skips the pass on purpose, which is much faster, leaves directory
 footprints unknown, and stays complete.
 
-Ctrl+C stops discovery at the next detector boundary. `clean` prints no
-progress while it runs; that is Phase 7's work.
+Ctrl+C stops discovery at the next detector boundary. `clean` writes nothing
+while it runs; measuring sizes over a large home directory can take a while,
+and `--no-sizes` is the quick look. The TUI shows the same discovery with a
+spinner and Esc to stop it.
 
 ## Reviewed actions
 
@@ -520,3 +522,46 @@ Neither command elevates anything.
 Configuration is `$XDG_CONFIG_HOME/disktop/config.toml` with the standard home fallback;
 [config.example.toml](config.example.toml) documents every key. Rules never contain
 shell commands and pass through the same preview and apply path.
+
+## Terminal UI
+
+`disktop` with no command, on a terminal, opens the TUI. It is a surface over the same
+application services as the commands above and can do nothing they cannot: every change
+is a reviewed plan, applied through `clean apply`'s service, and journalled.
+
+| Tab | Shows | Keys beyond the common ones |
+| --- | --- | --- |
+| 1 Disks | Filesystems with usage bars; the selected one's used, root-reserved, and available space, device, inodes, and mounts. | Enter explore it, `S` scan it |
+| 2 Explore | A stored scan, a directory at a time: size, share of the parent, growth since the previous comparable snapshot, a trend sparkline of the total, file types. | Enter/`l` open, `h`/Backspace up, `s` sort, `f` finders (largest, duplicates, stale, empty, broken), `/` filter, `t` types, `n` more, `c` plan, `S` scan |
+| 3 Clean | Findings a plan could act on, totalled by category, then informational ones. | Enter details, `c` plan, `p` detectors, `r` look again |
+| 4 Dev, 5 Apps | The same findings narrowed to development or to applications. | as Clean |
+| 6 History | The journal, item by item. | `u` undo a Trash action, `n` older |
+
+Common keys: `j`/`k`/arrows, `g`/`G`, PgUp/PgDn, Ctrl+U/Ctrl+D, `1`–`6`, Tab and `[`/`]`,
+`U` units, `r` refresh, `?` help, Esc close or stop, `q` and Ctrl+C quit. The mouse
+selects rows, switches tabs, and scrolls.
+
+The filter after `/` is words (name contains), `ext:log` or `.log`, `>1GiB`/`<5MB`
+(allocated size), `age>30` (not modified for 30 days), and `type:file|dir|link|other`.
+It compiles to the same `EntryFilter` as `explore`'s flags.
+
+A plan is reviewed in a dialog showing its operation, whether and how it can be undone,
+the selected bytes and item count, the permission it needs, its expiry, its warnings,
+and its entries. `y` applies a reversible plan; an irreversible one needs `yes` typed
+and Enter. `o` re-plans with the finding's other operation. The TUI plans Trash,
+permanent removal, emptying Trash, and manager actions; move, compress, and hardlink
+need a destination or a pair and are planned with `clean plan`. A plan that needs root
+suspends the TUI while `sudo` or `pkexec` asks for the password, then takes the
+terminal back. Results keep selected bytes, bytes moved to Trash, and the observed
+free-space change apart, as `clean apply --json` does.
+
+Esc stops a running scan (what it read is indexed and marked incomplete), a discovery,
+or a duplicate search. An apply or undo stops after its current item and still reports;
+`q` is refused while one runs, and Ctrl+C asks it to stop, waits for it to journal, and
+exits `130`. A normal quit exits `0`, or `3` when the inventory was incomplete.
+
+Environment: `NO_COLOR` (non-empty) removes colour and keeps bold and inverse; a locale
+that is not UTF-8, `TERM=linux`, or `DISKTOP_ASCII=1` draw ASCII glyphs;
+`DISKTOP_NO_MOUSE=1` leaves mouse reporting off. The layout is designed for 80×24 and
+stays usable down to 40×10, below which it says so. Terminal state is restored on exit,
+on `SIGINT`, `SIGTERM`, `SIGHUP`, and after an uncaught exception.
