@@ -5,6 +5,7 @@ import type { ExploreMode, ExploreRow, ExploreState } from "../state.js";
 import {
   cellWidth,
   groupDigits,
+  localDateTime,
   nanosecondsToMilliseconds,
   padEnd,
   padStart,
@@ -399,7 +400,7 @@ function detailLines(context: ViewContext, home: string | undefined): ScreenLine
       entry.childEntries === undefined ? entry.kind : `${groupDigits(entry.childEntries)} items`,
       `${formatBytes(entry.allocatedBytes, state.units)} on disk`,
       `${formatBytes(entry.apparentBytes, state.units)} apparent`,
-      `modified ${new Date(nanosecondsToMilliseconds(entry.modifiedNanoseconds)).toISOString().slice(0, 16).replace("T", " ")}`,
+      `modified ${localDateTime(nanosecondsToMilliseconds(entry.modifiedNanoseconds))}`,
       `uid ${entry.ownerId}`,
       entry.shared ? "hardlink, bytes counted elsewhere" : undefined,
       entry.broken === true ? "target missing" : undefined,

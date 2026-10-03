@@ -325,3 +325,10 @@ export function relativeAge(thenMilliseconds: number, nowMilliseconds: number): 
 export function nanosecondsToMilliseconds(value: bigint): number {
   return Number(value / 1_000_000n);
 }
+
+/** `2026-10-03 14:02` in local time: when something happened, as the clock on the wall said. */
+export function localDateTime(milliseconds: number): string {
+  const date = new Date(milliseconds);
+  const pad = (value: number): string => String(value).padStart(2, "0");
+  return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())} ${pad(date.getHours())}:${pad(date.getMinutes())}`;
+}

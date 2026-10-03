@@ -114,15 +114,18 @@ function filesystemRow(filesystem: Filesystem, selected: boolean, columns: Colum
   const line = new LineBuilder(width);
   line.add(selected ? `${theme.glyphs.pointer} ` : "  ", "accent");
 
-  const mount = filesystem.mounts.map((point) => point.display).join(", ") || filesystem.source;
+  // A filesystem mounted in several places is one row; the first mount names
+  // it and the count says there are more. The detail panel lists them all.
+  const mount = filesystem.mounts[0]?.display ?? filesystem.source;
+  const more = filesystem.mounts.length > 1 ? ` +${filesystem.mounts.length - 1}` : "";
   const flags = [filesystem.removable ? "removable" : "", filesystem.network ? "network" : "", filesystem.readOnly === true ? "ro" : ""]
     .filter((flag) => flag !== "")
     .join(",");
   // The mount is the identity of the row, so flags give way to it, never the reverse.
   const flagText = flags === "" ? "" : ` [${flags}]`;
-  const mountText = truncateMiddle(mount, columns.mount - 1, theme.glyphs.ellipsis);
-  line.add(mountText, alerting ? "danger" : "strong");
-  if (flagText !== "" && columns.mount - 1 - cellWidth(mountText) >= cellWidth(flagText)) {
+  const mountText = truncateMiddle(mount, columns.mount - 1 - cellWidth(more), theme.glyphs.ellipsis);
+  line.add(mountText, alerting ? "danger" : "strong").add(more, "muted");
+  if (flagText !== "" && columns.mount - 1 - cellWidth(mountText) - cellWidth(more) >= cellWidth(flagText)) {
     line.add(flagText, "muted");
   }
   line.padTo(2 + columns.mount);
