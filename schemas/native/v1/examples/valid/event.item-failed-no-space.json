@@ -1,0 +1,12 @@
+{
+  "protocolVersion": 1,
+  "requestId": "copy-move-01",
+  "eventId": "2",
+  "event": "item-result",
+  "itemResult": {
+    "path": "L2hvbWUvZXhhbXBsZS92bS9kaXNrLnFjb3cy",
+    "outcome": "failed",
+    "reason": "no-space",
+    "message": "/mnt/archive has 1073741824 bytes free and this needs about 21474836480. Nothing was copied."
+  }
+}

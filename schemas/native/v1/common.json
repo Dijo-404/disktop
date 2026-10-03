@@ -575,6 +575,7 @@
       }
     },
     "errorCode": {
+      "description": "Why a request or an item was refused. The last seven are item reasons from the actions that copy, archive, or link: `no-space` for a destination without room (the copy is refused or unwound and the source untouched), `destination-exists` for a name already taken where an output would be published, `content-changed` for bytes that did not match what was compared or verified, `different-filesystem` for a link or rename that would cross one, `already-linked` for a duplicate that already is the kept file, `metadata-incompatible` for a duplicate whose owner or mode differs from the kept file's, and `source-not-disposed` for a source left in place after its output was published.",
       "type": "string",
       "enum": [
         "invalid-request",
@@ -595,7 +596,14 @@
         "expired-plan",
         "journal-write-failed",
         "cancelled",
-        "internal-error"
+        "internal-error",
+        "no-space",
+        "destination-exists",
+        "content-changed",
+        "different-filesystem",
+        "already-linked",
+        "metadata-incompatible",
+        "source-not-disposed"
       ]
     },
     "ownerTotal": {
