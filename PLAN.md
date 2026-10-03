@@ -1,6 +1,6 @@
 # Disktop: single-release implementation blueprint
 
-Status: implementation blueprint with a runnable development scaffold. The repository has a TypeScript CLI bootstrap and a Rust helper protocol stub; the storage features in this plan are still to be built. The tree below is the intended full code layout, not a claim that every file exists. `disktop` is the working npm package and executable name. Check registry availability and naming rights again before publication.
+Status: the blueprint the `1.0.0` release candidate was built from. Every feature below is implemented; the tree is the code layout as planned, and where a planned file was folded into a neighbour the tree says which. `disktop` is the npm package and executable name; check registry availability once more immediately before the one publication.
 
 ## Release contract
 
@@ -100,7 +100,7 @@ target. What remains for the gate is in the table below.
 
 ## Target repository layout
 
-This is the full implementation map. The scaffold contains only the files needed for its initial build, documentation, tests, and workflows; create implementation files as their owning phase begins.
+This is the implementation map. Modules were created as their owning phase began; the Clean, Dev, and Apps tabs share one view (`src/tui/views/findings.ts`), and the TUI's behaviour lives in `src/tui/controller.ts`.
 
 ~~~text
 disktop/
@@ -245,33 +245,36 @@ TUI ─┴──> application use cases ──> ports <── Linux adapters / p
                                                          └─ audited actions + journal
 ~~~
 
-### Local scaffold commands and planned phase gates
+### Local commands and gates
 
-The scaffold provides the following checks. They exercise the bootstrap and protocol stub only; the suites expand with each phase. Locked tool versions belong in the npm and Cargo lockfiles.
+Locked tool versions are in the npm and Cargo lockfiles.
 
 ~~~text
 npm ci                              install the locked TypeScript toolchain
 npm run build:native                build the local Rust helper in debug mode
-npm run build                       compile the current TypeScript sources
-npm run typecheck                   check current TypeScript sources
-npm run lint                        lint current TypeScript sources
-npm test                            current unit and contract suites
-npm run test:integration            current Node/Rust handshake integration suite
-npm run test:pty                    current terminal bootstrap smoke suite
+npm run build                       compile TypeScript into a clean dist/
+npm run typecheck                   check TypeScript sources
+npm run lint                        lint, including the dependency rule
+npm test                            unit and contract suites
+npm run test:integration            Linux adapters and real-helper sandbox actions
+npm run test:recovery               injected crashes and journal reconciliation
+npm run test:pty                    real-terminal TUI tests (script and tmux)
 npm run test:performance            scan memory and latency budget
 npm run bench                       the same budget on the million-entry tree
+npm run build:release-native        the four packaged helpers and SHA256SUMS
+npm run test:package                pack, audit, install, and run the tarball
+npm run check                       typecheck, lint, unit, integration, recovery, PTY
 npm run fixtures -- standard         build a throwaway fixture tree and print its path
 cargo test --manifest-path native/disktop-fs/Cargo.toml
-npm pack --dry-run                   inspect exactly what would be published
 ~~~
 
-The full Linux adapter and destructive-action suites and the four-target release binary build are Phase 3 through Phase 8 work. `build:native` must never compile during an end user's `npm install`. The publish workflow must verify packaged binary checksums and executable permissions before it can release. Agent changes to protocol, CLI JSON, or persistence require schema migrations or explicit version bumps and corresponding contract tests.
+`build:native` must never compile during an end user's `npm install`. The publish workflow must verify packaged binary checksums and executable permissions before it can release. Agent changes to protocol, CLI JSON, or persistence require schema migrations or explicit version bumps and corresponding contract tests.
 
 ### Native helper protocol
 
-The current helper accepts `hello` and `probe` requests and returns a `complete` event with its version, optional build checksum, `openat2` probe, and the two supported operations. It returns an `error` event for all other requests. The full protocol will add `accepted`, `progress`, and `item-result` events. Every request has a protocol version, request ID, operation, and validated arguments; every response carries the same request ID. The helper's stdout contains protocol messages only; stderr is diagnostics. The completed client will send cancellation by request ID, then wait for a final partial result and journal flush. The Rust journal will be the sole durable action-history writer.
+Every request has a protocol version, request ID, operation, and validated arguments; every response carries the same request ID, and unknown fields, versions, and operations are rejected. A long operation emits `accepted`, then `progress`, then exactly one terminal `complete` or `error`; actions also emit `item-result`. The helper's stdout carries protocol messages only; stderr is diagnostics. The client cancels by request ID and waits for the final partial result and journal flush, and a missing final event is never success. The Rust journal is the sole durable action-history writer.
 
-Planned operations are `scan`, `query-index`, `hash-candidates`, `inspect`, `trash`, `restore`, `erase`, `copy-move`, `compress`, `dedup-hardlink`, `empty-trash`, `manager-begin`, `manager-append`, `manager-finish`, and `journal-reconcile`. The manager operations will record a fixed-argument adapter's intent, bounded selection, progress, command status, and verification through that sole journal writer. Path arguments will use base64 raw bytes, never display strings. Mutation requests will include an expected `{device,inode,mount,type,size,mtime}` fingerprint and a stored plan ID. The helper must independently enforce protected roots and reject unknown fields, versions, or operations. `docs/native-protocol.md` describes the current stub; `schemas/native/v1/` becomes normative once Phase 0 creates it.
+The operations are `hello`, `probe`, `scan`, `query-index`, `hash-candidates`, `inspect`, `cancel`, `trash`, `restore`, `erase`, `copy-move`, `compress`, `dedup-hardlink`, `empty-trash`, `manager-begin`, `manager-append`, `manager-finish`, and `journal-reconcile`. Path arguments are base64 raw bytes, never display strings. Mutation requests carry the reviewed `{device,inode,mount,type,size,mtime}` fingerprint and plan ID, and the helper enforces protected roots itself. `schemas/native/v1/` is normative; `docs/native-protocol.md` explains it.
 
 ### Contracts between modules
 
