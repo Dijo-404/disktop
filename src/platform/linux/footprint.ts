@@ -12,7 +12,16 @@ import type {
 import type { SnapshotStore } from "../../ports/snapshots.js";
 
 export interface IndexFootprintOptions {
-  readonly scanner: ScanPort;
+  /**
+   * Where measuring scans are written and read back.
+   *
+   * It must not be the index a person's own scans live in. That index keeps a
+   * few scans and prunes the oldest, so every measurement written there would
+   * push out a scan somebody is still exploring, and two runs of
+   * `disktop clean` would be enough to lose it.
+   */
+  readonly measurement: ScanPort & FileIndexPort;
+  /** The index a person's own scans live in, which `snapshots` describe. Only read. */
   readonly index: FileIndexPort;
   readonly snapshots: Pick<SnapshotStore, "list">;
   /** The root a name search is answered from. */
@@ -45,7 +54,7 @@ export function createIndexFootprint(options: IndexFootprintOptions): FootprintP
       const warnings: Warning[] = [];
 
       try {
-        for await (const event of options.scanner.run(
+        for await (const event of options.measurement.run(
           {
             roots: [...paths],
             crossFilesystems: options.crossFilesystems,
@@ -90,7 +99,7 @@ export function createIndexFootprint(options: IndexFootprintOptions): FootprintP
 
       const measurements: FootprintMeasurement[] = [];
       for (const path of paths) {
-        const measurement = await readRow(options.index, scanId, accounting, path);
+        const measurement = await readRow(options.measurement, scanId, accounting, path);
         measurements.push(measurement.measurement);
         if (measurement.crowdedOut) {
           warnings.push({
