@@ -196,3 +196,67 @@ test("an unreadable mountinfo is an explicit unsupported state, not an empty suc
   assert.equal(result.capability.status, "unsupported-kernel");
   assert.ok(result.warnings.some((warning) => warning.code === "mountinfo-unreadable"));
 });
+
+test("a mount whose statfs never answers is left out after a bound, not waited on forever", async () => {
+  // A hard NFS mount whose server has gone blocks statfs in the kernel; the
+  // dashboard must still answer for every other filesystem.
+  const hanging = sources();
+  const asked = [];
+  hanging.statfs = async (bytes) => {
+    const point = Buffer.from(bytes).toString("utf8");
+    asked.push(point);
+    if (point === "/mnt/data") {
+      return new Promise(() => {});
+    }
+    return READINGS.get(point);
+  };
+  const inventory = createLinuxInventory(hanging, { statfsTimeoutMilliseconds: 100 });
+  const begun = Date.now();
+  const result = await inventory.list();
+  assert.ok(Date.now() - begun < 2_000, `the inventory waited ${Date.now() - begun} ms`);
+  assert.ok(!result.filesystems.some((filesystem) => filesystem.id === "fs-0-60"), "an unanswered mount is not reported");
+  assert.ok(result.filesystems.some((filesystem) => filesystem.id === "fs-259-2"), "every other filesystem still is");
+  const warning = result.warnings.find((entry) => entry.code === "statfs-timeout");
+  assert.ok(warning, "the missing mount is named");
+  assert.equal(warning.path.display, "/mnt/data");
+
+  // The stuck call still holds a worker thread, so a second reading in the
+  // same process does not ask that mount again and pile up more of them.
+  asked.length = 0;
+  const again = await inventory.list();
+  assert.ok(!asked.includes("/mnt/data"), "a mount still stuck is not asked again");
+  assert.ok(again.warnings.some((entry) => entry.code === "statfs-timeout"));
+});
+
+test("device and filesystem text from lsblk and mountinfo cannot command a terminal", async () => {
+  const hostileLsblk = JSON.stringify({
+    blockdevices: [
+      {
+        name: "sdz", kname: "sdz", path: "/dev/sdz", type: "disk", size: 1000, rota: true, rm: true,
+        model: "USB\u001b]0;owned\u0007 Stick\u009b2J", tran: "usb\u001b[31m", "maj:min": "8:240",
+        children: [{ name: "sdz1", kname: "sdz1", path: "/dev/sdz1", type: "part", size: 900, rm: true, "maj:min": "8:241", pkname: "sdz" }],
+      },
+    ],
+  });
+  const mountinfo = "60 30 8:241 / /media/stick rw,relatime shared:11 - fuse.evil\u001b[2J /dev/sdz1 rw";
+  const readings = new Map([["/media/stick", READINGS.get("/media/usb")]]);
+  const result = await createLinuxInventory(
+    sources({
+      mountinfo,
+      readings,
+      lsblk: { capability: { status: "available", explanation: "ok" }, stdout: hostileLsblk, stderr: "", exitCode: 0 },
+    }),
+  ).list();
+
+  const [device] = result.devices;
+  const [filesystem] = result.filesystems;
+  for (const text of [device.model, device.transport, filesystem.type]) {
+    assert.doesNotMatch(text, /[\u0000-\u001f\u007f-\u009f]/, JSON.stringify(text));
+  }
+  assert.equal(filesystem.deviceId, "sdz", "sanitizing does not break the join from mount to disk");
+
+  const { deviceLines, filesystemLines } = await import("../../dist/cli/text.js");
+  for (const line of [...deviceLines(result.devices, "iec"), ...filesystemLines(result.filesystems, "iec")]) {
+    assert.doesNotMatch(line, /[\u001b\u0007\u009b]/, JSON.stringify(line));
+  }
+});
