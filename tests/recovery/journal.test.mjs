@@ -461,3 +461,66 @@ test("a manager command that started and never reported back is uncertain, and s
   const again = await journal(root);
   assert.equal(again.reconciled, "0", "reconciling twice changes nothing");
 });
+
+/**
+ * Every event the real helper writes for an item it refuses is one the
+ * published schema accepts. The item reasons the copying and linking actions
+ * use were missing from the schema's list, and nothing compared the two.
+ */
+test("the item reasons the helper emits are all in the published schema", async () => {
+  const root = await mkdtemp(join(tmpdir(), "disktop-recovery-reasons-"));
+  sandboxes.push(root);
+  await mkdir(join(root, "work"), { recursive: true });
+  await mkdir(join(root, "elsewhere"), { recursive: true });
+  await writeFile(join(root, "work", "taken.bin"), "a".repeat(4096));
+  await writeFile(join(root, "elsewhere", "taken.bin"), "already here");
+  await writeFile(join(root, "work", "keep.bin"), "b".repeat(4096));
+  await writeFile(join(root, "work", "other.bin"), "c".repeat(4096));
+
+  const moved = await runUntil(
+    request("copy-move", "reasons-move", {
+      planId: "plan-recovery-reason1",
+      journalDirectory: encode(join(root, "state")),
+      homeTrashDirectory: encode(join(root, "trash")),
+      destinationDirectory: encode(join(root, "elsewhere")),
+      sourceDisposition: "trash",
+      targets: [
+        {
+          path: encode(join(root, "work", "taken.bin")),
+          expected: await fingerprint(join(root, "work", "taken.bin")),
+          reviewedBytes: "4096",
+        },
+      ],
+    }),
+    () => false,
+  );
+  const linked = await runUntil(
+    request("dedup-hardlink", "reasons-link", {
+      planId: "plan-recovery-reason2",
+      journalDirectory: encode(join(root, "state")),
+      keep: {
+        path: encode(join(root, "work", "keep.bin")),
+        expected: await fingerprint(join(root, "work", "keep.bin")),
+        reviewedBytes: "0",
+      },
+      targets: [
+        {
+          path: encode(join(root, "work", "other.bin")),
+          expected: await fingerprint(join(root, "work", "other.bin")),
+          reviewedBytes: "4096",
+        },
+      ],
+    }),
+    () => false,
+  );
+
+  const validate = validators.get("event");
+  const reasons = [];
+  for (const event of [...moved.events, ...linked.events]) {
+    assert.ok(validate(event), `${JSON.stringify(event)}: ${JSON.stringify(validate.errors)}`);
+    if (event.event === "item-result" && event.itemResult.reason !== undefined) {
+      reasons.push(event.itemResult.reason);
+    }
+  }
+  assert.deepEqual(reasons.sort(), ["content-changed", "destination-exists"]);
+});
