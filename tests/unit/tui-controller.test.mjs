@@ -103,12 +103,12 @@ test("sort, finders, and the filter all become index queries the CLI could also 
   assert.equal(search.minAllocatedBytes, 1024n * 1024n);
 });
 
-test("a filter that means nothing is refused on the status row and searches nothing", async () => {
+test("a filter that means nothing is refused on the prompt row and searches nothing", async () => {
   const { controller, services } = await setup();
   await press(controller, "2");
   const before = calls(services, "page").length;
   await press(controller, "/", "t", "y", "p", "e", ":", "x", "ENTER");
-  assert.equal(controller.state.notice.tone, "warn");
+  assert.match(controller.state.prompt.error, /not a kind/);
   assert.equal(calls(services, "page").length, before);
   await press(controller, "ESCAPE");
   assert.equal(controller.state.prompt, undefined);

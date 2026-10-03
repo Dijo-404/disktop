@@ -320,6 +320,8 @@ export function fakeHooks() {
       hooks.changes += 1;
     },
     pageRows: () => 10,
+    // Tests press keys back to back; the type-ahead guard is tested on its own.
+    confirmDelayMilliseconds: 0,
     suspend(message) {
       hooks.suspended.push(message);
     },

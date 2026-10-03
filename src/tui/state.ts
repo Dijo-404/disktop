@@ -167,6 +167,8 @@ export type Dialog =
 export interface Prompt {
   readonly kind: "search";
   readonly text: string;
+  /** Why the last Enter was refused, shown on the prompt row until the next edit. */
+  readonly error?: string;
 }
 
 export interface AppState {
