@@ -77,7 +77,12 @@ pub fn open(directory: &Path) -> rusqlite::Result<Connection> {
         }
     }
 
-    let connection = Connection::open(index_path(directory))?;
+    // SQLite creates a database 0644 and gives its -wal and -shm files the
+    // database's own mode. The index holds the name of every file below a
+    // scan root, so the file exists, private, before SQLite ever opens it.
+    private_file(&path)
+        .map_err(|error| rusqlite::Error::ToSqlConversionFailure(Box::new(error)))?;
+    let connection = Connection::open(&path)?;
     // auto_vacuum has to be chosen before the first table exists, or pruning a
     // scan would shrink the row count without ever returning the file's pages.
     connection.pragma_update(None, "auto_vacuum", "INCREMENTAL")?;
@@ -88,6 +93,21 @@ pub fn open(directory: &Path) -> rusqlite::Result<Connection> {
     connection.execute_batch(SCHEMA)?;
     connection.pragma_update(None, "user_version", SCHEMA_VERSION)?;
     Ok(connection)
+}
+
+/// Create `path` readable by its owner alone, or take an existing one an
+/// older build left shared back to that.
+fn private_file(path: &Path) -> io::Result<()> {
+    use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+    let file = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .mode(0o600)
+        .open(path)?;
+    if file.metadata()?.permissions().mode() & 0o077 != 0 {
+        file.set_permissions(std::fs::Permissions::from_mode(0o600))?;
+    }
+    Ok(())
 }
 
 const SCHEMA: &str = "
@@ -687,6 +707,27 @@ mod schema_tests {
             .query_row("SELECT count(*) FROM entry", [], |row| row.get(0))
             .expect("count");
         assert_eq!(rows, 0, "a cache is rebuilt, never migrated");
+    }
+
+    #[test]
+    fn an_index_an_older_build_left_shared_is_made_private() {
+        use std::os::unix::fs::PermissionsExt;
+        let sandbox = Sandbox::new("index-private");
+        let directory = sandbox.path();
+        std::fs::write(index_path(directory), b"").expect("an empty index file");
+        std::fs::set_permissions(
+            index_path(directory),
+            std::fs::Permissions::from_mode(0o644),
+        )
+        .expect("chmod");
+
+        drop(open(directory).expect("the index opens"));
+
+        let mode = std::fs::metadata(index_path(directory))
+            .expect("the index exists")
+            .permissions()
+            .mode();
+        assert_eq!(mode & 0o777, 0o600);
     }
 
     #[test]

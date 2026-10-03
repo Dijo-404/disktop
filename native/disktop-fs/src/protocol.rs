@@ -670,7 +670,13 @@ fn run_scan(
     limits: &IndexLimits,
     cancelled: &AtomicBool,
 ) {
-    if let Err(error) = std::fs::create_dir_all(index_directory) {
+    // The index names every file below the roots, including the ones in
+    // directories nobody else may list, so whatever the helper creates for it
+    // is private to this user, as Disktop's own directories are.
+    if let Err(error) =
+        std::os::unix::fs::DirBuilderExt::mode(std::fs::DirBuilder::new().recursive(true), 0o700)
+            .create(index_directory)
+    {
         return fail(
             responder,
             "permission-denied",
@@ -2544,6 +2550,56 @@ mod tests {
                 .and_then(|value| value.parse::<u64>().ok())
                 .is_some_and(|entries| entries >= 3)
         );
+    }
+
+    /// Every file and directory below `root`, with its permission bits.
+    fn modes_below(root: &std::path::Path) -> Vec<(std::path::PathBuf, u32)> {
+        use std::os::unix::fs::PermissionsExt;
+        let mut found = Vec::new();
+        let mut pending = vec![root.to_path_buf()];
+        while let Some(path) = pending.pop() {
+            let metadata = std::fs::symlink_metadata(&path).expect("the index entry is readable");
+            found.push((path.clone(), metadata.permissions().mode() & 0o7777));
+            if metadata.is_dir() {
+                for entry in std::fs::read_dir(&path).expect("the index directory lists") {
+                    pending.push(entry.expect("an index entry").path());
+                }
+            }
+        }
+        found
+    }
+
+    #[test]
+    fn a_scans_index_is_readable_by_its_owner_alone() {
+        let sandbox = Sandbox::new("protocol-private-index");
+        sandbox.directory(b"tree/private");
+        sandbox.file(b"tree/private/diary.txt", 64);
+        // The index directory does not exist yet: the helper creates it, as it
+        // does under a fresh $XDG_CACHE_HOME.
+        let cache = sandbox.path().join("cache");
+        let index = cache.join("disktop");
+        let mut root = sandbox.bytes();
+        root.extend_from_slice(b"/tree");
+
+        let output = session(
+            &[scan_request("scan-1", &root, index.as_os_str().as_bytes())],
+            |events| terminal(events, "scan-1"),
+        );
+        assert_eq!(output.last().unwrap()["event"], "complete");
+
+        // The index names every file below the scan root, including the ones
+        // in directories nobody else may list. Whoever can read it can read
+        // those names, so it is as private as the most private of them.
+        let modes = modes_below(&cache);
+        assert!(modes.len() >= 3, "the index was written: {modes:?}");
+        for (path, mode) in modes {
+            assert_eq!(
+                mode & 0o077,
+                0,
+                "{} is open to other users (mode {mode:o})",
+                path.display()
+            );
+        }
     }
 
     #[test]
