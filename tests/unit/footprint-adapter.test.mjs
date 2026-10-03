@@ -62,7 +62,7 @@ const NO_SNAPSHOTS = { async list() { return []; } };
 
 function footprintOf(scan, snapshots = NO_SNAPSHOTS) {
   return createIndexFootprint({
-    scanner: scan.port,
+    measurement: scan.port,
     index: scan.port,
     snapshots,
     accounting: "allocated",
@@ -94,6 +94,36 @@ test("measuring three directories issues one scan with three roots", async () =>
       [ABSENT.display, 16n, "measured-allocated"],
     ],
   );
+});
+
+test("a measurement is written to and read from its own index, never the one a person's scans live in", async () => {
+  const measurement = scanner({ rows: new Map([[PIP.bytesBase64, directoryRow(PIP, 4096n)]]) });
+  const touched = [];
+  const personal = {
+    // eslint-disable-next-line require-yield
+    async *run(request) {
+      touched.push(["run", request]);
+      throw new Error("a measuring scan was written into the personal index");
+    },
+    async query(query) {
+      touched.push(["query", query]);
+      throw new Error("a measurement was read from the personal index");
+    },
+  };
+
+  const reading = await createIndexFootprint({
+    measurement: measurement.port,
+    index: personal,
+    snapshots: NO_SNAPSHOTS,
+    accounting: "allocated",
+    crossFilesystems: false,
+    excludes: [],
+  }).measure([PIP], new AbortController().signal);
+
+  assert.equal(reading.measurements[0].bytes, 4096n);
+  assert.equal(measurement.recorded.requests.length, 1);
+  assert.equal(measurement.recorded.queries.length, 1);
+  assert.deepEqual(touched, [], "the personal index was not touched");
 });
 
 test("a path the index does not hold is unknown with a reason, not zero", async () => {
@@ -211,7 +241,7 @@ test("a search uses the newest snapshot that covers the home directory", async (
   };
 
   const search = await createIndexFootprint({
-    scanner: scan.port,
+    measurement: scan.port,
     index: scan.port,
     snapshots,
     home,
@@ -249,7 +279,7 @@ test("each searched name gets its own budget, so one common name cannot crowd ou
   };
 
   const search = await createIndexFootprint({
-    scanner: scan.port,
+    measurement: scan.port,
     index: scan.port,
     snapshots,
     home,
