@@ -3,6 +3,7 @@ import { rawPathFromUtf8 } from "../../domain/paths.js";
 import { parseSize } from "../../application/explore.js";
 import { orderedWarnings } from "../../application/scan.js";
 import type { CliContext } from "../context.js";
+import { exitAfter, interruptible } from "../interrupt.js";
 import { EXIT, buildEnvelope, encodeCapability, encodeCompleteness, encodeRawPath, encodeScanTotals, writeEnvelope } from "../output.js";
 import { scanLines, warningLines } from "../text.js";
 
@@ -35,30 +36,29 @@ export async function runScan(context: CliContext, options: ScanOptions): Promis
     return refuse(context, options.asJson, "'--max-depth' accepts a whole number of levels.");
   }
 
-  const controller = new AbortController();
-  const interrupt = (): void => controller.abort();
-  context.signals.listen(interrupt);
-
+  const drawProgress = !options.asJson && context.interactive;
+  let interrupted: boolean;
   let outcome;
   try {
-    outcome = await context.storage.scan.run(
-      [root],
-      {
-        ...(options.accounting === undefined ? {} : { accounting: options.accounting }),
-        ...(options.crossFilesystems ? { crossFilesystems: true } : {}),
-        ...(throttle === undefined ? {} : { throttleBytesPerSecond: throttle }),
-        ...(maxDepth === undefined ? {} : { maxDepth }),
-      },
-      controller.signal,
-      (progress) => {
-        if (!options.asJson && context.interactive) {
-          context.output.stderr(`\rScanned ${progress.scannedEntries} entries...`);
-        }
-      },
-    );
+    ({ value: outcome, interrupted } = await interruptible(context, (signal) =>
+      context.storage.scan.run(
+        [root],
+        {
+          ...(options.accounting === undefined ? {} : { accounting: options.accounting }),
+          ...(options.crossFilesystems ? { crossFilesystems: true } : {}),
+          ...(throttle === undefined ? {} : { throttleBytesPerSecond: throttle }),
+          ...(maxDepth === undefined ? {} : { maxDepth }),
+        },
+        signal,
+        (progress) => {
+          if (drawProgress) {
+            context.output.stderr(`\rScanned ${progress.scannedEntries} entries...`);
+          }
+        },
+      ),
+    ));
   } finally {
-    context.signals.stop(interrupt);
-    if (!options.asJson && context.interactive) {
+    if (drawProgress) {
       context.output.stderr("\r\u001b[K");
     }
   }
@@ -97,7 +97,9 @@ export async function runScan(context: CliContext, options: ScanOptions): Promis
 
   const cancelled = summary.completeness.warnings.some((warning) => warning.code === "cancelled");
   const status = summary.completeness.complete ? "complete" : "incomplete";
-  const exitCode = summary.completeness.complete ? EXIT.complete : cancelled ? EXIT.interrupted : EXIT.incomplete;
+  const exitCode = summary.completeness.complete
+    ? EXIT.complete
+    : exitAfter(interrupted || cancelled, EXIT.incomplete);
 
   if (options.asJson) {
     writeEnvelope(

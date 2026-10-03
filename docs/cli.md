@@ -254,7 +254,9 @@ answered with no duplicates.
 | `1` | `alerts check` reached its capacity or inode threshold. |
 | `2` | Invalid input, unavailable capability, permission failure, an unimplemented command, or another operational error. |
 | `3` | Scan or action ended incomplete, including partial results. |
-| `130` | Interrupted before a completed or partial result could be reported. |
+| `130` | Interrupted: Ctrl+C, SIGTERM, or a hangup stopped the command before it finished. |
+
+Ctrl+C asks `scan`, `clean`, `clean plan`, `clean apply`, `undo`, and `find` to stop at their next safe boundary — a directory, a detector, an item. Each still reports and journals what it did, marked incomplete with a warning, and exits `130`; with `--json` that partial result is the envelope, with `exitCode: 130`. A command interrupted before it had any result is an error envelope whose failure code is `cancelled`, also exit `130`. A command that had already finished everything when the interrupt landed reports `complete` and exits `0`, because nothing was left undone. A second Ctrl+C does not abandon the item in progress, which is the one moment a record could stop matching the disk; it says the command is already stopping. SIGTERM and SIGHUP are handled the same way.
 
 `--help`, `--version`, and a command line that does not parse are answered from the command table before anything else runs: no configuration is read and, as root, the install is not inspected, so help is available even where every real command would refuse to start. A refused command line exits `2` with its reason on stderr and nothing on stdout; with `--json` the reason is instead one `invalid-input` error envelope on stdout. Anything a command did not expect is reported as one sanitized line (or one `internal-error` envelope) and exit `2`, never as a stack trace.
 

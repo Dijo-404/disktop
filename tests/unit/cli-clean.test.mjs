@@ -234,3 +234,23 @@ test("a configuration Disktop could not apply is reported by clean, not swallowe
     `warnings were ${JSON.stringify(envelope.warnings)}`,
   );
 });
+
+test("Ctrl+C during discovery lists what was found so far and exits 130", async () => {
+  const context = cleanContext();
+  context.footprint = {
+    async discover(_request, signal) {
+      context.signals.interrupt();
+      assert.equal(signal.aborted, true);
+      return summary({
+        complete: false,
+        warnings: [{ code: "cancelled", message: "Discovery was cancelled before every detector answered." }],
+      });
+    },
+  };
+  const status = await runCli(["clean", "--json"], context);
+  const envelope = envelopeOf(context, "clean");
+  assert.equal(status, 130);
+  assert.equal(envelope.exitCode, 130);
+  assert.equal(envelope.status, "incomplete");
+  assert.equal(context.signals.listening(), 0);
+});
