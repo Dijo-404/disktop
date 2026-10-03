@@ -465,6 +465,8 @@ export interface NativeJournalRecord {
   readonly freeBytesBefore?: bigint;
   readonly freeBytesAfter?: bigint;
   readonly items: readonly NativeJournalItem[];
+  /** Items a history page left out of `items`; absent when it holds them all. */
+  readonly itemsOmitted?: bigint;
   readonly manager?: NativeManagerRecord;
 }
 
@@ -571,6 +573,9 @@ function parseJournalRecord(value: unknown): NativeJournalRecord {
       ? {}
       : { freeBytesAfter: decimal(value.freeBytesAfter, "freeBytesAfter") }),
     items: value.items.map((item: unknown) => parseJournalItem(item)),
+    ...(value.itemsOmitted === undefined
+      ? {}
+      : { itemsOmitted: decimal(value.itemsOmitted, "itemsOmitted") }),
     ...(manager === undefined ? {} : { manager }),
   };
 }

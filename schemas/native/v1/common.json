@@ -744,6 +744,10 @@
             "$ref": "#/$defs/journalItem"
           }
         },
+        "itemsOmitted": {
+          "description": "How many of this action's items a history page left out of `items`, which then holds the first ones in position order. Absent when `items` is the whole list. A page carries at most 1000 items per record and 5000 in all, so one very large action cannot make a page an unreadable line; `restore` reads the whole record from the journal itself and never depends on this projection.",
+          "$ref": "#/$defs/decimalInteger"
+        },
         "manager": {
           "$ref": "#/$defs/managerRecord"
         }
