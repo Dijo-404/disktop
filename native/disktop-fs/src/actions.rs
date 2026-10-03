@@ -44,6 +44,9 @@ pub(crate) enum Checkpoint {
     /// A duplicate's bytes matched the kept file's and its name is about to
     /// be exchanged for a link to it.
     Compared,
+    /// A target was revalidated, its Trash name reserved, and it is about to
+    /// be renamed into Trash.
+    Reserved,
 }
 
 #[cfg(test)]
@@ -1637,17 +1640,12 @@ fn dispose_of_source(
                 return kept(still_there(&error.to_string()));
             }
 
-            match sys::renameat_no_replace(
-                parent.descriptor(),
-                &parent.name,
-                destination.files_descriptor,
-                &reserved.name,
-            ) {
-                Ok(()) => Ok(()),
-                Err(error) => {
-                    reserved.discard(&destination);
-                    Err(still_there(&error.to_string()))
-                }
+            match move_into_trash(&parent, &destination, &reserved, live) {
+                IntoTrash::Moved => Ok(()),
+                IntoTrash::Refused(_, message, _) => Err(format!(
+                    "{PUBLISHED} the original did not go to Trash as reviewed. {message}"
+                )),
+                IntoTrash::Failed(error) => Err(still_there(&error.to_string())),
             }
         }
         SourceDisposition::Permanent => {
@@ -1908,33 +1906,24 @@ fn trash_one(
         );
     }
 
-    let moved = sys::renameat_no_replace(
-        parent.descriptor(),
-        &parent.name,
-        destination.files_descriptor,
-        &reserved.name,
-    );
-
-    if moved.is_ok() {
+    let report = match move_into_trash(&parent, &destination, &reserved, &live) {
         // What moved, not only where it went. A destination is a name, and a
         // name is free again as soon as the file leaves Trash.
-        return settle_move(
-            journal,
-            journal_id,
-            position,
-            target,
-            target.reviewed_bytes,
-            Some(Identity {
-                device: live.device,
-                inode: live.inode,
-            }),
-        );
-    }
-
-    let report = match moved {
-        Ok(()) => unreachable!("the success path returned above"),
-        Err(error) => {
-            reserved.discard(&destination);
+        IntoTrash::Moved => {
+            return settle_move(
+                journal,
+                journal_id,
+                position,
+                target,
+                target.reviewed_bytes,
+                Some(Identity {
+                    device: live.device,
+                    inode: live.inode,
+                }),
+            );
+        }
+        IntoTrash::Refused(code, message, outcome) => refuse(code, message, outcome),
+        IntoTrash::Failed(error) => {
             let (code, message) = match error.raw_os_error() {
                 Some(libc::EXDEV) => (
                     "unsupported-filesystem",
@@ -1966,6 +1955,88 @@ fn trash_one(
     };
 
     settle(journal, journal_id, position, target, report)
+}
+
+/// How a rename into Trash ended.
+enum IntoTrash {
+    /// The reviewed inode is in Trash under its reserved name.
+    Moved,
+    /// Something other than the reviewed inode was under the name; the
+    /// outcome says whether it could be put back.
+    Refused(&'static str, String, Outcome),
+    /// The rename itself failed. Nothing moved and the reservation is gone.
+    Failed(std::io::Error),
+}
+
+/// Rename a revalidated target into its reserved Trash name, and check that
+/// what arrived is what was revalidated.
+///
+/// The rename takes whatever is under the name at that instant. A file an
+/// editor saved over the reviewed one a moment earlier is not what anybody
+/// reviewed, and recording it under the reviewed identity would leave an undo
+/// unable to recognise it in Trash. It goes straight back.
+fn move_into_trash(
+    parent: &guard::ResolvedParent,
+    destination: &TrashDirectory,
+    reserved: &Reservation,
+    live: &sys::Metadata,
+) -> IntoTrash {
+    checkpoint(Checkpoint::Reserved);
+    if let Err(error) = sys::renameat_no_replace(
+        parent.descriptor(),
+        &parent.name,
+        destination.files_descriptor,
+        &reserved.name,
+    ) {
+        reserved.discard(destination);
+        return IntoTrash::Failed(error);
+    }
+    let in_trash = || {
+        let mut path = destination.files_path.clone();
+        path.push(b'/');
+        path.extend_from_slice(&reserved.name);
+        String::from_utf8_lossy(&path).into_owned()
+    };
+    match sys::metadata_at(destination.files_descriptor, &reserved.name) {
+        Ok(held) if held.device == live.device && held.inode == live.inode => IntoTrash::Moved,
+        Ok(_) => match sys::renameat_no_replace(
+            destination.files_descriptor,
+            &reserved.name,
+            parent.descriptor(),
+            &parent.name,
+        ) {
+            Ok(()) => {
+                reserved.discard(destination);
+                IntoTrash::Refused(
+                    "changed-target",
+                    "It was replaced just before it was moved, so what replaced it was put back \
+                     under its name and nothing went to Trash."
+                        .to_owned(),
+                    Outcome::Skipped,
+                )
+            }
+            // The Trash metadata stays: it describes what is there, so a file
+            // manager can still put it back.
+            Err(error) => IntoTrash::Refused(
+                "changed-target",
+                format!(
+                    "It was replaced just before it was moved, and what replaced it could not be \
+                     put back; it is in Trash as '{}': {error}",
+                    in_trash(),
+                ),
+                Outcome::Uncertain,
+            ),
+        },
+        Err(error) => IntoTrash::Refused(
+            "changed-target",
+            format!(
+                "It was moved to Trash as '{}', but what arrived there could not be checked: \
+                 {error}",
+                in_trash(),
+            ),
+            Outcome::Uncertain,
+        ),
+    }
 }
 
 /// Remove one reviewed target for good.
@@ -3716,6 +3787,51 @@ mod tests {
             vec![std::ffi::OsString::from("data.bin")],
             "no archive, staged or published"
         );
+    }
+
+    /// The rename into Trash moves whatever is under the name at that instant.
+    /// A file saved over the reviewed one in between is not what anybody
+    /// reviewed: it goes back where it was, and nothing claims it was moved.
+    #[test]
+    fn a_file_saved_over_just_before_its_move_to_trash_stays_where_it_was() {
+        let sandbox = Sandbox::new("trash-saved-over");
+        sandbox.directory(b"state");
+        sandbox.directory(b"work");
+        std::fs::write(sandbox.path().join("work/notes.txt"), b"reviewed").unwrap();
+        let request = TrashRequest {
+            plan_id: "plan-0123456789abcd".to_owned(),
+            journal_directory: sandbox.path().join("state"),
+            home_trash_directory: joined(&sandbox, b"trash-home"),
+            targets: vec![reviewed(&joined(&sandbox, b"work/notes.txt"), 8)],
+        };
+
+        let work = sandbox.path().join("work");
+        at_checkpoint(move |at| {
+            if at == Checkpoint::Reserved {
+                std::fs::write(work.join("notes.txt.new"), b"saved since").unwrap();
+                std::fs::rename(work.join("notes.txt.new"), work.join("notes.txt")).unwrap();
+            }
+        });
+        let (summary, items) =
+            collect(|report| run_trash(&request, report, &AtomicBool::new(false)));
+        let summary = summary.ok().expect("the action ran");
+
+        assert_eq!(items[0].outcome, Outcome::Skipped, "{:?}", items[0].message);
+        assert_eq!(items[0].reason, Some("changed-target"));
+        assert_eq!(summary.bytes_moved_to_trash, 0);
+        assert_eq!(
+            std::fs::read(sandbox.path().join("work/notes.txt")).unwrap(),
+            b"saved since",
+            "the saved file is back under its own name",
+        );
+        for half in ["files", "info"] {
+            let held: Vec<_> = std::fs::read_dir(sandbox.path().join("trash-home").join(half))
+                .unwrap()
+                .flatten()
+                .map(|entry| entry.file_name())
+                .collect();
+            assert!(held.is_empty(), "Trash {half} holds {held:?}");
+        }
     }
 
     fn linking(sandbox: &Sandbox, keep: &[u8], targets: &[&[u8]]) -> DedupHardlinkRequest {

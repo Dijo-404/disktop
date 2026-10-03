@@ -45,7 +45,12 @@ target's parent one segment at a time from `/` with `openat2` and no symlink
 resolution, compares the live entry against the reviewed fingerprint, writes the
 item's intent to the journal, performs one constrained syscall, and writes the
 outcome. A Trash move reserves its `.trashinfo` with an exclusive create and renames
-with `RENAME_NOREPLACE`, so the kernel refuses rather than overwriting.
+with `RENAME_NOREPLACE`, so the kernel refuses rather than overwriting. The
+rename takes whatever is under the name at that instant, so the helper then
+checks that what arrived in Trash is the inode it revalidated: a file saved
+over the reviewed one in between is renamed straight back and the item skipped
+as `changed-target`, rather than recorded under an identity an undo would not
+recognise.
 
 An item whose outcome could not be written to the journal is reported `uncertain`, not
 completed: the record is the authority an undo and a restart read, so an outcome nobody
