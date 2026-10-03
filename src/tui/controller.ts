@@ -1,9 +1,9 @@
 import { incompatibilities } from "../application/snapshots.js";
-import type { ActionOperation, ActionPlan } from "../domain/actions.js";
+import type { ActionOperation, ActionPlan, SourceDisposition } from "../domain/actions.js";
 import { StaleScanIndex } from "../domain/errors.js";
 import type { Finding } from "../domain/findings.js";
 import type { IndexedEntry, RawPath } from "../domain/models.js";
-import { isWithin, pathBytes, rawPathFromBytes } from "../domain/paths.js";
+import { isWithin, pathBytes, rawPathFromBytes, rawPathFromUtf8 } from "../domain/paths.js";
 import { staleBeforeNanoseconds } from "../domain/staleness.js";
 import type { EntryFilter } from "../ports/scan.js";
 import type { SnapshotSummary } from "../ports/snapshots.js";
@@ -19,6 +19,8 @@ import {
   findingsFor,
   listLength,
   moveSelection,
+  needsDestination,
+  nextOperation,
   nextSort,
   omit,
   selectRow,
@@ -33,6 +35,7 @@ import {
   withoutPrompt,
   type AppState,
   type Busy,
+  type DestinationAnswer,
   type Dialog,
   type ExploreRow,
   type TabName,
@@ -49,8 +52,22 @@ export const PAGE_ROWS = 200;
 export const MAX_ROWS = 10_000;
 const MAX_RECORDS = 2_000;
 
-/** Operations the TUI can plan without asking for a destination or a pair. */
-const PLANNABLE: readonly ActionOperation[] = ["trash", "permanent", "empty-trash", "manager"];
+/**
+ * Operations the TUI can plan for a finding. A move and a compression ask
+ * where their output goes first; a hardlink replacement needs a pair, which
+ * only the duplicates finder can name.
+ */
+const PLANNABLE: readonly ActionOperation[] = ["trash", "move", "compress", "permanent", "empty-trash", "manager"];
+
+/**
+ * What an Explore entry can be planned with, in the order `o` offers them. The
+ * irreversible removal is last because its review takes typed input and has
+ * no `o` to go on from.
+ */
+const PATH_OPERATIONS: readonly ActionOperation[] = ["trash", "move", "compress", "permanent"];
+
+/** The most a destination field holds: `PATH_MAX`. */
+const MAX_DESTINATION = 4096;
 
 export interface ControllerHooks {
   /** Something changed; draw when convenient. */
@@ -110,6 +127,8 @@ export class TuiController {
   #hits: readonly HitRegion[] = [];
   /** When the dialog on screen first appeared, by `performance.now()`. */
   #dialogShownAt = 0;
+  /** The destination last asked for, offered again for the next move. */
+  #lastDestination: DestinationAnswer = { text: "", disposition: "trash" };
 
   constructor(services: TuiServices, initial: AppState, hooks: ControllerHooks) {
     this.#services = services;
@@ -199,7 +218,9 @@ export class TuiController {
       return;
     }
     const state = this.#state;
-    const typing = state.prompt !== undefined || (state.dialog?.kind === "review" && needsTypedConfirmation(state.dialog.plan) && !state.showHelp);
+    const typing =
+      state.prompt !== undefined ||
+      (!state.showHelp && (state.dialog?.kind === "destination" || (state.dialog?.kind === "review" && needsTypedConfirmation(state.dialog.plan))));
     const intent = typing ? textIntentForKey(key) : intentForKey(key);
     this.#dispatch(intent);
   }
@@ -397,6 +418,7 @@ export class TuiController {
       case "backspace":
       case "submit":
       case "clear-input":
+      case "toggle":
       case "none":
         return;
     }
@@ -490,9 +512,18 @@ export class TuiController {
         if (intent.kind === "confirm") {
           this.#apply(dialog.plan, dialog.origin);
         } else if (intent.kind === "operation") {
-          const others = dialog.alternatives.filter((operation) => operation !== dialog.plan.operation);
-          const next = others[0];
-          if (next !== undefined) {
+          const next = nextOperation(dialog.alternatives, dialog.plan.operation);
+          if (next !== undefined && needsDestination(next)) {
+            // Nothing is planned until it says where; a move reviewed a
+            // moment ago offers its own answer again for the compression.
+            this.#abortPlanning();
+            this.#askDestination(next, dialog.asked ?? this.#lastDestination, {
+              alternatives: dialog.alternatives,
+              origin: dialog.origin,
+              ...(dialog.findingId === undefined ? {} : { findingId: dialog.findingId }),
+              ...(dialog.path === undefined ? {} : { path: dialog.path }),
+            });
+          } else if (next !== undefined) {
             this.#replan(dialog, next);
           }
         } else if (intent.kind === "deny") {
@@ -501,6 +532,19 @@ export class TuiController {
         }
         return;
       }
+      case "destination":
+        if (intent.kind === "type" && dialog.text.length < MAX_DESTINATION) {
+          this.#set({ ...state, dialog: { ...omit(dialog, "error"), text: dialog.text + intent.text } });
+        } else if (intent.kind === "backspace") {
+          this.#set({ ...state, dialog: { ...omit(dialog, "error"), text: Array.from(dialog.text).slice(0, -1).join("") } });
+        } else if (intent.kind === "clear-input") {
+          this.#set({ ...state, dialog: { ...omit(dialog, "error"), text: "" } });
+        } else if (intent.kind === "toggle") {
+          this.#set({ ...state, dialog: { ...dialog, disposition: dialog.disposition === "trash" ? "permanent" : "trash" } });
+        } else if (intent.kind === "submit") {
+          this.#submitDestination(dialog);
+        }
+        return;
       case "undo-confirm":
         if (intent.kind === "confirm") {
           this.#undo(dialog.record.id);
@@ -1268,7 +1312,7 @@ export class TuiController {
     if (state.tab === "Explore") {
       const row = selectedExploreRow(state);
       if (row?.kind === "entry") {
-        this.#plan({ operation: "trash", path: row.entry.path }, ["trash", "permanent"], "path");
+        this.#plan({ operation: "trash", path: row.entry.path }, PATH_OPERATIONS, "path");
       } else if (row?.kind === "member") {
         if (row.keep) {
           this.#set(withNotice(state, "This is the copy the keep rule keeps. Select one of the others to clean.", "info"));
@@ -1299,12 +1343,74 @@ export class TuiController {
       this.#set({ ...this.#state, dialog: { kind: "unavailable", title: "Cannot plan this", capability: finding.capability } });
       return;
     }
-    const alternatives = finding.availableActionIds.filter((candidate) => PLANNABLE.includes(candidate));
+    // In the order `o` offers them, which keeps the irreversible ones last.
+    const alternatives = PLANNABLE.filter((candidate) => finding.availableActionIds.includes(candidate));
     if (!PLANNABLE.includes(operation)) {
-      this.#set(withNotice(this.#state, `'${operation}' needs a destination; plan it with 'disktop clean plan ${finding.id} --operation ${operation}'.`, "info"));
+      this.#set(withNotice(this.#state, `'${operation}' is not planned from this tab; see 'disktop clean plan --help'.`, "info"));
+      return;
+    }
+    if (needsDestination(operation)) {
+      this.#askDestination(operation, this.#lastDestination, { alternatives, origin: "finding", findingId: finding.id });
       return;
     }
     this.#plan({ operation, findingId: finding.id }, alternatives, "finding");
+  }
+
+  /** Open the destination dialog for a move or a compression. Nothing is planned yet. */
+  #askDestination(
+    operation: "move" | "compress",
+    answer: DestinationAnswer,
+    subject: { readonly alternatives: readonly ActionOperation[]; readonly origin: "finding" | "path"; readonly findingId?: string; readonly path?: RawPath },
+  ): void {
+    this.#set({ ...withoutDialog(this.#state), dialog: { kind: "destination", operation, text: answer.text, disposition: answer.disposition, ...subject } });
+  }
+
+  /**
+   * Plan what the destination dialog was told, or say on the dialog why not.
+   *
+   * The text becomes a path here and only here. `~/` is the home directory the
+   * TUI was given; anything else has to be absolute, because a relative path
+   * would be resolved against a working directory nobody looking at the TUI
+   * can see. A compression told nothing publishes beside its source, which the
+   * planner decides; a move has nowhere to default to.
+   */
+  #submitDestination(dialog: Extract<Dialog, { kind: "destination" }>): void {
+    const answer: DestinationAnswer = { text: dialog.text, disposition: dialog.disposition };
+    let destination: RawPath | undefined;
+    if (dialog.text === "") {
+      if (dialog.operation === "move") {
+        this.#set({ ...this.#state, dialog: { ...dialog, error: "A move needs the directory it should go to." } });
+        return;
+      }
+    } else if (dialog.text === "~" || dialog.text.startsWith("~/")) {
+      const home = pathBytes(this.#services.home);
+      const rest = new TextEncoder().encode(dialog.text.slice(1));
+      const joined = new Uint8Array(home.length + rest.length);
+      joined.set(home);
+      joined.set(rest, home.length);
+      destination = rawPathFromBytes(joined);
+    } else if (dialog.text.startsWith("/")) {
+      destination = rawPathFromUtf8(dialog.text);
+    } else {
+      this.#set({ ...this.#state, dialog: { ...dialog, error: "Type an absolute path, or one that starts with ~/." } });
+      return;
+    }
+    this.#lastDestination = answer;
+    this.#set(withoutDialog(this.#state));
+    this.#plan(
+      {
+        operation: dialog.operation,
+        ...(dialog.findingId === undefined ? {} : { findingId: dialog.findingId }),
+        ...(dialog.path === undefined ? {} : { path: dialog.path }),
+        ...(destination === undefined ? {} : { destination }),
+        sourceDisposition: dialog.disposition,
+      },
+      dialog.alternatives,
+      dialog.origin,
+      undefined,
+      undefined,
+      answer,
+    );
   }
 
   #replan(dialog: Extract<Dialog, { kind: "review" }>, operation: ActionOperation): void {
@@ -1329,11 +1435,20 @@ export class TuiController {
    * asked for from (`o`), which is the one dialog its answer may replace.
    */
   #plan(
-    request: { operation: ActionOperation; findingId?: string; path?: RawPath; replacePath?: RawPath; keepPath?: RawPath },
+    request: {
+      operation: ActionOperation;
+      findingId?: string;
+      path?: RawPath;
+      replacePath?: RawPath;
+      keepPath?: RawPath;
+      destination?: RawPath;
+      sourceDisposition?: SourceDisposition;
+    },
     alternatives: readonly ActionOperation[],
     origin: "finding" | "path",
     replacing?: string,
     pair?: { readonly keep: RawPath; readonly copy: RawPath },
+    answer?: DestinationAnswer,
   ): void {
     this.#run("plan", { label: "Reviewing", detail: "fingerprinting every entry as it is now", cancellable: true }, async (signal, generation) => {
       const outcome = await this.#services.plan(request, signal);
@@ -1359,6 +1474,7 @@ export class TuiController {
             ...(request.findingId === undefined ? {} : { findingId: request.findingId }),
             ...(request.path === undefined ? {} : { path: request.path }),
             ...(pair === undefined ? {} : { pair }),
+            ...(answer === undefined ? {} : { asked: answer }),
           },
         };
       });

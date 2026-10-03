@@ -4,8 +4,9 @@ import type { ActionOperation, ActionPlan } from "../../domain/actions.js";
 import { describeCommand } from "../../domain/managers.js";
 import { formatBytes } from "../../domain/sizes.js";
 import { LineBuilder, type ScreenLine } from "../frame.js";
-import type { Dialog } from "../state.js";
-import { groupDigits, relativeAge, truncateMiddle, wrap } from "../text.js";
+import { nextOperation, type Dialog } from "../state.js";
+import { cellWidth, groupDigits, relativeAge, truncateMiddle, truncateStart, wrap } from "../text.js";
+import { sanitizeText } from "../../domain/paths.js";
 import type { StyleName, Theme } from "../themes.js";
 import { boxInner, boxed, field } from "../widgets/box.js";
 import { CATEGORY_LABELS, findingSizeText } from "./findings.js";
@@ -37,6 +38,8 @@ export function renderDialog(dialog: Dialog, context: ViewContext, home: string 
   switch (dialog.kind) {
     case "review":
       return reviewDialog(dialog, context, home);
+    case "destination":
+      return destinationDialog(dialog, context);
     case "applied":
       return appliedDialog(dialog.outcome, context);
     case "undo-confirm": {
@@ -204,6 +207,9 @@ function reviewDialog(dialog: Extract<Dialog, { kind: "review" }>, context: View
       inner,
     ),
   );
+  if (plan.destination !== undefined) {
+    content.push(field("Destination", truncateMiddle(homeRelative(plan.destination.display, home, theme), inner - 14, theme.glyphs.ellipsis), inner));
+  }
   const minutes = Math.max(0, Math.round((Date.parse(plan.expiresAt) - context.now) / 60_000));
   content.push(field("Expires", minutes < 1 ? "in under a minute" : minutes < 120 ? `in ${minutes} min` : `in ${Math.round(minutes / 60)} h`, inner));
 
@@ -251,7 +257,7 @@ function reviewDialog(dialog: Extract<Dialog, { kind: "review" }>, context: View
 
   let cursor: DialogOutput["cursor"];
   let footerLine: ScreenLine;
-  const others = dialog.alternatives.filter((operation) => operation !== plan.operation);
+  const next = nextOperation(dialog.alternatives, plan.operation);
   if (irreversible) {
     const line = new LineBuilder(inner).add("Type ", "danger").add("yes", "strong").add(" and press Enter to apply: ", "danger");
     const column = line.used;
@@ -265,7 +271,7 @@ function reviewDialog(dialog: Extract<Dialog, { kind: "review" }>, context: View
     footerLine = footer(
       [
         ["y", "apply"],
-        ...(others.length > 0 ? ([["o", `instead: ${OPERATION_NAMES[others[0] as ActionOperation].toLowerCase()}`]] as Hint[]) : []),
+        ...(next === undefined ? [] : ([["o", `instead: ${OPERATION_NAMES[next].toLowerCase()}`]] as Hint[])),
         ["esc", "cancel"],
       ],
       inner,
@@ -276,6 +282,58 @@ function reviewDialog(dialog: Extract<Dialog, { kind: "review" }>, context: View
     lines: boxed(irreversible ? "Review irreversible plan" : "Review plan", content, width, height, theme, irreversible ? "danger" : "accent", footerLine),
     hints: irreversible ? [[`yes ${theme.glyphs.enter}`, "apply"], ["esc", "cancel"]] : [["y", "apply"], ["o", "operation"], ["esc", "cancel"]],
     ...(cursor === undefined ? {} : { cursor }),
+  };
+}
+
+/**
+ * Where a move or a compression publishes, typed before anything is planned.
+ *
+ * The field is the footer, which a short terminal keeps when it drops content,
+ * so what is being typed is always on screen. It shows its end when it is too
+ * long, because the end of a path names the directory. What becomes of the
+ * source comes first, since a short terminal keeps the top of the content.
+ */
+function destinationDialog(dialog: Extract<Dialog, { kind: "destination" }>, context: ViewContext): DialogOutput {
+  const { theme, width, height } = context;
+  const inner = boxInner(width);
+  const permanent = dialog.disposition === "permanent";
+  const content: ScreenLine[] = [
+    field(
+      "Source after",
+      permanent
+        ? [{ text: `${theme.glyphs.warn} removed permanently, cannot be undone`, style: "danger" }]
+        : [{ text: `${theme.glyphs.ok} moved to Trash, can be undone`, style: "ok" }],
+      inner,
+    ),
+  ];
+  if (dialog.error !== undefined) {
+    for (const [index, text] of wrap(dialog.error, inner - 2).entries()) {
+      content.push(new LineBuilder(inner).add(index === 0 ? `${theme.glyphs.warn} ` : "  ", "warn").add(text, "warn").build());
+    }
+  }
+  content.push({ spans: [] });
+  const explanation =
+    dialog.operation === "move"
+      ? "Type the directory on another disk to copy it into. The copy is verified before the source is touched. ~/ is your home."
+      : "Type the directory the archive goes into, or leave it empty to put it beside the source. The archive is verified before the source is touched.";
+  for (const text of wrap(explanation, inner)) {
+    content.push(new LineBuilder(inner).add(text, "dim").build());
+  }
+  content.push({ spans: [] });
+  content.push(footer([["tab", permanent ? "Trash instead" : "permanent instead"], [theme.glyphs.enter, "review"], ["esc", "cancel"]], inner));
+
+  const line = new LineBuilder(inner).add("Into ", "muted");
+  const column = line.used;
+  // One cell is kept for the cursor after the last character.
+  const shown = truncateStart(sanitizeText(dialog.text), Math.max(0, inner - column - 1), theme.glyphs.ellipsis);
+  line.add(shown, "input");
+  const boxWidth = Math.max(20, Math.min(width - 2, 96));
+  const left = Math.max(0, Math.floor((width - boxWidth) / 2));
+  const hints: Hint[] = [["tab", "Trash/permanent"], [theme.glyphs.enter, "review"], ["esc", "cancel"]];
+  return {
+    lines: boxed(OPERATION_NAMES[dialog.operation], content, width, height, theme, permanent ? "danger" : "accent", line.build()),
+    hints,
+    cursor: { row: context.top + height - 2, column: left + 2 + column + cellWidth(shown) },
   };
 }
 

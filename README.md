@@ -84,6 +84,7 @@ Keys (also under `?`):
 | `t` | file-type breakdown on or off |
 | `S` | scan the selected filesystem or this directory |
 | `c` | review a plan to clean the selection |
+| `o` (in a review) | plan the next operation instead: Trash, a move to another disk, a compression, permanent removal; a move or a compression asks for its destination first |
 | `y` / type `yes` | apply a reversible / an irreversible plan |
 | `u` | undo the selected Trash action (History) |
 | `p` | which detectors ran, and why the others could not |
@@ -175,9 +176,6 @@ reads and writes stays on your machine; reports go only where you ask.
 - Linux only in `1.0.0`; the platform boundary exists for a later macOS adapter.
 - Scanning and cleanup need kernel 5.6+ (`openat2`); there is deliberately no less safe
   fallback.
-- Move and compress plans need a destination, so the TUI plans Trash, permanent removal,
-  manager actions, and (for a duplicate copy) hardlink replacement; use
-  `disktop clean plan --operation move|compress` for the rest.
 - Sizes from package managers are their own estimates, and the free-space change after
   an action includes whatever else wrote to the filesystem meanwhile.
 - See [docs/support-matrix.md](docs/support-matrix.md) for what has been checked on
