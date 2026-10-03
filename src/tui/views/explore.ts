@@ -323,7 +323,7 @@ function contextLine(context: ViewContext, home: string | undefined): ScreenLine
   if (directory !== undefined) {
     right.push(formatBytes(entrySize(directory, explore), state.units));
     if (directory.childEntries !== undefined) {
-      right.push(`${groupDigits(directory.childEntries)} items`);
+      right.push(`${groupDigits(directory.childEntries)} item${directory.childEntries === 1n ? "" : "s"}`);
     }
   } else if (explore.duplicates !== undefined && explore.mode === "duplicates") {
     right.push(`frees ${formatBytes(explore.duplicates.reclaimable, state.units)}`);
@@ -397,7 +397,7 @@ function detailLines(context: ViewContext, home: string | undefined): ScreenLine
   } else {
     const entry = row.entry;
     const pieces = [
-      entry.childEntries === undefined ? entry.kind : `${groupDigits(entry.childEntries)} items`,
+      entry.childEntries === undefined ? entry.kind : `${groupDigits(entry.childEntries)} item${entry.childEntries === 1n ? "" : "s"}`,
       `${formatBytes(entry.allocatedBytes, state.units)} on disk`,
       `${formatBytes(entry.apparentBytes, state.units)} apparent`,
       `modified ${localDateTime(nanosecondsToMilliseconds(entry.modifiedNanoseconds))}`,
