@@ -88,6 +88,9 @@ export function renderScreen(state: AppState, size: ScreenSize, options: ScreenO
     const line = new LineBuilder(columns).add(" Filter ", "badgeInfo").add(" ");
     const column = line.used;
     line.add(state.prompt.text, "input");
+    if (state.prompt.error !== undefined) {
+      line.add("  ").add(`${theme.glyphs.warn} ${state.prompt.error}`, "warn");
+    }
     status = line.build();
     hints = [["enter", "apply"], ["esc", "cancel"], ["^U", "clear"], ["", "words ext:log >1GiB age>30 type:dir"]];
     cursor = { row: rows - 2, column: Math.min(columns - 1, column + cellWidth(state.prompt.text)) };

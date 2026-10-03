@@ -42,9 +42,14 @@ export function renderDialog(dialog: Dialog, context: ViewContext, home: string 
     case "undo-confirm": {
       const inner = boxInner(context.width);
       const record = dialog.record;
-      const restorable = record.items.filter((item) => item.outcome === "completed" && item.destination !== undefined).length;
+      // A history page lists at most 1000 items; when it left some out, the
+      // record's own count is the honest number, and it is an upper bound.
+      const listed = record.items.filter((item) => item.outcome === "completed" && item.destination !== undefined).length;
+      const omitted = (record.itemsOmitted ?? 0n) > 0n;
+      const count = omitted ? groupDigits(record.completed) : groupDigits(listed);
+      const plural = omitted ? record.completed !== 1n : listed !== 1;
       const content = [
-        new LineBuilder(inner).add(`Put ${restorable} item${restorable === 1 ? "" : "s"} back where ${restorable === 1 ? "it was" : "they were"}?`, "strong").build(),
+        new LineBuilder(inner).add(`Put ${omitted ? "up to " : ""}${count} item${plural ? "s" : ""} back where ${plural ? "they were" : "it was"}?`, "strong").build(),
         { spans: [] },
         ...wrap(
           "Each item is moved out of Trash to its original path. Anything that now occupies an original path is left alone and that item is refused, so nothing is overwritten.",
@@ -217,7 +222,8 @@ function reviewDialog(dialog: Extract<Dialog, { kind: "review" }>, context: View
     const line = new LineBuilder(inner).add("Type ", "danger").add("yes", "strong").add(" and press Enter to apply: ", "danger");
     const column = line.used;
     line.add(dialog.typed, "input");
-    footerLine = line.add(others.length > 0 ? "   o other operation" : "", "muted").add("   esc cancel", "muted").build();
+    // No other-operation key here: every printable key goes into the field.
+    footerLine = line.add("   esc cancel", "muted").build();
     const boxWidth = Math.max(20, Math.min(width - 2, 96));
     const left = Math.max(0, Math.floor((width - boxWidth) / 2));
     cursor = { row: context.top + height - 2, column: left + 2 + column + dialog.typed.length };

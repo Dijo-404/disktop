@@ -62,6 +62,12 @@ export interface ControllerHooks {
   readonly resume: () => void;
   /** The user asked to leave, with this exit status. */
   readonly exit: (code: number) => void;
+  /**
+   * How long after a confirmation dialog appears its confirming key is
+   * ignored, so a key typed ahead is never taken as having read it. 400 ms
+   * when absent.
+   */
+  readonly confirmDelayMilliseconds?: number;
 }
 
 type TaskKind = "inventory" | "explore" | "trend" | "scan" | "findings" | "history" | "plan" | "apply" | "undo" | "duplicates";
@@ -100,6 +106,8 @@ export class TuiController {
   #leaving = false;
   #interrupted = false;
   #hits: readonly HitRegion[] = [];
+  /** When the dialog on screen first appeared, by `performance.now()`. */
+  #dialogShownAt = 0;
 
   constructor(services: TuiServices, initial: AppState, hooks: ControllerHooks) {
     this.#services = services;
@@ -328,7 +336,8 @@ export class TuiController {
         if (state.tab === "Explore" && state.explore.snapshot !== undefined) {
           const current = EXPLORE_MODES.indexOf(state.explore.mode);
           const mode = EXPLORE_MODES[(current + 1) % EXPLORE_MODES.length] ?? "browse";
-          this.#set({ ...state, explore: { ...state.explore, mode, rows: [], selected: 0 } });
+          // A cursor belongs to the query that issued it; a new mode starts over.
+          this.#set({ ...state, explore: { ...omit(state.explore, "nextCursor", "duplicates"), mode, rows: [], selected: 0 } });
           this.#reloadExplore(true);
         }
         return;
@@ -399,14 +408,14 @@ export class TuiController {
     switch (intent.kind) {
       case "type":
         if (prompt.text.length < 200) {
-          this.#set({ ...this.#state, prompt: { ...prompt, text: prompt.text + intent.text } });
+          this.#set({ ...this.#state, prompt: { kind: prompt.kind, text: prompt.text + intent.text } });
         }
         return;
       case "backspace":
-        this.#set({ ...this.#state, prompt: { ...prompt, text: Array.from(prompt.text).slice(0, -1).join("") } });
+        this.#set({ ...this.#state, prompt: { kind: prompt.kind, text: Array.from(prompt.text).slice(0, -1).join("") } });
         return;
       case "clear-input":
-        this.#set({ ...this.#state, prompt: { ...prompt, text: "" } });
+        this.#set({ ...this.#state, prompt: { kind: prompt.kind, text: "" } });
         return;
       case "cancel":
         this.#set(withoutPrompt(this.#state));
@@ -422,10 +431,12 @@ export class TuiController {
         }
         const parsed = parseSearch(text);
         if (!parsed.ok) {
-          this.#set(withNotice(this.#state, parsed.message, "warn"));
+          // Said on the prompt row, which is on screen while the prompt is
+          // open, and the prompt stays open to be corrected.
+          this.#set({ ...this.#state, prompt: { ...prompt, error: parsed.message } });
           return;
         }
-        this.#set({ ...closed, explore: { ...closed.explore, mode: "search", search: parsed.query, rows: [], selected: 0 } });
+        this.#set({ ...closed, explore: { ...omit(closed.explore, "nextCursor", "duplicates"), mode: "search", search: parsed.query, rows: [], selected: 0 } });
         this.#reloadExplore(true);
         return;
       }
@@ -437,7 +448,15 @@ export class TuiController {
   #dialogIntent(dialog: Dialog, intent: Intent): void {
     const state = this.#state;
     if (intent.kind === "cancel" || (intent.kind === "deny" && dialog.kind !== "review")) {
+      this.#abortPlanning();
       this.#set(withoutDialog(state));
+      return;
+    }
+    const confirming =
+      ((dialog.kind === "review" || dialog.kind === "undo-confirm" || dialog.kind === "confirm-scan") && intent.kind === "confirm") ||
+      (dialog.kind === "review" && intent.kind === "submit") ||
+      (dialog.kind === "confirm-scan" && intent.kind === "open");
+    if (confirming && !this.#dialogSettled()) {
       return;
     }
     if (intent.kind === "quit" && dialog.kind !== "review") {
@@ -472,6 +491,7 @@ export class TuiController {
             this.#replan(dialog, next);
           }
         } else if (intent.kind === "deny") {
+          this.#abortPlanning();
           this.#set(withoutDialog(state));
         }
         return;
@@ -540,14 +560,25 @@ export class TuiController {
       }
       case "Explore": {
         const row = selectedExploreRow(state);
+        // A directory still loading is not opened again: a second Enter would
+        // record the same parent twice on the trail.
+        if (state.explore.loading) {
+          return;
+        }
         if (row?.kind === "entry" && row.entry.kind === "directory") {
           const explore = state.explore;
+          // Loading is set here, synchronously, so a second Enter before the
+          // child arrives is ignored rather than pushing the parent again.
           if (explore.mode !== "browse") {
-            this.#set({ ...state, explore: { ...explore, mode: "browse", trail: [], rows: [], selected: 0 } });
+            this.#set({ ...state, explore: { ...omit(explore, "nextCursor", "duplicates"), mode: "browse", trail: [], rows: [], selected: 0, loading: true } });
           } else if (explore.directory !== undefined) {
             this.#set({
               ...state,
-              explore: { ...explore, trail: [...explore.trail, { path: explore.directory.path, id: explore.directory.id, selected: explore.selected }] },
+              explore: {
+                ...explore,
+                loading: true,
+                trail: [...explore.trail, { path: explore.directory.path, id: explore.directory.id, selected: explore.selected }],
+              },
             });
           }
           this.#loadDirectory(row.entry.path, 0);
@@ -557,7 +588,8 @@ export class TuiController {
       case "Clean":
       case "Dev":
       case "Apps": {
-        const finding = selectedFinding(state);
+        // The detectors list hides the findings; Enter acts on nothing hidden.
+        const finding = state.findings.showProviders ? undefined : selectedFinding(state);
         if (finding !== undefined) {
           this.#set({ ...state, dialog: { kind: "finding", finding, scroll: 0 } });
         }
@@ -572,7 +604,7 @@ export class TuiController {
     const state = this.#state;
     const explore = state.explore;
     if (explore.mode !== "browse") {
-      this.#set({ ...state, explore: { ...explore, mode: "browse", rows: [], selected: 0 } });
+      this.#set({ ...state, explore: { ...omit(explore, "nextCursor", "duplicates"), mode: "browse", rows: [], selected: 0 } });
       this.#reloadExplore(true);
       return;
     }
@@ -679,7 +711,7 @@ export class TuiController {
    */
   #loadMore(): void {
     const state = this.#state;
-    if (state.tab === "Explore" && state.explore.nextCursor !== undefined && !this.#running.has("explore")) {
+    if (state.tab === "Explore" && state.explore.mode !== "duplicates" && state.explore.nextCursor !== undefined && !this.#running.has("explore")) {
       if (state.explore.rows.length >= MAX_ROWS) {
         this.#set(withNotice(state, `Showing the first ${MAX_ROWS.toLocaleString("en")} rows. Press / to narrow the list.`, "info"));
         return;
@@ -697,12 +729,33 @@ export class TuiController {
 
   // ---------------------------------------------------------------- tasks
 
-  #set(state: AppState): void {
-    if (state === this.#state) {
+  #set(next: AppState): void {
+    if (next === this.#state) {
       return;
+    }
+    let state = next;
+    if (state.dialog !== undefined) {
+      if (dialogIdentity(state.dialog) !== (this.#state.dialog === undefined ? undefined : dialogIdentity(this.#state.dialog))) {
+        this.#dialogShownAt = performance.now();
+      }
+      // A dialog takes the keyboard: a prompt left open behind it would
+      // receive keys meant for the dialog while not being on screen.
+      if (state.prompt !== undefined) {
+        state = withoutPrompt(state);
+      }
     }
     this.#state = state;
     this.#hooks.changed();
+  }
+
+  /** Whether a confirming key now could have followed reading the dialog. */
+  #dialogSettled(): boolean {
+    return performance.now() - this.#dialogShownAt >= (this.#hooks.confirmDelayMilliseconds ?? 400);
+  }
+
+  /** Stop a plan that is still being reviewed; its answer is no longer wanted. */
+  #abortPlanning(): void {
+    this.#running.get("plan")?.controller.abort();
   }
 
   /** Update state only if this task is still the current one of its kind. */
@@ -726,9 +779,10 @@ export class TuiController {
     recover?: (state: AppState, message: string) => AppState,
   ): void {
     const previous = this.#running.get(kind);
-    if (previous !== undefined && MUTATING.has(kind)) {
-      // Two applies are never in flight at once; the second waits its turn by being refused.
-      this.#set(withNotice(this.#state, "An action is already running.", "warn"));
+    if (MUTATING.has(kind) && this.acting) {
+      // One change to the disk at a time: an apply and an undo never overlap,
+      // and the second is refused rather than queued behind the first.
+      this.#set(withNotice(this.#state, "An action is already running; wait for it to finish.", "warn"));
       return;
     }
     previous?.controller.abort();
@@ -1118,23 +1172,28 @@ export class TuiController {
               },
         );
       });
-      const finished = (state: AppState): AppState => {
-        const rest = omit(state.explore, "scan");
-        return { ...state, explore: rest };
-      };
+      const current = (): boolean => this.#running.get("scan")?.generation === generation;
       if (outcome.kind === "unavailable") {
-        this.#set({ ...finished(this.#state), dialog: { kind: "unavailable", title: "Cannot scan", capability: outcome.capability } });
+        if (current()) {
+          this.#set({ ...withoutScan(this.#state), dialog: { kind: "unavailable", title: "Cannot scan", capability: outcome.capability } });
+        }
         return;
       }
+      // What a scan read is recorded whether or not anybody is still looking
+      // at it: a stopped scan's snapshot is real history.
       const summary = outcome.summary;
       await this.#services.snapshots.record(summary, { excludes: this.#services.defaults.excludes }, this.#services.now());
       await this.#services.snapshots.prune(this.#services.defaults.retention);
+      // A scan that a newer one has replaced leaves the screen to it.
+      if (!current()) {
+        return;
+      }
       const seconds = Math.max(0, Math.round((this.#services.now().getTime() - startedAt) / 1000));
       const complete = summary.completeness.complete;
       const cancelled = summary.completeness.warnings.some((warning) => warning.code === "cancelled");
       this.#set(
         withNotice(
-          finished(this.#state),
+          withoutScan(this.#state),
           complete
             ? `Scanned ${summary.completeness.scannedEntries.toLocaleString("en")} entries in ${seconds}s.`
             : cancelled
@@ -1146,7 +1205,7 @@ export class TuiController {
       if (!this.#leaving) {
         this.#openExplore(root);
       }
-    });
+    }, (state) => withoutScan(state));
   }
 
   #discover(): void {
@@ -1195,7 +1254,7 @@ export class TuiController {
   #planSelected(): void {
     const state = this.#state;
     if (state.tab === "Clean" || state.tab === "Dev" || state.tab === "Apps") {
-      const finding = selectedFinding(state);
+      const finding = state.findings.showProviders ? undefined : selectedFinding(state);
       if (finding !== undefined) {
         this.#planFinding(finding);
       }
@@ -1235,16 +1294,32 @@ export class TuiController {
 
   #replan(dialog: Extract<Dialog, { kind: "review" }>, operation: ActionOperation): void {
     if (dialog.origin === "finding" && dialog.findingId !== undefined) {
-      this.#plan({ operation, findingId: dialog.findingId }, dialog.alternatives, "finding");
+      this.#plan({ operation, findingId: dialog.findingId }, dialog.alternatives, "finding", dialog.plan.id);
     } else if (dialog.path !== undefined) {
-      this.#plan({ operation, path: dialog.path }, dialog.alternatives, "path");
+      this.#plan({ operation, path: dialog.path }, dialog.alternatives, "path", dialog.plan.id);
     }
   }
 
-  #plan(request: { operation: ActionOperation; findingId?: string; path?: RawPath }, alternatives: readonly ActionOperation[], origin: "finding" | "path"): void {
+  /**
+   * Review a request into a plan. `replacing` names the review this one was
+   * asked for from (`o`), which is the one dialog its answer may replace.
+   */
+  #plan(
+    request: { operation: ActionOperation; findingId?: string; path?: RawPath },
+    alternatives: readonly ActionOperation[],
+    origin: "finding" | "path",
+    replacing?: string,
+  ): void {
     this.#run("plan", { label: "Reviewing", detail: "fingerprinting every entry as it is now", cancellable: true }, async (signal, generation) => {
       const outcome = await this.#services.plan(request, signal);
       this.#ifCurrent("plan", generation, (state) => {
+        // A plan nobody is waiting for any more — stopped, or overtaken by
+        // another dialog — is dropped: a review must never appear in place of
+        // something else, where a key meant for that would answer it.
+        const asked = replacing !== undefined && state.dialog?.kind === "review" && state.dialog.plan.id === replacing;
+        if (signal.aborted || (state.dialog !== undefined && !asked)) {
+          return state;
+        }
         if (outcome.kind === "refused") {
           return { ...withoutDialog(state), dialog: { kind: "refused", title: "Plan refused", failure: outcome.failure } };
         }
@@ -1266,6 +1341,7 @@ export class TuiController {
 
   #apply(plan: ActionPlan, origin: "finding" | "path"): void {
     const privileged = plan.permission === "manager-privilege";
+    this.#abortPlanning();
     this.#set(withoutDialog(this.#state));
     this.#run("apply", { label: "Applying", detail: plan.scopeSummary, cancellable: false }, async (signal) => {
       if (privileged) {
@@ -1286,7 +1362,7 @@ export class TuiController {
       if (outcome.kind === "applied") {
         // What was freed shows on the Disks tab, and the action in History.
         this.#refreshInventory(false);
-        this.#set({ ...this.#state, history: { ...this.#state.history, loaded: false } });
+        this.#loadHistory(false);
         // A stored scan and a list of findings are readings from before the
         // action. They are left as they were and labelled, never edited to look
         // like a fresh measurement.
@@ -1310,8 +1386,29 @@ export class TuiController {
   }
 }
 
+/** The state with no scan in progress on screen. */
+function withoutScan(state: AppState): AppState {
+  return state.explore.scan === undefined ? state : { ...state, explore: omit(state.explore, "scan") };
+}
+
+/** What makes a dialog the same dialog across redraws: its kind and its subject. */
+function dialogIdentity(dialog: Dialog): string {
+  switch (dialog.kind) {
+    case "review":
+      return `review:${dialog.plan.id}`;
+    case "undo-confirm":
+      return `undo:${dialog.record.id}`;
+    case "confirm-scan":
+      return `scan:${dialog.path.bytesBase64}`;
+    case "finding":
+      return `finding:${dialog.finding.id}`;
+    default:
+      return dialog.kind;
+  }
+}
+
 function exploreFailed(state: AppState, message: string): AppState {
-  return { ...state, explore: { ...state.explore, loading: false, rows: [], empty: message } };
+  return { ...state, explore: { ...omit(state.explore, "nextCursor"), loading: false, rows: [], empty: message } };
 }
 
 function orderFor(sort: string): "ascending" | "descending" {
