@@ -2969,22 +2969,42 @@ mod tests {
 
     #[test]
     fn moving_to_trash_reports_what_it_moved_apart_from_what_the_filesystem_shows() {
+        const SIZE: u64 = 16 * 1024 * 1024;
         let sandbox = Sandbox::new("trash-space");
         sandbox.directory(b"work");
-        sandbox.file(b"work/big.bin", 256 * 1024);
+        // Bytes no compressing filesystem can shrink, so the move is as large
+        // on the device as it is in the plan, and on the device before the
+        // action reads free space, so the reading does not also catch this
+        // file's own delayed allocation.
+        let mut state = 0x9e37_79b9_7f4a_7c15u64;
+        let bytes: Vec<u8> = (0..SIZE)
+            .map(|_| {
+                state ^= state << 13;
+                state ^= state >> 7;
+                state ^= state << 17;
+                state as u8
+            })
+            .collect();
+        let written = sandbox.path().join("work/big.bin");
+        std::fs::write(&written, bytes).unwrap();
+        std::fs::File::open(&written).unwrap().sync_all().unwrap();
 
         let mut file = sandbox.bytes();
         file.extend_from_slice(b"/work/big.bin");
-        let events = run_trash("trash-2", &sandbox, &[target(&file, 262_144)]);
+        let events = run_trash("trash-2", &sandbox, &[target(&file, SIZE)]);
         let result = &completion(&events, "trash-2")["result"];
 
-        assert_eq!(result["bytesMovedToTrash"], "262144");
+        assert_eq!(result["bytesMovedToTrash"], SIZE.to_string());
         let before: u64 = result["freeBytesBefore"].as_str().unwrap().parse().unwrap();
         let after: u64 = result["freeBytesAfter"].as_str().unwrap().parse().unwrap();
         // Same filesystem, so the rename gave nothing back. The two numbers are
         // reported separately precisely so this is visible rather than implied.
+        // They are readings of the whole filesystem, which every other test in
+        // this binary is writing to at the same time, and a directory `fsync`
+        // anywhere can commit their allocations between the two. Half of what
+        // moved is what tells "freed it" apart from that.
         assert!(
-            after.abs_diff(before) < 262_144,
+            after.abs_diff(before) < SIZE / 2,
             "a Trash move on one filesystem frees nothing: {before} -> {after}"
         );
     }

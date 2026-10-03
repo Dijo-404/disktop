@@ -34,6 +34,7 @@ function tabSection(tab: TabName): Section {
           ["t", "file types"],
           ["n", "more rows"],
           ["c", "plan cleaning the row"],
+          ["o (review)", "move or compress"],
           ["S", "scan again"],
         ],
       ];
