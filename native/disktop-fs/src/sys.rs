@@ -395,13 +395,22 @@ pub fn fchmod(descriptor: RawFd, permissions: u32) -> io::Result<()> {
 
 /// Copy a file's modification time onto an open descriptor.
 pub fn set_modified(descriptor: RawFd, nanoseconds: u64) -> io::Result<()> {
+    // Converted into whatever `tv_sec` is on this target rather than named:
+    // the libc crate deprecates naming `time_t` on musl, and a value that does
+    // not fit is refused rather than wrapped into a different date.
+    let seconds = (nanoseconds / 1_000_000_000).try_into().map_err(|_| {
+        io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "The modification time does not fit this system's time type.",
+        )
+    })?;
     let times = [
         libc::timespec {
             tv_sec: 0,
             tv_nsec: libc::UTIME_OMIT,
         },
         libc::timespec {
-            tv_sec: (nanoseconds / 1_000_000_000) as libc::time_t,
+            tv_sec: seconds,
             tv_nsec: (nanoseconds % 1_000_000_000) as i64,
         },
     ];
