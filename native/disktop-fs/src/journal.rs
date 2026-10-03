@@ -182,6 +182,36 @@ pub struct JournalPage {
 
 pub struct Journal {
     connection: Connection,
+    /// Actions this handle began and has not finished. Dropping the handle
+    /// without finishing them is what an abandoned action looks like from
+    /// inside the process, so they stop counting as in flight then.
+    began: std::cell::RefCell<Vec<String>>,
+}
+
+/// Every action this process has begun and not yet finished or abandoned.
+///
+/// A record's owner is the process that began it, and while that process is
+/// alive its record is in flight, not abandoned. That cannot be told from the
+/// process ID alone when the process asking is the owner itself: a
+/// `journal-reconcile` that reaches a helper in the middle of its own action
+/// would otherwise declare that action uncertain and release the output it is
+/// staging at that moment.
+static IN_FLIGHT: std::sync::Mutex<std::collections::BTreeSet<String>> =
+    std::sync::Mutex::new(std::collections::BTreeSet::new());
+
+fn in_flight() -> std::sync::MutexGuard<'static, std::collections::BTreeSet<String>> {
+    IN_FLIGHT
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
+impl Drop for Journal {
+    fn drop(&mut self) {
+        let mut flying = in_flight();
+        for id in self.began.borrow().iter() {
+            flying.remove(id);
+        }
+    }
 }
 
 pub fn journal_path(directory: &Path) -> PathBuf {
@@ -216,7 +246,10 @@ impl Journal {
         // The journal names every path Disktop has acted on, so it is private
         // to the user who owns it whichever process created it first.
         make_private(&path, 0o600);
-        Ok(Journal { connection })
+        Ok(Journal {
+            connection,
+            began: std::cell::RefCell::new(Vec::new()),
+        })
     }
 
     /// Record an action's intent and return its ID. Nothing may touch a user
@@ -241,6 +274,8 @@ impl Journal {
                 i64::from(std::process::id()),
             ],
         )?;
+        in_flight().insert(id.clone());
+        self.began.borrow_mut().push(id.clone());
         Ok(id)
     }
 
@@ -410,6 +445,8 @@ impl Journal {
                 free_bytes_after.map(clamp),
             ],
         )?;
+        in_flight().remove(action_id);
+        self.began.borrow_mut().retain(|began| began != action_id);
         Ok(())
     }
 
@@ -434,7 +471,7 @@ impl Journal {
         // operation uncertain; leaving it alone costs one more reconcile.
         let unresolved: Vec<String> = candidates
             .into_iter()
-            .filter(|(_, pid)| !owner_alive(*pid))
+            .filter(|(id, pid)| !owner_alive(*pid, id))
             .map(|(id, _)| id)
             .collect();
 
@@ -617,11 +654,24 @@ impl Journal {
             }
             Ok(id)
         })();
+        // A manager action spans one helper session of several requests, each
+        // with its own handle, so it stays in flight past this handle until it
+        // is finished or the process goes.
+        let forget = |id: &str| {
+            self.began.borrow_mut().retain(|began| began != id);
+        };
         match outcome {
-            Ok(id) => {
-                self.connection.execute_batch("COMMIT")?;
-                Ok(id)
-            }
+            Ok(id) => match self.connection.execute_batch("COMMIT") {
+                Ok(()) => {
+                    forget(&id);
+                    Ok(id)
+                }
+                Err(error) => {
+                    forget(&id);
+                    in_flight().remove(&id);
+                    Err(error)
+                }
+            },
             Err(error) => {
                 let _ = self.connection.execute_batch("ROLLBACK");
                 Err(error)
@@ -903,9 +953,12 @@ pub mod tests_support {
 /// kernel has since handed to something else reads as alive, which only delays
 /// reconciliation; the record stays visibly unresolved rather than being
 /// wrongly declared.
-fn owner_alive(pid: i64) -> bool {
-    if pid <= 0 || pid == i64::from(std::process::id()) {
+fn owner_alive(pid: i64, id: &str) -> bool {
+    if pid <= 0 {
         return false;
+    }
+    if pid == i64::from(std::process::id()) {
+        return in_flight().contains(id);
     }
     let Ok(pid) = libc::pid_t::try_from(pid) else {
         return false;
@@ -1211,6 +1264,62 @@ CREATE TABLE action_item (action_id TEXT NOT NULL REFERENCES action(id) ON DELET
             "an undo moved bytes out of Trash, not into it"
         );
         assert_eq!(record.selected_bytes, 512);
+    }
+
+    /// A reconcile that reaches the helper while that same helper is running
+    /// an action must not judge the action abandoned: its owner is alive, it is
+    /// just the process asking. Once the action's handle is gone without a
+    /// finish, it is abandoned and reads as such.
+    #[test]
+    fn this_process_never_reconciles_an_action_it_is_still_running() {
+        let sandbox = Sandbox::new("journal-own-in-flight");
+        let running = Journal::open(sandbox.path()).unwrap();
+        let id = running
+            .begin("plan-0123456789ab", "copy-move", None)
+            .unwrap();
+        running
+            .record_intent(&id, 0, b"/work/a", Some(b"/elsewhere/a"))
+            .unwrap();
+
+        let asking = Journal::open(sandbox.path()).unwrap();
+        assert_eq!(asking.reconcile().unwrap(), 0, "the action is in flight");
+        assert_eq!(
+            asking.get(&id).unwrap().unwrap().items[0].outcome,
+            Outcome::InProgress
+        );
+
+        drop(running);
+        assert_eq!(
+            asking.reconcile().unwrap(),
+            1,
+            "abandoned once its handle is gone"
+        );
+        assert_eq!(asking.get(&id).unwrap().unwrap().state, State::Uncertain);
+    }
+
+    #[test]
+    fn a_manager_action_stays_in_flight_between_the_requests_of_its_session() {
+        let sandbox = Sandbox::new("journal-manager-in-flight");
+        let id = Journal::open(sandbox.path())
+            .unwrap()
+            .begin_manager(
+                "plan-0123456789ab",
+                "docker",
+                "docker.remove-dangling-images",
+                "user",
+                &[("docker".to_owned(), vec!["image".to_owned()])],
+                &[(b"sha256:1".to_vec(), 1)],
+                None,
+                None,
+            )
+            .unwrap();
+
+        let asking = Journal::open(sandbox.path()).unwrap();
+        assert_eq!(asking.reconcile().unwrap(), 0);
+        asking
+            .finish(&id, State::Complete, &Counts::default(), None)
+            .unwrap();
+        assert_eq!(asking.get(&id).unwrap().unwrap().state, State::Complete);
     }
 
     /// A move or a compress whose plan said `trash` puts its sources in Trash
