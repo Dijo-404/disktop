@@ -56,6 +56,9 @@ export function createTimerService(dependencies: TimerDependencies): TimerServic
     },
     async uninstall() {
       const outcome = await dependencies.port.uninstall();
+      if (outcome.refused) {
+        return settle(outcome, []);
+      }
       return outcome.capability.status === "available" || outcome.units.some((unit) => unit.state === "removed")
         ? { kind: "done", outcome, warnings: [] }
         : settle(outcome, []);

@@ -108,16 +108,36 @@ test("install refuses to overwrite a unit Disktop did not write, and leaves it a
   assert.equal(control.calls.includes("--user enable --now disktop-alerts.timer"), false);
 });
 
-test("uninstall removes only marked units, keeps a foreign one, and can run twice", async () => {
+test("uninstall removes Disktop's units and can run twice", async () => {
   const directory = await home();
   const timer = createSystemdUserTimer({ unitDirectory: directory, systemctl: systemctl().run });
   await timer.install(UNITS);
-  await writeFile(join(directory, "disktop-alerts.timer"), "[Timer]\nOnCalendar=daily\n");
   const first = await timer.uninstall();
-  assert.deepEqual(first.units.map((unit) => unit.state), ["removed", "kept-foreign"]);
-  assert.equal(await readFile(join(directory, "disktop-alerts.timer"), "utf8"), "[Timer]\nOnCalendar=daily\n");
+  assert.deepEqual(first.units.map((unit) => unit.state), ["removed", "removed"]);
   const second = await timer.uninstall();
-  assert.deepEqual(second.units.map((unit) => unit.state), ["absent", "kept-foreign"]);
+  assert.deepEqual(second.units.map((unit) => unit.state), ["absent", "absent"]);
+});
+
+test("uninstall refuses a timer Disktop did not write, and neither stops nor removes anything", async () => {
+  const directory = await home();
+  const control = systemctl();
+  const timer = createSystemdUserTimer({ unitDirectory: directory, systemctl: control.run });
+  await timer.install(UNITS);
+  await writeFile(join(directory, "disktop-alerts.timer"), "[Timer]\nOnCalendar=daily\n");
+  control.calls.length = 0;
+  const outcome = await timer.uninstall();
+  assert.equal(outcome.refused, true);
+  assert.equal(control.calls.some((call) => call.includes("disable")), false, "a foreign timer is never stopped");
+  assert.equal(await readFile(join(directory, "disktop-alerts.timer"), "utf8"), "[Timer]\nOnCalendar=daily\n");
+  assert.ok((await readFile(join(directory, "disktop-alerts.service"), "utf8")).startsWith(TIMER_MARKER));
+});
+
+test("a unit path that cannot be read as a file is not treated as absent", async () => {
+  const directory = await home();
+  await mkdir(join(directory, "disktop-alerts.service"), { recursive: true });
+  const outcome = await createSystemdUserTimer({ unitDirectory: directory, systemctl: systemctl().run }).install(UNITS);
+  assert.equal(outcome.refused, true);
+  assert.equal((await stat(join(directory, "disktop-alerts.service"))).isDirectory(), true);
 });
 
 test("with no systemd user instance nothing is written", async () => {
