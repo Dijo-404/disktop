@@ -21,6 +21,7 @@ use crate::guard::{self, Fingerprint, Guard, GuardContext};
 use crate::journal::{Counts, Identity, Journal, Outcome, State};
 use crate::sys::{self, EntryKind};
 use crate::transfer;
+use std::os::fd::{AsRawFd, FromRawFd};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 
@@ -28,6 +29,52 @@ use std::sync::atomic::{AtomicBool, Ordering};
 /// a Trash directory it has to create.
 const PRIVATE_DIRECTORY_MODE: u32 = 0o700;
 const PRIVATE_FILE_MODE: u32 = 0o600;
+
+/// The moments inside an item where another process acting at the same time
+/// matters most. A test stands in for that process here; a release build does
+/// nothing at them.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(crate) enum Checkpoint {
+    /// A staging name was found free and is about to be created.
+    NameChosen,
+    /// An output is staged and verified and about to be published.
+    Staged,
+    /// An output was published and the source is about to be dealt with.
+    Published,
+    /// A duplicate's bytes matched the kept file's and its name is about to
+    /// be exchanged for a link to it.
+    Compared,
+    /// A target was revalidated, its Trash name reserved, and it is about to
+    /// be renamed into Trash.
+    Reserved,
+}
+
+#[cfg(test)]
+type CheckpointHook = Box<dyn FnMut(Checkpoint)>;
+
+#[cfg(test)]
+thread_local! {
+    static CHECKPOINT: std::cell::RefCell<Option<CheckpointHook>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+fn checkpoint(at: Checkpoint) {
+    #[cfg(test)]
+    CHECKPOINT.with(|hook| {
+        if let Some(hook) = hook.borrow_mut().as_mut() {
+            hook(at);
+        }
+    });
+    #[cfg(not(test))]
+    let _ = at;
+}
+
+/// Act as another process would, at `checkpoint`, for the rest of this thread's
+/// test.
+#[cfg(test)]
+pub(crate) fn at_checkpoint(hook: impl FnMut(Checkpoint) + 'static) {
+    CHECKPOINT.with(|slot| *slot.borrow_mut() = Some(Box::new(hook)));
+}
 
 pub struct Target {
     pub path: Vec<u8>,
@@ -187,8 +234,16 @@ pub fn run_trash(
         &request.targets,
         report,
         cancelled,
-        |guard, journal, journal_id, position, target| {
-            trash_one(guard, &home_trash, journal, journal_id, position, target)
+        |guard, journal, journal_id, position, target, cancelled| {
+            trash_one(
+                guard,
+                &home_trash,
+                journal,
+                journal_id,
+                position,
+                target,
+                cancelled,
+            )
         },
     )
 }
@@ -268,8 +323,10 @@ pub fn run_dedup_hardlink(
         &request.targets,
         report,
         cancelled,
-        |guard, journal, journal_id, position, target| {
-            hardlink_one(guard, &keep, journal, journal_id, position, target)
+        |guard, journal, journal_id, position, target, cancelled| {
+            hardlink_one(
+                guard, &keep, journal, journal_id, position, target, cancelled,
+            )
         },
     );
     sys::close(keep.descriptor);
@@ -304,6 +361,7 @@ fn hardlink_one(
     journal_id: &str,
     position: u64,
     target: &Target,
+    cancelled: &AtomicBool,
 ) -> ItemReport {
     let refuse = |code: &'static str, message: String, outcome: Outcome| ItemReport {
         path: target.path.clone(),
@@ -330,7 +388,7 @@ fn hardlink_one(
             return refuse(refusal.code, refusal.message, outcome);
         }
     };
-    if let Err((code, message)) = subtree_unchanged(&parent, target) {
+    if let Err((code, message)) = subtree_unchanged(&parent, target, cancelled) {
         return refuse(code, message, outcome_for(code));
     }
 
@@ -373,8 +431,10 @@ fn hardlink_one(
         );
     }
 
-    let descriptor = match sys::openat_read_no_symlinks(parent.descriptor(), &parent.name) {
-        Ok(descriptor) => descriptor,
+    // Held open until the exchange has happened, so what the exchange swapped
+    // out can be checked against the very inode whose bytes were compared.
+    let compared = match sys::openat_read_no_symlinks(parent.descriptor(), &parent.name) {
+        Ok(descriptor) => unsafe { std::os::fd::OwnedFd::from_raw_fd(descriptor) },
         Err(error) => {
             return refuse(
                 "permission-denied",
@@ -383,10 +443,19 @@ fn hardlink_one(
             );
         }
     };
+    // The name was opened a moment after it was revalidated, and could have
+    // been replaced in between. The bytes compared have to be the reviewed
+    // inode's.
+    if !same_file(compared.as_raw_fd(), &live) {
+        return refuse(
+            "changed-target",
+            CHANGED_AFTER_REVIEW.to_owned(),
+            Outcome::Skipped,
+        );
+    }
     // The gate. A digest said these were probably identical; this is the only
     // thing that says they are. See docs/adr/0006.
-    let identical = content::bytes_equal(keep.descriptor, descriptor);
-    sys::close(descriptor);
+    let identical = content::bytes_equal(keep.descriptor, compared.as_raw_fd());
     match identical {
         Ok(true) => {}
         Ok(false) => {
@@ -455,6 +524,8 @@ fn hardlink_one(
         );
     }
 
+    checkpoint(Checkpoint::Compared);
+
     // After this the reviewed name holds the kept inode and the staging name
     // holds the old one. The name never points at nothing in between.
     if let Err(error) = sys::renameat_exchange(
@@ -488,6 +559,59 @@ fn hardlink_one(
             target,
             refuse(code, message, Outcome::Failed),
         );
+    }
+
+    // The exchange took whatever was under the name at that instant, which is
+    // not necessarily what was compared: an editor saves by renaming a new
+    // file over the old one, and a program can write into the old one. What
+    // the staging name holds now has to be the inode that was compared,
+    // unchanged since it was reviewed, before releasing it is anything but a
+    // guess. Anything else is exchanged straight back.
+    let swapped_out = sys::metadata_at(parent.descriptor(), &staging);
+    let unchanged = matches!(&swapped_out, Ok(held) if held.device == live.device && held.inode == live.inode)
+        && same_file(compared.as_raw_fd(), &live);
+    drop(compared);
+    if !unchanged {
+        let report = match sys::renameat_exchange(
+            parent.descriptor(),
+            &staging,
+            parent.descriptor(),
+            &parent.name,
+        ) {
+            Ok(()) => {
+                // The staging name holds the link to the kept file again, and
+                // removing a link to a file that has other names frees nothing.
+                let kept_link = sys::metadata_at(parent.descriptor(), &staging).is_ok_and(|held| {
+                    held.device == keep.metadata.device && held.inode == keep.metadata.inode
+                });
+                if kept_link {
+                    let _ = sys::unlinkat(parent.descriptor(), &staging, false);
+                }
+                record.forget();
+                refuse(
+                    "changed-target",
+                    "It changed after its bytes were compared, so it was put back under its \
+                     name exactly as it now is and left alone."
+                        .to_owned(),
+                    Outcome::Skipped,
+                )
+            }
+            Err(error) => {
+                // Nothing is removed: the staging name holds what was under
+                // the reviewed name, and it stays there for somebody to see.
+                refuse(
+                    "changed-target",
+                    format!(
+                        "It changed after its bytes were compared and could not be put back: \
+                         what was under its name is now '{}' in the same directory, and the \
+                         name holds a link to the kept file: {error}",
+                        String::from_utf8_lossy(&staging),
+                    ),
+                    Outcome::Uncertain,
+                )
+            }
+        };
+        return settle(journal, journal_id, position, target, report);
     }
 
     // Removing the staging name releases the old inode, if this was its last
@@ -525,6 +649,20 @@ fn hardlink_one(
         bytes: freed,
     };
     settle(journal, journal_id, position, target, report)
+}
+
+const CHANGED_AFTER_REVIEW: &str =
+    "The live entry differs from the one the plan reviewed; nothing was changed.";
+
+/// Whether an open file is still the reviewed inode, with the size and
+/// modification time it was reviewed with.
+fn same_file(descriptor: libc::c_int, reviewed: &sys::Metadata) -> bool {
+    sys::metadata_of(descriptor).is_ok_and(|now| {
+        now.device == reviewed.device
+            && now.inode == reviewed.inode
+            && now.apparent_bytes == reviewed.apparent_bytes
+            && now.modified_nanoseconds == reviewed.modified_nanoseconds
+    })
 }
 
 impl KeptFile {
@@ -634,7 +772,7 @@ pub fn run_copy_move(
         &request.targets,
         report,
         cancelled,
-        |guard, journal, journal_id, position, target| {
+        |guard, journal, journal_id, position, target, cancelled| {
             move_one(
                 guard,
                 &MoveContext {
@@ -647,6 +785,7 @@ pub fn run_copy_move(
                 journal_id,
                 position,
                 target,
+                cancelled,
             )
         },
     );
@@ -712,7 +851,7 @@ pub fn run_compress(
         &request.targets,
         report,
         cancelled,
-        |guard, journal, journal_id, position, target| {
+        |guard, journal, journal_id, position, target, cancelled| {
             compress_one(
                 guard,
                 named,
@@ -723,6 +862,7 @@ pub fn run_compress(
                 journal_id,
                 position,
                 target,
+                cancelled,
             )
         },
     );
@@ -743,6 +883,7 @@ fn compress_one(
     journal_id: &str,
     position: u64,
     target: &Target,
+    cancelled: &AtomicBool,
 ) -> ItemReport {
     let refuse = |code: &'static str, message: String, outcome: Outcome| ItemReport {
         path: target.path.clone(),
@@ -754,6 +895,18 @@ fn compress_one(
 
     if let Err(refusal) = guard.classify(&target.path) {
         return refuse(refusal.code, refusal.message, Outcome::Failed);
+    }
+    // An archive written inside the tree it archives would be read back into
+    // itself as the walk reached it. The planner refuses this too; the helper
+    // does not take its word for it.
+    if named_destination.is_some() && guard::is_within(&target.path, named_destination_path) {
+        return refuse(
+            "invalid-arguments",
+            "The destination is inside the source, so the archive would be written into what it \
+             is archiving."
+                .to_owned(),
+            Outcome::Failed,
+        );
     }
     let parent = match guard::resolve_parent(&target.path) {
         Ok(parent) => parent,
@@ -769,7 +922,7 @@ fn compress_one(
             return refuse(refusal.code, refusal.message, outcome);
         }
     };
-    if let Err((code, message)) = subtree_unchanged(&parent, target) {
+    if let Err((code, message)) = subtree_unchanged(&parent, target, cancelled) {
         return refuse(code, message, outcome_for(code));
     }
     if live.kind != EntryKind::File && live.kind != EntryKind::Directory {
@@ -778,6 +931,13 @@ fn compress_one(
             "Only a file or a directory can be compressed.".to_owned(),
             Outcome::Failed,
         );
+    }
+    // A source that cannot be removed completely is found out now, before an
+    // archive of it is written and published for nothing.
+    if disposition == SourceDisposition::Permanent
+        && let Err((code, message)) = removable_completely(&parent)
+    {
+        return refuse(code, message, Outcome::Failed);
     }
 
     // Beside the source unless somebody named somewhere else. The parent's own
@@ -792,7 +952,21 @@ fn compress_one(
     let mut archive_name = parent.name.clone();
     archive_name.extend_from_slice(archive::suffix(live.kind));
 
-    if sys::target_exists(destination, &archive_name) {
+    // The archive keeps the source's name so somebody can tell what it holds,
+    // and a name with no room left for the suffix has nowhere to put it.
+    if archive_name.len() > NAME_MAX {
+        return refuse(
+            "invalid-arguments",
+            format!(
+                "Its archive would be called '{}', longer than the {NAME_MAX} bytes a filesystem \
+                 allows in one name, so it was not compressed.",
+                String::from_utf8_lossy(&archive_name),
+            ),
+            Outcome::Failed,
+        );
+    }
+
+    if occupied(destination, &archive_name) {
         return refuse(
             "destination-exists",
             format!(
@@ -838,7 +1012,14 @@ fn compress_one(
         position,
         directory: &destination_path,
     };
-    let staged = match stage_archive(&parent, destination, &live, &archive_name, &staging) {
+    let staged = match stage_archive(
+        &parent,
+        destination,
+        &live,
+        &archive_name,
+        &staging,
+        cancelled,
+    ) {
         Ok(staged) => staged,
         Err((code, message)) => {
             return settle(
@@ -846,14 +1027,31 @@ fn compress_one(
                 journal_id,
                 position,
                 target,
-                refuse(code, message, Outcome::Failed),
+                refuse(code, message, outcome_for(code)),
             );
         }
     };
 
-    let publish = sys::renameat_no_replace(destination, &staged, destination, &archive_name);
+    checkpoint(Checkpoint::Staged);
+    if let Err((code, message)) = still_as_reviewed(target, cancelled) {
+        discard_staged(destination, &staged);
+        staging.forget();
+        return settle(
+            journal,
+            journal_id,
+            position,
+            target,
+            refuse(
+                code,
+                changed_while_staged(code, "compressed", message),
+                outcome_for(code),
+            ),
+        );
+    }
+
+    let publish = sys::renameat_no_replace(destination, &staged.name, destination, &archive_name);
     if publish.is_err() {
-        let _ = sys::unlinkat(destination, &staged, false);
+        discard_staged(destination, &staged);
     }
     staging.forget();
     if let Err(error) = publish {
@@ -905,17 +1103,16 @@ fn stage_archive(
     live: &sys::Metadata,
     archive_name: &[u8],
     record: &StagingRecord<'_>,
-) -> Result<Vec<u8>, (&'static str, String)> {
+    cancelled: &AtomicBool,
+) -> Result<Staged, (&'static str, String)> {
     for attempt in 0..64u32 {
-        let mut staging = archive_name.to_vec();
-        staging.extend_from_slice(
-            format!(".disktop-partial-{}-{attempt}", std::process::id()).as_bytes(),
-        );
-        if sys::target_exists(destination, &staging) {
+        let staging = staging_name(archive_name, attempt);
+        if occupied(destination, &staging) {
             continue;
         }
-        let staged_name = staging.clone();
-        let mut on_created = |descriptor| record.record(&staged_name, descriptor);
+        checkpoint(Checkpoint::NameChosen);
+        let mut created = None;
+        let mut on_created = |descriptor| record.record(&staging, descriptor, &mut created);
 
         // An archive holds everything that was inside the source, including
         // whatever was private in there, so it takes Disktop's own private mode
@@ -931,13 +1128,14 @@ fn stage_archive(
                 &staging,
                 PRIVATE_FILE_MODE,
                 &mut on_created,
+                cancelled,
             )
             .and_then(|written| {
                 // Read back the way somebody recovering from it would, and
                 // compared over the archive's whole content. An archive that
                 // will not decompress to what went into it is not an archive,
                 // however well the write went.
-                let recovered = archive::verify_tree(destination, &staging)?;
+                let recovered = archive::verify_tree(destination, &staging, cancelled)?;
                 if recovered != written {
                     return Err(std::io::Error::new(
                         std::io::ErrorKind::InvalidData,
@@ -946,7 +1144,7 @@ fn stage_archive(
                 }
                 // And it is still a tar anybody can unpack, not only a stream
                 // that happens to decompress.
-                archive::readable_as_tar(destination, &staging)?;
+                archive::readable_as_tar(destination, &staging, cancelled)?;
                 Ok(())
             });
             sys::close(source);
@@ -960,9 +1158,10 @@ fn stage_archive(
                 &staging,
                 PRIVATE_FILE_MODE,
                 &mut on_created,
+                cancelled,
             )
             .and_then(|written| {
-                let recovered = archive::verify_file(destination, &staging)?;
+                let recovered = archive::verify_file(destination, &staging, cancelled)?;
                 if recovered != written {
                     return Err(std::io::Error::new(
                         std::io::ErrorKind::InvalidData,
@@ -975,10 +1174,10 @@ fn stage_archive(
             result
         };
 
-        return match outcome {
-            Ok(()) => Ok(staging),
-            Err(error) => {
-                let _ = sys::unlinkat(destination, &staging, false);
+        return match settle_staging(destination, &staging, EntryKind::File, created, outcome) {
+            Settled::Ready(staged) => Ok(staged),
+            Settled::Taken => continue,
+            Settled::Failed(error) => {
                 record.forget();
                 Err(describe_copy(error))
             }
@@ -988,6 +1187,54 @@ fn stage_archive(
         "internal-error",
         "No staging name was free in the destination directory.".to_owned(),
     ))
+}
+
+/// Something an item created under a staging name, and the inode it got.
+///
+/// The identity is what makes removing it safe: a staging name is only ever
+/// removed while it still holds the inode this process created there, so a
+/// name somebody else took — before the create or after it — is never
+/// mistaken for Disktop's own.
+struct Staged {
+    name: Vec<u8>,
+    identity: Identity,
+    kind: EntryKind,
+}
+
+enum Settled {
+    Ready(Staged),
+    /// The name was taken between the check and the create. Nothing was
+    /// created and nothing is removed; the next name is tried.
+    Taken,
+    Failed(std::io::Error),
+}
+
+/// What a staging attempt left, and what to do about it.
+fn settle_staging(
+    destination: libc::c_int,
+    name: &[u8],
+    kind: EntryKind,
+    created: Option<Identity>,
+    outcome: std::io::Result<()>,
+) -> Settled {
+    let staged = created.map(|identity| Staged {
+        name: name.to_vec(),
+        identity,
+        kind,
+    });
+    match (outcome, staged) {
+        (Ok(()), Some(staged)) => Settled::Ready(staged),
+        (Ok(()), None) => Settled::Failed(std::io::Error::other(
+            "the staged output's identity could not be read, so it was not published",
+        )),
+        (Err(error), None) if error.raw_os_error() == Some(libc::EEXIST) => Settled::Taken,
+        (Err(error), staged) => {
+            if let Some(staged) = &staged {
+                discard_staged(destination, staged);
+            }
+            Settled::Failed(error)
+        }
+    }
 }
 
 struct MoveContext<'a> {
@@ -1004,6 +1251,7 @@ fn move_one(
     journal_id: &str,
     position: u64,
     target: &Target,
+    cancelled: &AtomicBool,
 ) -> ItemReport {
     let refuse = |code: &'static str, message: String, outcome: Outcome| ItemReport {
         path: target.path.clone(),
@@ -1042,7 +1290,7 @@ fn move_one(
             return refuse(refusal.code, refusal.message, outcome);
         }
     };
-    if let Err((code, message)) = subtree_unchanged(&parent, target) {
+    if let Err((code, message)) = subtree_unchanged(&parent, target, cancelled) {
         return refuse(code, message, outcome_for(code));
     }
     if live.kind != EntryKind::File && live.kind != EntryKind::Directory {
@@ -1052,11 +1300,18 @@ fn move_one(
             Outcome::Failed,
         );
     }
+    // A source that cannot be removed completely is found out now, before it
+    // is copied and published for nothing.
+    if context.disposition == SourceDisposition::Permanent
+        && let Err((code, message)) = removable_completely(&parent)
+    {
+        return refuse(code, message, Outcome::Failed);
+    }
 
     // The published name is checked before a byte is copied, so a collision
     // costs nothing. It is checked again by the publish itself, which is what
     // actually decides: a name that appears in between fails there.
-    if sys::target_exists(context.destination, &parent.name) {
+    if occupied(context.destination, &parent.name) {
         return refuse(
             "destination-exists",
             format!(
@@ -1103,7 +1358,7 @@ fn move_one(
         position,
         directory: context.destination_path,
     };
-    let staged = match stage_copy(&parent, context.destination, &live, &staging) {
+    let staged = match stage_copy(&parent, context.destination, &live, &staging, cancelled) {
         Ok(staged) => staged,
         Err((code, message)) => {
             return settle(
@@ -1111,22 +1366,39 @@ fn move_one(
                 journal_id,
                 position,
                 target,
-                refuse(code, message, Outcome::Failed),
+                refuse(code, message, outcome_for(code)),
             );
         }
     };
+
+    checkpoint(Checkpoint::Staged);
+    if let Err((code, message)) = still_as_reviewed(target, cancelled) {
+        discard_staged(context.destination, &staged);
+        staging.forget();
+        return settle(
+            journal,
+            journal_id,
+            position,
+            target,
+            refuse(
+                code,
+                changed_while_staged(code, "copied", message),
+                outcome_for(code),
+            ),
+        );
+    }
 
     // Publishing is a rename that refuses to overwrite. Between the check
     // above and this, somebody could have created the name; this is what
     // actually decides, and it decides without destroying what they made.
     let publish = sys::renameat_no_replace(
         context.destination,
-        &staged,
+        &staged.name,
         context.destination,
         &parent.name,
     );
     if publish.is_err() {
-        discard_staged(context.destination, &staged, live.kind);
+        discard_staged(context.destination, &staged);
     }
     staging.forget();
     if let Err(error) = publish {
@@ -1158,6 +1430,49 @@ fn move_one(
     // Only now is the source touched. Everything above this line leaves it
     // exactly where it was, whatever went wrong.
     dispose_of_source(guard, context, journal, journal_id, position, target, &live)
+}
+
+/// Whether anything at all holds this name in `parent`.
+///
+/// Asked of the name itself and never through it: a dangling symlink is a name
+/// that is taken, and a check that followed it would call the name free, start
+/// a copy, and have the publish refuse it only at the end. A name that could
+/// not be looked up at all is not called taken here: the exclusive create or
+/// the no-replace publish makes the final decision, and reports the real reason.
+fn occupied(parent: libc::c_int, name: &[u8]) -> bool {
+    sys::metadata_at(parent, name).is_ok()
+}
+
+/// Whether the source is still exactly what the plan reviewed, asked once its
+/// copy or archive is staged and before that is published.
+///
+/// Verification compares what was read with what was written, and for a source
+/// that was written to while it was read those agree on a torn mixture of
+/// before and after. Only the source can say it moved underneath the copy, and
+/// it is asked here so a torn copy is discarded rather than published where
+/// somebody would take it for the real thing. The source is asked again before
+/// it is disposed of, for whatever happens in between.
+fn still_as_reviewed(
+    target: &Target,
+    cancelled: &AtomicBool,
+) -> Result<(), (&'static str, String)> {
+    let parent =
+        guard::resolve_parent(&target.path).map_err(|refusal| (refusal.code, refusal.message))?;
+    guard::revalidate(&parent, &target.expected)
+        .map_err(|refusal| (refusal.code, refusal.message))?;
+    subtree_unchanged(&parent, target, cancelled)
+}
+
+fn changed_while_staged(code: &str, what: &str, reason: String) -> String {
+    if code == "cancelled" {
+        return format!(
+            "Stopped when the action was cancelled, after it was {what} and before anything was \
+             published. What had been written was removed and the original was not touched."
+        );
+    }
+    format!(
+        "It changed while it was being {what}, so the output was discarded and nothing was published: {reason}"
+    )
 }
 
 /// Whether the filesystem holding the destination has room for this source.
@@ -1194,15 +1509,22 @@ struct StagingRecord<'a> {
 }
 
 impl StagingRecord<'_> {
-    fn record(&self, name: &[u8], descriptor: libc::c_int) -> std::io::Result<()> {
+    /// Journal what was just created under `name`, and keep its identity in
+    /// `created` whether or not the journal write works: it exists either way,
+    /// and the caller is the one that has to take it back.
+    fn record(
+        &self,
+        name: &[u8],
+        descriptor: libc::c_int,
+        created: &mut Option<Identity>,
+    ) -> std::io::Result<()> {
         let metadata = sys::metadata_of(descriptor)?;
-        self.record_identity(
-            name,
-            &Identity {
-                device: metadata.device,
-                inode: metadata.inode,
-            },
-        )
+        let identity = Identity {
+            device: metadata.device,
+            inode: metadata.inode,
+        };
+        *created = Some(identity);
+        self.record_identity(name, &identity)
     }
 
     fn record_identity(&self, name: &[u8], identity: &Identity) -> std::io::Result<()> {
@@ -1221,21 +1543,22 @@ impl StagingRecord<'_> {
     }
 }
 
-/// Copy one reviewed target under a staging name, returning that name.
+/// Copy one reviewed target under a staging name, returning what was staged.
 fn stage_copy(
     parent: &guard::ResolvedParent,
     destination: libc::c_int,
     live: &sys::Metadata,
     staging: &StagingRecord<'_>,
-) -> Result<Vec<u8>, (&'static str, String)> {
+    cancelled: &AtomicBool,
+) -> Result<Staged, (&'static str, String)> {
     for attempt in 0..64u32 {
-        let mut name = parent.name.clone();
-        name.extend_from_slice(
-            format!(".disktop-partial-{}-{attempt}", std::process::id()).as_bytes(),
-        );
-        if sys::target_exists(destination, &name) {
+        let name = staging_name(&parent.name, attempt);
+        if occupied(destination, &name) {
             continue;
         }
+        checkpoint(Checkpoint::NameChosen);
+        let mut created = None;
+        let mut on_created = |descriptor| staging.record(&name, descriptor, &mut created);
 
         let outcome = if live.kind == EntryKind::Directory {
             let source = sys::open_directory_no_symlinks(parent.descriptor(), &parent.name)
@@ -1245,7 +1568,8 @@ fn stage_copy(
                 destination,
                 &name,
                 live.permissions,
-                &mut |descriptor| staging.record(&name, descriptor),
+                &mut on_created,
+                cancelled,
             )
             .map(|_| ());
             sys::close(source);
@@ -1259,17 +1583,18 @@ fn stage_copy(
                 &name,
                 live.permissions,
                 Some(live.modified_nanoseconds),
-                &mut |descriptor| staging.record(&name, descriptor),
+                &mut on_created,
+                cancelled,
             )
             .map(|_| ());
             sys::close(source);
             result
         };
 
-        return match outcome {
-            Ok(()) => Ok(name),
-            Err(error) => {
-                discard_staged(destination, &name, live.kind);
+        return match settle_staging(destination, &name, live.kind, created, outcome) {
+            Settled::Ready(staged) => Ok(staged),
+            Settled::Taken => continue,
+            Settled::Failed(error) => {
                 staging.forget();
                 Err(describe_copy(error))
             }
@@ -1282,6 +1607,17 @@ fn stage_copy(
 }
 
 fn describe_copy(error: std::io::Error) -> (&'static str, String) {
+    if transfer::is_cancelled(&error) {
+        return (
+            "cancelled",
+            "Stopped when the action was cancelled. What had been written was removed, nothing \
+             was published, and the original was not touched."
+                .to_owned(),
+        );
+    }
+    if crate::subtree::is_too_deep(&error) {
+        return ("invalid-arguments", crate::subtree::TOO_DEEP.to_owned());
+    }
     let code = match error.raw_os_error() {
         Some(libc::ENOSPC) | Some(libc::EDQUOT) => "no-space",
         Some(libc::EACCES) | Some(libc::EPERM) => "permission-denied",
@@ -1295,8 +1631,20 @@ fn describe_copy(error: std::io::Error) -> (&'static str, String) {
     )
 }
 
-fn discard_staged(destination: libc::c_int, name: &[u8], kind: EntryKind) {
-    let _ = remove_entry(destination, name, kind);
+/// Take back what an item staged, if the name still holds it.
+///
+/// A staging name is a name in a directory other people can write to. Whatever
+/// is there now is removed only if it is the very inode this process created,
+/// so a failed copy can never take somebody else's file down with it.
+fn discard_staged(destination: libc::c_int, staged: &Staged) {
+    match sys::metadata_at(destination, &staged.name) {
+        Ok(live)
+            if live.device == staged.identity.device && live.inode == staged.identity.inode =>
+        {
+            let _ = remove_staged(destination, &staged.name, staged.kind);
+        }
+        _ => {}
+    }
 }
 
 /// Trash or erase the source, once its copy is published and verified.
@@ -1309,9 +1657,40 @@ fn dispose_of_source(
     target: &Target,
     live: &sys::Metadata,
 ) -> ItemReport {
+    // The item's intent is already in the journal, so every way out of here
+    // writes its outcome too. An item left reading `in-progress` inside an
+    // action that finished would never be looked at again.
+    let kept = |message: String| {
+        settle(
+            journal,
+            journal_id,
+            position,
+            target,
+            published_but_kept(target, message),
+        )
+    };
+    let still_there = |reason: &str| {
+        format!("{PUBLISHED} the original could not be dealt with, so it is still there: {reason}")
+    };
+
+    // The published name has to be on the device before the source is
+    // touched. A move publishes on one filesystem and removes from another,
+    // and nothing orders a crash's effect on one against the other: without
+    // this, a power cut can keep the removal and lose the name — and with it
+    // the staged file's own entry, which is the only copy left. The staged
+    // bytes and every directory inside a staged tree were made durable before
+    // the rename; this makes the rename itself durable.
+    if let Err(error) = sys::fsync(context.destination) {
+        return kept(format!(
+            "{PUBLISHED} its name could not be made durable on the destination, so the original \
+             was kept: {error}"
+        ));
+    }
+
+    checkpoint(Checkpoint::Published);
     let parent = match guard::resolve_parent(&target.path) {
         Ok(parent) => parent,
-        Err(refusal) => return published_but_kept(target, &refusal.message),
+        Err(refusal) => return kept(still_there(&refusal.message)),
     };
 
     // The source is checked again, here, immediately before anything happens
@@ -1320,10 +1699,10 @@ fn dispose_of_source(
     // it ran is in neither the copy nor the plan. Disposing of it on the
     // strength of the earlier check would release bytes nobody reviewed.
     if let Err(refusal) = guard::revalidate(&parent, &target.expected) {
-        return published_but_kept(target, &refusal.message);
+        return kept(still_there(&refusal.message));
     }
-    if let Err((_, message)) = subtree_unchanged(&parent, target) {
-        return published_but_kept(target, &message);
+    if let Err((_, message)) = subtree_unchanged(&parent, target, &NEVER_CANCELLED) {
+        return kept(still_there(&message));
     }
 
     let removed = match context.disposition {
@@ -1331,11 +1710,11 @@ fn dispose_of_source(
             let destination =
                 match choose_trash(guard, context.home_trash, &target.path, live.device) {
                     Ok(destination) => destination,
-                    Err(refusal) => return published_but_kept(target, &refusal.message),
+                    Err(refusal) => return kept(still_there(&refusal.message)),
                 };
             let reserved = match reserve(&destination, &parent.name, &target.path) {
                 Ok(reserved) => reserved,
-                Err(refusal) => return published_but_kept(target, &refusal.message),
+                Err(refusal) => return kept(still_there(&refusal.message)),
             };
 
             // The item's destination becomes where the *source* went, not
@@ -1348,20 +1727,15 @@ fn dispose_of_source(
                 journal.record_intent(journal_id, position, &target.path, Some(&trashed))
             {
                 reserved.discard(&destination);
-                return published_but_kept(target, &error.to_string());
+                return kept(still_there(&error.to_string()));
             }
 
-            match sys::renameat_no_replace(
-                parent.descriptor(),
-                &parent.name,
-                destination.files_descriptor,
-                &reserved.name,
-            ) {
-                Ok(()) => Ok(()),
-                Err(error) => {
-                    reserved.discard(&destination);
-                    Err(error.to_string())
-                }
+            match move_into_trash(&parent, &destination, &reserved, live) {
+                IntoTrash::Moved => Ok(()),
+                IntoTrash::Refused(_, message, _) => Err(format!(
+                    "{PUBLISHED} the original did not go to Trash as reviewed. {message}"
+                )),
+                IntoTrash::Failed(error) => Err(still_there(&error.to_string())),
             }
         }
         SourceDisposition::Permanent => {
@@ -1369,11 +1743,21 @@ fn dispose_of_source(
             // be put back, and a permanent removal has nowhere. Clearing it is
             // what makes `undo` refuse this record rather than try to rename
             // the published output back over the original's path.
-            if let Err(error) = journal.record_intent(journal_id, position, &target.path, None) {
-                return published_but_kept(target, &error.to_string());
+            if let Err((_, message)) = removable_completely(&parent) {
+                return kept(still_there(&message));
             }
-            remove_entry(parent.descriptor(), &parent.name, live.kind)
-                .map_err(|error| error.to_string())
+            if let Err(error) = journal.record_intent(journal_id, position, &target.path, None) {
+                return kept(still_there(&error.to_string()));
+            }
+            // A tree removal that stops partway has removed part of the tree,
+            // and saying the original "is still there" would be wrong about
+            // the part that went. The verified copy holds all of it.
+            remove_entry(parent.descriptor(), &parent.name, live.kind).map_err(|error| {
+                format!(
+                    "{PUBLISHED} the original could not be removed completely, so part of it may \
+                     still be there: {error}"
+                )
+            })
         }
     };
 
@@ -1389,24 +1773,23 @@ fn dispose_of_source(
                 inode: live.inode,
             }),
         ),
-        Err(message) => published_but_kept(target, &message),
+        Err(message) => kept(message),
     }
 }
+
+const PUBLISHED: &str = "The output arrived and was verified, but";
 
 /// The copy arrived and the source did not go.
 ///
 /// This is `uncertain` rather than `failed`, and deliberately so: the action
 /// half happened. Saying it failed would invite somebody to run it again, and
 /// the second run would find the destination occupied by the first one's work.
-fn published_but_kept(target: &Target, reason: &str) -> ItemReport {
+fn published_but_kept(target: &Target, message: String) -> ItemReport {
     ItemReport {
         path: target.path.clone(),
         outcome: Outcome::Uncertain,
         reason: Some("source-not-disposed"),
-        message: Some(format!(
-            "The output arrived and was verified, but the original could not be dealt with, so it \
-             is still there: {reason}"
-        )),
+        message: Some(message),
         bytes: 0,
     }
 }
@@ -1458,7 +1841,7 @@ fn run_action(
     targets: &[Target],
     report: &mut dyn FnMut(ItemReport),
     cancelled: &AtomicBool,
-    mut act: impl FnMut(&Guard, &Journal, &str, u64, &Target) -> ItemReport,
+    mut act: impl FnMut(&Guard, &Journal, &str, u64, &Target, &AtomicBool) -> ItemReport,
 ) -> Result<ActionSummary, ActionRefusal> {
     let guard = Guard::new(&GuardContext {
         journal_directory: Some(journal_directory.as_os_str().as_encoded_bytes().to_vec()),
@@ -1510,7 +1893,14 @@ fn run_action(
             continue;
         }
 
-        let outcome = act(&guard, &journal, &journal_id, position as u64, target);
+        let outcome = act(
+            &guard,
+            &journal,
+            &journal_id,
+            position as u64,
+            target,
+            cancelled,
+        );
         match &outcome.outcome {
             Outcome::Completed => {
                 counts.completed += 1;
@@ -1560,6 +1950,7 @@ fn trash_one(
     journal_id: &str,
     position: u64,
     target: &Target,
+    cancelled: &AtomicBool,
 ) -> ItemReport {
     let refuse = |code: &'static str, message: String, outcome: Outcome| ItemReport {
         path: target.path.clone(),
@@ -1586,7 +1977,7 @@ fn trash_one(
             return refuse(refusal.code, refusal.message, outcome);
         }
     };
-    if let Err((code, message)) = subtree_unchanged(&parent, target) {
+    if let Err((code, message)) = subtree_unchanged(&parent, target, cancelled) {
         return refuse(code, message, outcome_for(code));
     }
 
@@ -1616,33 +2007,24 @@ fn trash_one(
         );
     }
 
-    let moved = sys::renameat_no_replace(
-        parent.descriptor(),
-        &parent.name,
-        destination.files_descriptor,
-        &reserved.name,
-    );
-
-    if moved.is_ok() {
+    let report = match move_into_trash(&parent, &destination, &reserved, &live) {
         // What moved, not only where it went. A destination is a name, and a
         // name is free again as soon as the file leaves Trash.
-        return settle_move(
-            journal,
-            journal_id,
-            position,
-            target,
-            target.reviewed_bytes,
-            Some(Identity {
-                device: live.device,
-                inode: live.inode,
-            }),
-        );
-    }
-
-    let report = match moved {
-        Ok(()) => unreachable!("the success path returned above"),
-        Err(error) => {
-            reserved.discard(&destination);
+        IntoTrash::Moved => {
+            return settle_move(
+                journal,
+                journal_id,
+                position,
+                target,
+                target.reviewed_bytes,
+                Some(Identity {
+                    device: live.device,
+                    inode: live.inode,
+                }),
+            );
+        }
+        IntoTrash::Refused(code, message, outcome) => refuse(code, message, outcome),
+        IntoTrash::Failed(error) => {
             let (code, message) = match error.raw_os_error() {
                 Some(libc::EXDEV) => (
                     "unsupported-filesystem",
@@ -1676,6 +2058,88 @@ fn trash_one(
     settle(journal, journal_id, position, target, report)
 }
 
+/// How a rename into Trash ended.
+enum IntoTrash {
+    /// The reviewed inode is in Trash under its reserved name.
+    Moved,
+    /// Something other than the reviewed inode was under the name; the
+    /// outcome says whether it could be put back.
+    Refused(&'static str, String, Outcome),
+    /// The rename itself failed. Nothing moved and the reservation is gone.
+    Failed(std::io::Error),
+}
+
+/// Rename a revalidated target into its reserved Trash name, and check that
+/// what arrived is what was revalidated.
+///
+/// The rename takes whatever is under the name at that instant. A file an
+/// editor saved over the reviewed one a moment earlier is not what anybody
+/// reviewed, and recording it under the reviewed identity would leave an undo
+/// unable to recognise it in Trash. It goes straight back.
+fn move_into_trash(
+    parent: &guard::ResolvedParent,
+    destination: &TrashDirectory,
+    reserved: &Reservation,
+    live: &sys::Metadata,
+) -> IntoTrash {
+    checkpoint(Checkpoint::Reserved);
+    if let Err(error) = sys::renameat_no_replace(
+        parent.descriptor(),
+        &parent.name,
+        destination.files_descriptor,
+        &reserved.name,
+    ) {
+        reserved.discard(destination);
+        return IntoTrash::Failed(error);
+    }
+    let in_trash = || {
+        let mut path = destination.files_path.clone();
+        path.push(b'/');
+        path.extend_from_slice(&reserved.name);
+        String::from_utf8_lossy(&path).into_owned()
+    };
+    match sys::metadata_at(destination.files_descriptor, &reserved.name) {
+        Ok(held) if held.device == live.device && held.inode == live.inode => IntoTrash::Moved,
+        Ok(_) => match sys::renameat_no_replace(
+            destination.files_descriptor,
+            &reserved.name,
+            parent.descriptor(),
+            &parent.name,
+        ) {
+            Ok(()) => {
+                reserved.discard(destination);
+                IntoTrash::Refused(
+                    "changed-target",
+                    "It was replaced just before it was moved, so what replaced it was put back \
+                     under its name and nothing went to Trash."
+                        .to_owned(),
+                    Outcome::Skipped,
+                )
+            }
+            // The Trash metadata stays: it describes what is there, so a file
+            // manager can still put it back.
+            Err(error) => IntoTrash::Refused(
+                "changed-target",
+                format!(
+                    "It was replaced just before it was moved, and what replaced it could not be \
+                     put back; it is in Trash as '{}': {error}",
+                    in_trash(),
+                ),
+                Outcome::Uncertain,
+            ),
+        },
+        Err(error) => IntoTrash::Refused(
+            "changed-target",
+            format!(
+                "It was moved to Trash as '{}', but what arrived there could not be checked: \
+                 {error}",
+                in_trash(),
+            ),
+            Outcome::Uncertain,
+        ),
+    }
+}
+
 /// Remove one reviewed target for good.
 ///
 /// The revalidation above it is what stops an addition: a directory somebody
@@ -1690,6 +2154,7 @@ fn erase_one(
     journal_id: &str,
     position: u64,
     target: &Target,
+    cancelled: &AtomicBool,
 ) -> ItemReport {
     let refuse = |code: &'static str, message: String, outcome: Outcome| ItemReport {
         path: target.path.clone(),
@@ -1716,8 +2181,11 @@ fn erase_one(
             return refuse(refusal.code, refusal.message, outcome);
         }
     };
-    if let Err((code, message)) = subtree_unchanged(&parent, target) {
+    if let Err((code, message)) = subtree_unchanged(&parent, target, cancelled) {
         return refuse(code, message, outcome_for(code));
+    }
+    if let Err((code, message)) = removable_completely(&parent) {
+        return refuse(code, message, Outcome::Failed);
     }
 
     if let Err(error) = journal.record_intent(journal_id, position, &target.path, None) {
@@ -1837,7 +2305,7 @@ pub fn run_restore(
         &targets,
         report,
         cancelled,
-        |guard, journal, journal_id, position, target| {
+        |guard, journal, journal_id, position, target, _cancelled| {
             let (from, identity) = destinations
                 .get(position as usize)
                 .cloned()
@@ -2066,8 +2534,16 @@ pub fn run_empty_trash(
         &targets,
         report,
         cancelled,
-        |guard, journal, journal_id, position, target| {
-            empty_one(guard, &home_trash, journal, journal_id, position, target)
+        |guard, journal, journal_id, position, target, cancelled| {
+            empty_one(
+                guard,
+                &home_trash,
+                journal,
+                journal_id,
+                position,
+                target,
+                cancelled,
+            )
         },
     )
 }
@@ -2119,6 +2595,7 @@ fn empty_one(
     journal_id: &str,
     position: u64,
     target: &Target,
+    cancelled: &AtomicBool,
 ) -> ItemReport {
     let refuse = |code: &'static str, message: String| ItemReport {
         path: target.path.clone(),
@@ -2143,7 +2620,7 @@ fn empty_one(
         Ok(parent) => parent,
         Err(refusal) => return refuse(refusal.code, refusal.message),
     };
-    if let Err((code, message)) = subtree_unchanged(&parent, target) {
+    if let Err((code, message)) = subtree_unchanged(&parent, target, cancelled) {
         return ItemReport {
             path: target.path.clone(),
             outcome: outcome_for(code),
@@ -2178,6 +2655,18 @@ fn empty_one(
              in it was touched."
                 .to_owned(),
         );
+    }
+
+    // Emptying Trash is irreversible too, and a read-only directory somebody
+    // trashed would stop it halfway.
+    for half in [&b"files"[..], b"info"] {
+        let found = match unremovable_inside(directory, half) {
+            Ok(None) => continue,
+            Ok(Some(found)) => cannot_remove_completely(&found),
+            Err(error) => describe_removal(&error),
+        };
+        sys::close(directory);
+        return refuse(found.0, found.1);
     }
 
     if let Err(error) = journal.record_intent(journal_id, position, &target.path, None) {
@@ -2216,7 +2705,6 @@ fn empty_one(
     settle(journal, journal_id, position, target, report)
 }
 
-/// Remove everything inside a directory, leaving the directory itself.
 /// Release what interrupted actions staged and never published.
 ///
 /// Only a name still holding the exact inode the helper journalled when it
@@ -2263,7 +2751,7 @@ fn release_one(left: &crate::journal::AbandonedStaging) -> Released {
         Err(error) if error.raw_os_error() == Some(libc::ENOENT) => Released::Gone,
         Err(_) => Released::Kept,
         Ok(live) if live.device == identity.device && live.inode == identity.inode => {
-            if remove_entry(parent.descriptor(), &parent.name, live.kind).is_ok() {
+            if remove_staged(parent.descriptor(), &parent.name, live.kind).is_ok() {
                 Released::Removed
             } else {
                 Released::Kept
@@ -2273,14 +2761,170 @@ fn release_one(left: &crate::journal::AbandonedStaging) -> Released {
     }
 }
 
+/// Remove everything inside a directory, leaving the directory itself.
 fn empty_directory(parent: libc::c_int, name: &[u8]) -> std::io::Result<()> {
     // `remove_children` takes the descriptor and closes it with its stream.
-    remove_children(open_for_removal(parent, name)?)
+    remove_children(open_for_removal(parent, name)?, Removal::AsFound)
 }
 
 /// Open a directory being removed: never through a symlink, never into another mount.
 fn open_for_removal(parent: libc::c_int, name: &[u8]) -> std::io::Result<libc::c_int> {
     sys::open_child_directory(parent, name, false)
+}
+
+/// The first place in a tree this user could not remove an entry from, as a
+/// path relative to `name`, or `None` when the whole tree can go.
+///
+/// Asked before an irreversible removal starts, because the removal itself
+/// only finds out partway: unlinking needs write and search permission on the
+/// directory holding each entry, and Disktop does not change permissions on a
+/// user's files to get a removal through. Without this, a tree holding one
+/// read-only directory (a Go module cache is full of them) would be removed
+/// up to that directory and no further, irreversibly and incompletely.
+///
+/// The answer comes from each directory's owner, group, and mode against this
+/// process's credentials. An ACL can grant what the mode does not, which only
+/// makes this refuse something that could have gone; it never lets through
+/// something that cannot.
+fn unremovable_inside(parent: libc::c_int, name: &[u8]) -> std::io::Result<Option<Vec<u8>>> {
+    let credentials = Credentials::current();
+    // The directory holding the target has to let its name go too.
+    if !credentials.may_empty(&sys::metadata_of(parent)?) {
+        return Ok(Some(Vec::new()));
+    }
+    let top = sys::metadata_at(parent, name)?;
+    if top.kind != EntryKind::Directory {
+        return Ok(None);
+    }
+
+    struct Frame {
+        directory: sys::Directory,
+        names: Vec<Vec<u8>>,
+        path: Vec<u8>,
+    }
+    fn enter(descriptor: libc::c_int, path: Vec<u8>) -> std::io::Result<Frame> {
+        let mut directory = sys::Directory::from_descriptor(descriptor)?;
+        let mut names = Vec::new();
+        while let Some(name) = directory.next_name()? {
+            names.push(name);
+        }
+        Ok(Frame {
+            directory,
+            names,
+            path,
+        })
+    }
+
+    if !credentials.may_empty(&top) {
+        return Ok(Some(name.to_vec()));
+    }
+    let mut stack = vec![enter(open_for_removal(parent, name)?, name.to_vec())?];
+    while let Some(frame) = stack.last_mut() {
+        let Some(child) = frame.names.pop() else {
+            stack.pop();
+            continue;
+        };
+        let descriptor = frame.directory.descriptor();
+        let metadata = match sys::metadata_at(descriptor, &child) {
+            Ok(metadata) => metadata,
+            Err(error) if error.raw_os_error() == Some(libc::ENOENT) => continue,
+            Err(error) => return Err(error),
+        };
+        if metadata.kind != EntryKind::Directory {
+            continue;
+        }
+        let mut path = frame.path.clone();
+        path.push(b'/');
+        path.extend_from_slice(&child);
+        if !credentials.may_empty(&metadata) {
+            return Ok(Some(path));
+        }
+        if stack.len() > crate::subtree::MAX_DEPTH {
+            return Err(crate::subtree::too_deep());
+        }
+        let opened = open_for_removal(descriptor, &child)?;
+        stack.push(enter(opened, path)?);
+    }
+    Ok(None)
+}
+
+/// Who this process is, for the question "may it remove entries from here?".
+struct Credentials {
+    user: u32,
+    groups: Vec<u32>,
+}
+
+impl Credentials {
+    fn current() -> Credentials {
+        let user = unsafe { libc::geteuid() };
+        let mut groups = vec![unsafe { libc::getegid() }];
+        let count = unsafe { libc::getgroups(0, std::ptr::null_mut()) };
+        if count > 0 {
+            let mut supplementary = vec![0 as libc::gid_t; count as usize];
+            let filled = unsafe { libc::getgroups(count, supplementary.as_mut_ptr()) };
+            if filled > 0 {
+                supplementary.truncate(filled as usize);
+                groups.extend(supplementary);
+            }
+        }
+        Credentials { user, groups }
+    }
+
+    /// Write and search permission on a directory: what unlinking anything
+    /// in it takes.
+    fn may_empty(&self, directory: &sys::Metadata) -> bool {
+        if self.user == 0 {
+            return true;
+        }
+        let bits = if directory.owner_id == self.user {
+            directory.permissions >> 6
+        } else if self.groups.contains(&directory.group_id) {
+            directory.permissions >> 3
+        } else {
+            directory.permissions
+        };
+        bits & 0o3 == 0o3
+    }
+}
+
+/// The refusal for a tree `unremovable_inside` found something in.
+fn cannot_remove_completely(found: &[u8]) -> (&'static str, String) {
+    let place = if found.is_empty() {
+        "The directory holding it".to_owned()
+    } else {
+        format!("'{}'", String::from_utf8_lossy(found))
+    };
+    (
+        "permission-denied",
+        format!(
+            "{place} does not let this user remove what is in it, so this could only be removed \
+             partly. Disktop does not change permissions to force a removal, and nothing was \
+             removed."
+        ),
+    )
+}
+
+/// Whether a target can be removed completely, as an item's refusal if not.
+fn removable_completely(parent: &guard::ResolvedParent) -> Result<(), (&'static str, String)> {
+    match unremovable_inside(parent.descriptor(), &parent.name) {
+        Ok(None) => Ok(()),
+        Ok(Some(found)) => Err(cannot_remove_completely(&found)),
+        Err(error) => Err(describe_removal(&error)),
+    }
+}
+
+/// Whose tree a removal is taking down, which decides what it may do to the
+/// directories in it.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Removal {
+    /// The user's own data. A directory this user may not write to stops the
+    /// removal with `EACCES`: Disktop does not change permissions on somebody's
+    /// files to get a deletion through.
+    AsFound,
+    /// Something this process staged and is taking back. A copy of a
+    /// read-only directory is read-only too once it is complete, and Disktop
+    /// owns it, so each directory is made writable before it is emptied.
+    Staged,
 }
 
 /// Remove one entry, recursively if it is a directory.
@@ -2289,11 +2933,30 @@ fn open_for_removal(parent: libc::c_int, name: &[u8]) -> std::io::Result<libc::c
 /// what makes erasing a directory safe: a link inside it to somewhere else is
 /// removed, and what it pointed at is not.
 fn remove_entry(parent: libc::c_int, name: &[u8], kind: EntryKind) -> std::io::Result<()> {
+    remove_entry_as(parent, name, kind, Removal::AsFound)
+}
+
+/// Remove something this process staged; see `Removal::Staged`.
+fn remove_staged(parent: libc::c_int, name: &[u8], kind: EntryKind) -> std::io::Result<()> {
+    remove_entry_as(parent, name, kind, Removal::Staged)
+}
+
+fn remove_entry_as(
+    parent: libc::c_int,
+    name: &[u8],
+    kind: EntryKind,
+    removal: Removal,
+) -> std::io::Result<()> {
     if kind != EntryKind::Directory {
         return sys::unlinkat(parent, name, false);
     }
     let descriptor = open_for_removal(parent, name)?;
-    remove_children(descriptor)?;
+    if removal == Removal::Staged {
+        // Through the descriptor just opened, never by name: a name can be
+        // swapped for a symlink in between, and a chmod by name would follow it.
+        let _ = sys::fchmod(descriptor, PRIVATE_DIRECTORY_MODE);
+    }
+    remove_children(descriptor, removal)?;
     sys::unlinkat(parent, name, true)
 }
 
@@ -2302,19 +2965,53 @@ fn remove_entry(parent: libc::c_int, name: &[u8], kind: EntryKind) -> std::io::R
 /// `openat2` without mount crossing is what refuses a nested mount: a tree with
 /// something mounted inside it fails rather than deleting through the mount
 /// point, and the item reports why.
-fn remove_children(descriptor: libc::c_int) -> std::io::Result<()> {
-    let mut stream = sys::Directory::from_descriptor(descriptor)?;
+///
+/// The directories being emptied are kept on an explicit stack rather than the
+/// call stack, so no tree is deep enough to crash the helper halfway through a
+/// removal; past `subtree::MAX_DEPTH` levels it stops with an error instead.
+/// A directory is only ever removed once everything below it has gone.
+fn remove_children(descriptor: libc::c_int, removal: Removal) -> std::io::Result<()> {
+    struct Frame {
+        directory: sys::Directory,
+        names: Vec<Vec<u8>>,
+        /// The name this directory has in the one above it, which is what is
+        /// removed once it is empty. The top directory is the caller's.
+        entered_as: Option<Vec<u8>>,
+    }
+
     // One directory's names are read before any of them is removed: what
     // `readdir` returns after entries have been unlinked under it is
     // unspecified, and a walk that silently missed one would report a tree as
     // gone while something was still in it. Memory follows the widest
-    // directory, not the size of the tree.
-    let mut names = Vec::new();
-    while let Some(name) = stream.next_name()? {
-        names.push(name);
+    // directory times the depth, not the size of the tree.
+    fn enter(descriptor: libc::c_int, entered_as: Option<Vec<u8>>) -> std::io::Result<Frame> {
+        let mut directory = sys::Directory::from_descriptor(descriptor)?;
+        let mut names = Vec::new();
+        while let Some(name) = directory.next_name()? {
+            names.push(name);
+        }
+        names.reverse();
+        Ok(Frame {
+            directory,
+            names,
+            entered_as,
+        })
     }
-    let descriptor = stream.descriptor();
-    for name in names {
+
+    let mut stack = vec![enter(descriptor, None)?];
+    while let Some(frame) = stack.last_mut() {
+        let Some(name) = frame.names.pop() else {
+            let finished = stack.pop().expect("the frame being read is on the stack");
+            let entered_as = finished.entered_as.clone();
+            // Closed before it is removed, so nothing holds the directory open
+            // while its name goes.
+            drop(finished);
+            if let (Some(name), Some(above)) = (entered_as, stack.last()) {
+                sys::unlinkat(above.directory.descriptor(), &name, true)?;
+            }
+            continue;
+        };
+        let descriptor = frame.directory.descriptor();
         let metadata = match sys::metadata_at(descriptor, &name) {
             Ok(metadata) => metadata,
             // Something else removed it first. The outcome is the one asked
@@ -2322,18 +3019,28 @@ fn remove_children(descriptor: libc::c_int) -> std::io::Result<()> {
             Err(error) if error.raw_os_error() == Some(libc::ENOENT) => continue,
             Err(error) => return Err(error),
         };
-        if metadata.kind == EntryKind::Directory {
-            let child = open_for_removal(descriptor, &name)?;
-            remove_children(child)?;
-            sys::unlinkat(descriptor, &name, true)?;
-        } else {
+        if metadata.kind != EntryKind::Directory {
             sys::unlinkat(descriptor, &name, false)?;
+            continue;
         }
+        // The frames on the stack are this directory's ancestors below the
+        // one being emptied, so their count is how deep it is.
+        if stack.len() > crate::subtree::MAX_DEPTH {
+            return Err(crate::subtree::too_deep());
+        }
+        let child = open_for_removal(descriptor, &name)?;
+        if removal == Removal::Staged {
+            let _ = sys::fchmod(child, PRIVATE_DIRECTORY_MODE);
+        }
+        stack.push(enter(child, Some(name))?);
     }
     Ok(())
 }
 
 fn describe_removal(error: &std::io::Error) -> (&'static str, String) {
+    if crate::subtree::is_too_deep(error) {
+        return ("invalid-arguments", crate::subtree::TOO_DEEP.to_owned());
+    }
     match error.raw_os_error() {
         Some(libc::EXDEV) | Some(libc::ELOOP) => (
             "protected-path",
@@ -2426,11 +3133,12 @@ static NEVER_CANCELLED: AtomicBool = AtomicBool::new(false);
 fn subtree_unchanged(
     parent: &guard::ResolvedParent,
     target: &Target,
+    cancelled: &AtomicBool,
 ) -> Result<(), (&'static str, String)> {
     let Some(reviewed) = &target.subtree else {
         return Ok(());
     };
-    match crate::subtree::digest(parent.descriptor(), &parent.name, &NEVER_CANCELLED) {
+    match crate::subtree::digest(parent.descriptor(), &parent.name, cancelled) {
         Ok(live) if live == *reviewed => Ok(()),
         Ok(_) => Err((
             "changed-target",
@@ -2442,7 +3150,9 @@ fn subtree_unchanged(
 
 fn outcome_for(code: &str) -> Outcome {
     match code {
-        "changed-target" => Outcome::Skipped,
+        // Stopping before anything was done to an item leaves it as it was,
+        // which is what a skip is.
+        "changed-target" | "cancelled" => Outcome::Skipped,
         _ => Outcome::Failed,
     }
 }
@@ -2636,7 +3346,7 @@ fn reserve(
     for attempt in 0..1000u32 {
         let candidate = candidate_name(name, attempt);
         let mut info_name = candidate.clone();
-        info_name.extend_from_slice(b".trashinfo");
+        info_name.extend_from_slice(TRASHINFO);
 
         match sys::openat_write_exclusive(
             destination.info_descriptor,
@@ -2676,28 +3386,67 @@ fn reserve(
     ))
 }
 
-/// `notes.txt`, then `notes.1.txt`, and so on, so the extension keeps working.
-fn candidate_name(name: &[u8], attempt: u32) -> Vec<u8> {
-    if attempt == 0 {
-        return name.to_vec();
+/// The longest name a directory entry can have on the filesystems Linux
+/// mounts, in bytes.
+const NAME_MAX: usize = 255;
+
+const TRASHINFO: &[u8] = b".trashinfo";
+
+/// `stem` followed by `tail`, the stem cut short so the whole fits in
+/// `limit` bytes.
+///
+/// A stem that is text is never cut through the middle of a character: a
+/// shortened name is still one a file manager can show. One that is not text
+/// is cut where the bytes run out, because it never had characters to keep.
+fn fitted(stem: &[u8], tail: &[u8], limit: usize) -> Vec<u8> {
+    let mut cut = stem.len().min(limit.saturating_sub(tail.len()));
+    if cut < stem.len() && std::str::from_utf8(stem).is_ok() {
+        while cut > 0 && stem[cut] & 0xC0 == 0x80 {
+            cut -= 1;
+        }
     }
+    let mut name = stem[..cut].to_vec();
+    name.extend_from_slice(tail);
+    name
+}
+
+/// The name something is staged under beside where it will be published.
+///
+/// It starts with the name it will have, for whoever finds it, and is cut
+/// short when that name is already near the limit: a staging name that does
+/// not fit would refuse to move any file whose own name is long.
+fn staging_name(name: &[u8], attempt: u32) -> Vec<u8> {
+    let tail = format!(".disktop-partial-{}-{attempt}", std::process::id());
+    fitted(name, tail.as_bytes(), NAME_MAX)
+}
+
+/// `notes.txt`, then `notes.1.txt`, and so on, so the extension keeps working.
+///
+/// The name and its `.trashinfo` both have to fit, so a name near the limit is
+/// shortened in Trash. Nothing depends on the shortened one: the original path
+/// is in the metadata beside it and in the journal.
+fn candidate_name(name: &[u8], attempt: u32) -> Vec<u8> {
+    let limit = NAME_MAX - TRASHINFO.len();
+    let marker = if attempt == 0 {
+        Vec::new()
+    } else {
+        format!(".{attempt}").into_bytes()
+    };
     let dot = name
         .iter()
         .rposition(|byte| *byte == b'.')
         .filter(|position| *position > 0);
-    let mut candidate = Vec::with_capacity(name.len() + 8);
-    match dot {
-        Some(position) => {
-            candidate.extend_from_slice(&name[..position]);
-            candidate.extend_from_slice(format!(".{attempt}").as_bytes());
-            candidate.extend_from_slice(&name[position..]);
+    let (stem, extension) = match dot {
+        // An "extension" taking up half the name is not one worth keeping at
+        // the expense of everything before it.
+        Some(position) if name.len() - position <= limit / 2 => {
+            (&name[..position], &name[position..])
         }
-        None => {
-            candidate.extend_from_slice(name);
-            candidate.extend_from_slice(format!(".{attempt}").as_bytes());
-        }
-    }
-    candidate
+        _ => (name, &b""[..]),
+    };
+    let mut tail = marker;
+    tail.extend_from_slice(extension);
+    fitted(stem, &tail, limit)
 }
 
 fn relative_to(top: &[u8], path: &[u8]) -> Vec<u8> {
@@ -2761,7 +3510,16 @@ fn write_all(descriptor: libc::c_int, mut bytes: &[u8]) -> std::io::Result<()> {
             )
         };
         if written < 0 {
-            return Err(std::io::Error::last_os_error());
+            let error = std::io::Error::last_os_error();
+            // A signal that arrived mid-write is not a failure of the write.
+            if error.kind() == std::io::ErrorKind::Interrupted {
+                continue;
+            }
+            return Err(error);
+        }
+        // A write that made no progress would otherwise loop for ever.
+        if written == 0 {
+            return Err(std::io::Error::other("the write made no progress"));
         }
         bytes = &bytes[written as usize..];
     }
@@ -2783,6 +3541,200 @@ fn parent_path(path: &[u8]) -> Vec<u8> {
 mod tests {
     use super::*;
     use crate::testing::Sandbox;
+    use std::os::unix::ffi::{OsStrExt, OsStringExt};
+
+    fn joined(sandbox: &Sandbox, relative: &[u8]) -> Vec<u8> {
+        let mut path = sandbox.bytes();
+        path.push(b'/');
+        path.extend_from_slice(relative);
+        path
+    }
+
+    /// What a reviewed plan would hold for a live path. A directory too deep
+    /// to digest gets a digest that matches nothing, which is the most a plan
+    /// could ever carry for one.
+    fn reviewed(path: &[u8], reviewed_bytes: u64) -> Target {
+        let parent = guard::resolve_parent(path).expect("the path resolves");
+        let live = sys::metadata_at(parent.descriptor(), &parent.name).expect("it is there");
+        let subtree = (live.kind == EntryKind::Directory).then(|| {
+            crate::subtree::digest(parent.descriptor(), &parent.name, &NEVER_CANCELLED).unwrap_or(
+                crate::subtree::Subtree {
+                    entries: 0,
+                    digest: [0; 32],
+                },
+            )
+        });
+        Target {
+            path: path.to_vec(),
+            expected: Fingerprint {
+                device: live.device,
+                inode: live.inode,
+                mount_id: live.mount_id,
+                kind: live.kind,
+                apparent_bytes: live.apparent_bytes,
+                modified_nanoseconds: live.modified_nanoseconds,
+            },
+            reviewed_bytes,
+            subtree,
+        }
+    }
+
+    /// Run an action on a thread with the stack a helper worker gets, so a
+    /// walk that recursed once per level would overflow here exactly as it
+    /// would in the helper.
+    fn on_a_worker<T: Send + 'static>(work: impl FnOnce() -> T + Send + 'static) -> T {
+        std::thread::Builder::new()
+            .spawn(work)
+            .unwrap()
+            .join()
+            .expect("the action returned rather than crashing")
+    }
+
+    fn collect(
+        run: impl FnOnce(&mut dyn FnMut(ItemReport)) -> Result<ActionSummary, ActionRefusal>,
+    ) -> (Result<ActionSummary, ActionRefusal>, Vec<ItemReport>) {
+        let mut items = Vec::new();
+        let summary = run(&mut |item| items.push(item));
+        (summary, items)
+    }
+
+    fn bottom_exists(sandbox: &Sandbox, relative: &[u8], levels: usize) -> bool {
+        let mut path = joined(sandbox, relative);
+        let mut descriptor = sys::open_root(&path).expect("the top of the chain");
+        for _ in 0..levels {
+            let Ok(next) = sys::open_child_directory(descriptor, b"d", false) else {
+                sys::close(descriptor);
+                return false;
+            };
+            sys::close(descriptor);
+            descriptor = next;
+        }
+        let found = sys::metadata_at(descriptor, b"bottom").is_ok();
+        sys::close(descriptor);
+        path.clear();
+        found
+    }
+
+    #[test]
+    fn erasing_a_tree_ten_thousand_levels_deep_refuses_and_leaves_it_whole() {
+        crate::testing::raise_descriptor_limit();
+        let sandbox = Sandbox::new("erase-very-deep");
+        sandbox.directory(b"state");
+        sandbox.deep_directory(b"tree", 10_000);
+        let request = EraseRequest {
+            plan_id: "plan-0123456789abcd".to_owned(),
+            journal_directory: sandbox.path().join("state"),
+            targets: vec![reviewed(&joined(&sandbox, b"tree"), 0)],
+        };
+
+        let (summary, items) = on_a_worker(move || {
+            collect(|report| run_erase(&request, report, &AtomicBool::new(false)))
+        });
+
+        let summary = summary.ok().expect("the action ran");
+        assert_eq!(summary.completed, 0);
+        assert_eq!(items[0].outcome, Outcome::Failed);
+        assert_eq!(items[0].reason, Some("invalid-arguments"));
+        assert!(
+            bottom_exists(&sandbox, b"tree", 10_000),
+            "nothing was removed"
+        );
+    }
+
+    #[test]
+    fn a_tree_as_deep_as_the_limit_is_erased_completely() {
+        crate::testing::raise_descriptor_limit();
+        let sandbox = Sandbox::new("erase-at-limit");
+        sandbox.directory(b"state");
+        sandbox.deep_directory(b"tree", crate::subtree::MAX_DEPTH);
+        let request = EraseRequest {
+            plan_id: "plan-0123456789abcd".to_owned(),
+            journal_directory: sandbox.path().join("state"),
+            targets: vec![reviewed(&joined(&sandbox, b"tree"), 0)],
+        };
+
+        let (summary, items) = on_a_worker(move || {
+            collect(|report| run_erase(&request, report, &AtomicBool::new(false)))
+        });
+
+        assert_eq!(
+            summary.ok().expect("the action ran").completed,
+            1,
+            "{:?}",
+            items[0].message
+        );
+        assert!(!sandbox.path().join("tree").exists());
+    }
+
+    #[test]
+    fn a_removal_that_meets_a_tree_deeper_than_the_limit_stops_without_crashing() {
+        crate::testing::raise_descriptor_limit();
+        let sandbox = Sandbox::new("remove-past-limit");
+        sandbox.deep_directory(b"tree", crate::subtree::MAX_DEPTH + 5);
+        let root = sandbox.bytes();
+        let outcome = on_a_worker(move || {
+            let parent = sys::open_root(&root).unwrap();
+            let outcome = remove_entry(parent, b"tree", EntryKind::Directory);
+            sys::close(parent);
+            outcome
+        });
+        let error = outcome.expect_err("too deep to remove");
+        assert!(crate::subtree::is_too_deep(&error), "{error}");
+        assert_eq!(describe_removal(&error).0, "invalid-arguments");
+    }
+
+    #[test]
+    fn a_tree_as_deep_as_the_limit_is_moved_and_compressed_whole() {
+        crate::testing::raise_descriptor_limit();
+        let sandbox = Sandbox::new("move-at-limit");
+        sandbox.directory(b"state");
+        sandbox.directory(b"elsewhere");
+        sandbox.deep_directory(b"moved", crate::subtree::MAX_DEPTH);
+        sandbox.deep_directory(b"packed", crate::subtree::MAX_DEPTH);
+        let state = sandbox.path().join("state");
+        let moving = CopyMoveRequest {
+            plan_id: "plan-0123456789abcd".to_owned(),
+            journal_directory: state.clone(),
+            home_trash_directory: joined(&sandbox, b"trash-home"),
+            destination_directory: joined(&sandbox, b"elsewhere"),
+            source_disposition: SourceDisposition::Permanent,
+            targets: vec![reviewed(&joined(&sandbox, b"moved/d"), 0)],
+        };
+        let packing = CompressRequest {
+            plan_id: "plan-0123456789abcd".to_owned(),
+            journal_directory: state,
+            home_trash_directory: joined(&sandbox, b"trash-home"),
+            destination_directory: Vec::new(),
+            source_disposition: SourceDisposition::Permanent,
+            targets: vec![reviewed(&joined(&sandbox, b"packed/d"), 0)],
+        };
+
+        let ((moved, move_items), (packed, pack_items)) = on_a_worker(move || {
+            (
+                collect(|report| run_copy_move(&moving, report, &AtomicBool::new(false))),
+                collect(|report| run_compress(&packing, report, &AtomicBool::new(false))),
+            )
+        });
+
+        assert_eq!(
+            moved.ok().expect("the move ran").completed,
+            1,
+            "{:?}",
+            move_items[0].message
+        );
+        assert!(
+            bottom_exists(&sandbox, b"elsewhere", crate::subtree::MAX_DEPTH),
+            "the bottom of the tree arrived"
+        );
+        assert!(!sandbox.path().join("moved/d").exists());
+        assert_eq!(
+            packed.ok().expect("the compress ran").completed,
+            1,
+            "{:?}",
+            pack_items[0].message
+        );
+        assert!(sandbox.path().join("packed/d.tar.zst").exists());
+    }
 
     #[test]
     fn a_removal_never_descends_into_another_filesystem() {
@@ -2802,5 +3754,941 @@ mod tests {
             open_for_removal(parent, b"inner").expect("a directory on the same filesystem opens");
         sys::close(inner);
         sys::close(parent);
+    }
+
+    fn mode(path: &std::path::Path) -> u32 {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::symlink_metadata(path)
+            .unwrap()
+            .permissions()
+            .mode()
+            & 0o7777
+    }
+
+    fn moving(
+        sandbox: &Sandbox,
+        relative: &[u8],
+        disposition: SourceDisposition,
+    ) -> CopyMoveRequest {
+        CopyMoveRequest {
+            plan_id: "plan-0123456789abcd".to_owned(),
+            journal_directory: sandbox.path().join("state"),
+            home_trash_directory: joined(sandbox, b"trash-home"),
+            destination_directory: joined(sandbox, b"elsewhere"),
+            source_disposition: disposition,
+            targets: vec![reviewed(&joined(sandbox, relative), 0)],
+        }
+    }
+
+    /// A Go module cache is full of directories nobody may write to. A copy
+    /// that gave each directory its mode before writing into it could not copy
+    /// one at all.
+    #[test]
+    fn a_tree_holding_a_read_only_directory_is_moved_with_its_modes() {
+        if unsafe { libc::geteuid() } == 0 {
+            return;
+        }
+        let sandbox = Sandbox::new("move-read-only");
+        sandbox.directory(b"state");
+        sandbox.directory(b"elsewhere");
+        sandbox.directory(b"work/tree/ro/inner");
+        sandbox.file(b"work/tree/ro/file", 300);
+        sandbox.file(b"work/tree/ro/inner/deeper", 200);
+        sandbox.chmod(b"work/tree/ro", 0o555);
+        sandbox.chmod(b"work/tree", 0o750);
+        let request = moving(&sandbox, b"work/tree", SourceDisposition::Trash);
+
+        let (summary, items) =
+            collect(|report| run_copy_move(&request, report, &AtomicBool::new(false)));
+
+        assert_eq!(
+            summary.ok().expect("the move ran").completed,
+            1,
+            "{:?}",
+            items[0].message
+        );
+        let arrived = sandbox.path().join("elsewhere/tree");
+        assert_eq!(mode(&arrived), 0o750, "the top keeps its mode");
+        assert_eq!(mode(&arrived.join("ro")), 0o555, "so does the one inside");
+        assert_eq!(std::fs::read(arrived.join("ro/file")).unwrap().len(), 300);
+        assert_eq!(
+            std::fs::read(arrived.join("ro/inner/deeper"))
+                .unwrap()
+                .len(),
+            200
+        );
+    }
+
+    fn staged_as(name: &str, attempt: u32) -> String {
+        format!("{name}.disktop-partial-{}-{attempt}", std::process::id())
+    }
+
+    /// The staging name is checked and then created, and somebody can take it
+    /// in between. What they put there is theirs: it is not written into, not
+    /// published as the copy, and not removed when Disktop gives up on it.
+    #[test]
+    fn a_directory_somebody_puts_at_the_staging_name_is_neither_used_nor_removed() {
+        let sandbox = Sandbox::new("staging-taken-directory");
+        sandbox.directory(b"state");
+        sandbox.directory(b"elsewhere");
+        sandbox.directory(b"work/tree");
+        sandbox.file(b"work/tree/mine", 100);
+        let request = moving(&sandbox, b"work/tree", SourceDisposition::Trash);
+
+        let theirs = sandbox.path().join("elsewhere").join(staged_as("tree", 0));
+        let planted = theirs.clone();
+        at_checkpoint(move |at| {
+            if at == Checkpoint::NameChosen && !planted.exists() {
+                std::fs::create_dir(&planted).unwrap();
+                std::fs::write(planted.join("theirs"), b"not Disktop's").unwrap();
+            }
+        });
+        let (summary, items) =
+            collect(|report| run_copy_move(&request, report, &AtomicBool::new(false)));
+
+        assert_eq!(
+            summary.ok().expect("the move ran").completed,
+            1,
+            "{:?}",
+            items[0].message
+        );
+        assert_eq!(
+            std::fs::read(theirs.join("theirs")).unwrap(),
+            b"not Disktop's",
+            "what somebody else made is still there, untouched",
+        );
+        let published = sandbox.path().join("elsewhere/tree");
+        assert!(published.join("mine").exists());
+        assert!(
+            !published.join("theirs").exists(),
+            "their file was not published as part of the copy"
+        );
+    }
+
+    #[test]
+    fn a_file_somebody_puts_at_the_staging_name_is_not_removed() {
+        let sandbox = Sandbox::new("staging-taken-file");
+        sandbox.directory(b"state");
+        sandbox.directory(b"elsewhere");
+        sandbox.directory(b"work");
+        sandbox.file(b"work/data.bin", 4096);
+        let request = moving(&sandbox, b"work/data.bin", SourceDisposition::Trash);
+
+        let theirs = sandbox
+            .path()
+            .join("elsewhere")
+            .join(staged_as("data.bin", 0));
+        let planted = theirs.clone();
+        at_checkpoint(move |at| {
+            if at == Checkpoint::NameChosen && !planted.exists() {
+                std::fs::write(&planted, b"not Disktop's").unwrap();
+            }
+        });
+        let (summary, items) =
+            collect(|report| run_copy_move(&request, report, &AtomicBool::new(false)));
+
+        assert_eq!(
+            summary.ok().expect("the move ran").completed,
+            1,
+            "{:?}",
+            items[0].message
+        );
+        assert_eq!(std::fs::read(&theirs).unwrap(), b"not Disktop's");
+        assert_eq!(
+            std::fs::read(sandbox.path().join("elsewhere/data.bin"))
+                .unwrap()
+                .len(),
+            4096
+        );
+    }
+
+    /// Whether the destination directory was `fsync`ed after the output was
+    /// published under `name` and before anything happened to the source.
+    fn published_durably_before_the_source_was_touched(
+        events: &[sys::trace::Event],
+        destination: &std::path::Path,
+        name: &[u8],
+    ) -> bool {
+        use std::os::unix::fs::MetadataExt;
+        use sys::trace::Event;
+        let directory = std::fs::metadata(destination).unwrap().ino();
+        let Some(published) = events
+            .iter()
+            .position(|event| *event == Event::Rename { to: name.to_vec() })
+        else {
+            panic!("nothing was published as {name:?}: {events:?}");
+        };
+        let after = &events[published + 1..];
+        let synced = after
+            .iter()
+            .position(|event| *event == Event::Fsync { inode: directory });
+        // The source is touched by the first removal, or by the rename that
+        // takes it into Trash, whichever comes first.
+        let touched = after
+            .iter()
+            .position(|event| matches!(event, Event::Unlink { .. } | Event::Rename { .. }));
+        matches!((synced, touched), (Some(synced), Some(touched)) if synced < touched)
+    }
+
+    /// A move publishes on one filesystem and removes from another, and
+    /// nothing orders a crash's effect on one against the other. If the
+    /// published name is not on the device before the source goes, a power
+    /// cut can keep the removal and lose the name, and with it the only copy.
+    #[test]
+    fn a_published_output_is_durable_before_its_source_is_touched() {
+        for (disposition, label) in [
+            (SourceDisposition::Permanent, "permanent"),
+            (SourceDisposition::Trash, "trash"),
+        ] {
+            let sandbox = Sandbox::new(&format!("durable-move-{label}"));
+            sandbox.directory(b"state");
+            sandbox.directory(b"elsewhere");
+            sandbox.directory(b"work/tree/inner");
+            sandbox.file(b"work/data.bin", 4096);
+            sandbox.file(b"work/tree/inner/file", 512);
+            let mut request = moving(&sandbox, b"work/data.bin", disposition);
+            request
+                .targets
+                .push(reviewed(&joined(&sandbox, b"work/tree"), 0));
+
+            sys::trace::start();
+            let (summary, items) =
+                collect(|report| run_copy_move(&request, report, &AtomicBool::new(false)));
+            let events = sys::trace::take();
+            assert_eq!(
+                summary.ok().expect("the move ran").completed,
+                2,
+                "{:?}",
+                items.iter().map(|item| &item.message).collect::<Vec<_>>()
+            );
+
+            let destination = sandbox.path().join("elsewhere");
+            for name in [&b"data.bin"[..], b"tree"] {
+                assert!(
+                    published_durably_before_the_source_was_touched(&events, &destination, name),
+                    "{label}: {:?} was published and its source touched with no fsync of the \
+                     destination in between: {events:?}",
+                    String::from_utf8_lossy(name),
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn a_published_archive_is_durable_before_its_source_is_touched() {
+        let sandbox = Sandbox::new("durable-compress");
+        sandbox.directory(b"state");
+        sandbox.directory(b"elsewhere");
+        sandbox.directory(b"work");
+        sandbox.file(b"work/data.bin", 4096);
+        let request = CompressRequest {
+            plan_id: "plan-0123456789abcd".to_owned(),
+            journal_directory: sandbox.path().join("state"),
+            home_trash_directory: joined(&sandbox, b"trash-home"),
+            destination_directory: joined(&sandbox, b"elsewhere"),
+            source_disposition: SourceDisposition::Permanent,
+            targets: vec![reviewed(&joined(&sandbox, b"work/data.bin"), 0)],
+        };
+
+        sys::trace::start();
+        let (summary, items) =
+            collect(|report| run_compress(&request, report, &AtomicBool::new(false)));
+        let events = sys::trace::take();
+        assert_eq!(
+            summary.ok().expect("the compress ran").completed,
+            1,
+            "{:?}",
+            items[0].message
+        );
+        assert!(published_durably_before_the_source_was_touched(
+            &events,
+            &sandbox.path().join("elsewhere"),
+            b"data.bin.zst",
+        ));
+    }
+
+    fn append_to(path: &std::path::Path, bytes: &[u8]) {
+        use std::io::Write;
+        std::fs::OpenOptions::new()
+            .append(true)
+            .open(path)
+            .unwrap()
+            .write_all(bytes)
+            .unwrap();
+    }
+
+    /// A copy that ran while somebody wrote to its source holds some mixture
+    /// of before and after. Its verification compares what was read with what
+    /// was written, and those agree, so only the source itself can say. It is
+    /// asked before the copy is published, not after: a torn copy is never put
+    /// where somebody would take it for the real thing.
+    #[test]
+    fn a_source_that_changed_while_it_was_copied_is_never_published() {
+        let sandbox = Sandbox::new("changed-before-publish");
+        sandbox.directory(b"state");
+        sandbox.directory(b"elsewhere");
+        sandbox.directory(b"work/tree");
+        sandbox.file(b"work/data.bin", 4096);
+        sandbox.file(b"work/tree/inner.bin", 4096);
+        let mut request = moving(&sandbox, b"work/data.bin", SourceDisposition::Permanent);
+        request
+            .targets
+            .push(reviewed(&joined(&sandbox, b"work/tree"), 0));
+
+        let file = sandbox.path().join("work/data.bin");
+        let inner = sandbox.path().join("work/tree/inner.bin");
+        let mut changes = vec![inner, file];
+        at_checkpoint(move |at| {
+            if at == Checkpoint::Staged
+                && let Some(path) = changes.pop()
+            {
+                append_to(&path, b"written during the copy");
+            }
+        });
+        let (summary, items) =
+            collect(|report| run_copy_move(&request, report, &AtomicBool::new(false)));
+        summary.ok().expect("the move ran");
+
+        for item in &items {
+            assert_eq!(item.outcome, Outcome::Skipped, "{:?}", item.message);
+            assert_eq!(item.reason, Some("changed-target"));
+        }
+        let arrived: Vec<_> = std::fs::read_dir(sandbox.path().join("elsewhere"))
+            .unwrap()
+            .flatten()
+            .map(|entry| entry.file_name())
+            .collect();
+        assert!(arrived.is_empty(), "nothing was published: {arrived:?}");
+        assert_eq!(
+            std::fs::read(sandbox.path().join("work/data.bin"))
+                .unwrap()
+                .len(),
+            4096 + 23
+        );
+    }
+
+    #[test]
+    fn a_source_that_changed_while_it_was_compressed_is_never_published() {
+        let sandbox = Sandbox::new("changed-before-archive");
+        sandbox.directory(b"state");
+        sandbox.directory(b"work");
+        sandbox.file(b"work/data.bin", 4096);
+        let request = CompressRequest {
+            plan_id: "plan-0123456789abcd".to_owned(),
+            journal_directory: sandbox.path().join("state"),
+            home_trash_directory: joined(&sandbox, b"trash-home"),
+            destination_directory: Vec::new(),
+            source_disposition: SourceDisposition::Permanent,
+            targets: vec![reviewed(&joined(&sandbox, b"work/data.bin"), 0)],
+        };
+
+        let file = sandbox.path().join("work/data.bin");
+        at_checkpoint(move |at| {
+            if at == Checkpoint::Staged {
+                append_to(&file, b"written during the compression");
+            }
+        });
+        let (summary, items) =
+            collect(|report| run_compress(&request, report, &AtomicBool::new(false)));
+        summary.ok().expect("the compress ran");
+
+        assert_eq!(items[0].outcome, Outcome::Skipped, "{:?}", items[0].message);
+        let left: Vec<_> = std::fs::read_dir(sandbox.path().join("work"))
+            .unwrap()
+            .flatten()
+            .map(|entry| entry.file_name())
+            .collect();
+        assert_eq!(
+            left,
+            vec![std::ffi::OsString::from("data.bin")],
+            "no archive, staged or published"
+        );
+    }
+
+    /// The rename into Trash moves whatever is under the name at that instant.
+    /// A file saved over the reviewed one in between is not what anybody
+    /// reviewed: it goes back where it was, and nothing claims it was moved.
+    #[test]
+    fn a_file_saved_over_just_before_its_move_to_trash_stays_where_it_was() {
+        let sandbox = Sandbox::new("trash-saved-over");
+        sandbox.directory(b"state");
+        sandbox.directory(b"work");
+        std::fs::write(sandbox.path().join("work/notes.txt"), b"reviewed").unwrap();
+        let request = TrashRequest {
+            plan_id: "plan-0123456789abcd".to_owned(),
+            journal_directory: sandbox.path().join("state"),
+            home_trash_directory: joined(&sandbox, b"trash-home"),
+            targets: vec![reviewed(&joined(&sandbox, b"work/notes.txt"), 8)],
+        };
+
+        let work = sandbox.path().join("work");
+        at_checkpoint(move |at| {
+            if at == Checkpoint::Reserved {
+                std::fs::write(work.join("notes.txt.new"), b"saved since").unwrap();
+                std::fs::rename(work.join("notes.txt.new"), work.join("notes.txt")).unwrap();
+            }
+        });
+        let (summary, items) =
+            collect(|report| run_trash(&request, report, &AtomicBool::new(false)));
+        let summary = summary.ok().expect("the action ran");
+
+        assert_eq!(items[0].outcome, Outcome::Skipped, "{:?}", items[0].message);
+        assert_eq!(items[0].reason, Some("changed-target"));
+        assert_eq!(summary.bytes_moved_to_trash, 0);
+        assert_eq!(
+            std::fs::read(sandbox.path().join("work/notes.txt")).unwrap(),
+            b"saved since",
+            "the saved file is back under its own name",
+        );
+        for half in ["files", "info"] {
+            let held: Vec<_> = std::fs::read_dir(sandbox.path().join("trash-home").join(half))
+                .unwrap()
+                .flatten()
+                .map(|entry| entry.file_name())
+                .collect();
+            assert!(held.is_empty(), "Trash {half} holds {held:?}");
+        }
+    }
+
+    /// A name as long as a filesystem allows, ending in an extension, made of
+    /// multi-byte characters so a cut in the wrong place would be visible.
+    fn longest_name(extension: &str) -> Vec<u8> {
+        let mut name = String::new();
+        while name.len() + "é".len() + extension.len() <= 255 {
+            name.push('é');
+        }
+        name.push_str(extension);
+        name.into_bytes()
+    }
+
+    fn under_work(name: &[u8]) -> Vec<u8> {
+        let mut relative = b"work/".to_vec();
+        relative.extend_from_slice(name);
+        relative
+    }
+
+    #[test]
+    fn a_file_whose_name_is_as_long_as_allowed_goes_to_trash_and_comes_back() {
+        let sandbox = Sandbox::new("trash-long-name");
+        sandbox.directory(b"state");
+        sandbox.directory(b"work");
+        let name = longest_name(".txt");
+        assert!(name.len() > 250);
+        sandbox.file(&under_work(&name), 64);
+        let request = TrashRequest {
+            plan_id: "plan-0123456789abcd".to_owned(),
+            journal_directory: sandbox.path().join("state"),
+            home_trash_directory: joined(&sandbox, b"trash-home"),
+            targets: vec![reviewed(&joined(&sandbox, &under_work(&name)), 64)],
+        };
+
+        let (summary, items) =
+            collect(|report| run_trash(&request, report, &AtomicBool::new(false)));
+        let summary = summary.ok().expect("the action ran");
+        assert_eq!(
+            items[0].outcome,
+            Outcome::Completed,
+            "{:?}",
+            items[0].message
+        );
+
+        let held: Vec<_> = std::fs::read_dir(sandbox.path().join("trash-home/files"))
+            .unwrap()
+            .flatten()
+            .map(|entry| entry.file_name().into_vec())
+            .collect();
+        assert_eq!(held.len(), 1);
+        assert!(
+            std::str::from_utf8(&held[0]).is_ok(),
+            "a shortened name is not cut through a character"
+        );
+        let mut info = held[0].clone();
+        info.extend_from_slice(b".trashinfo");
+        assert!(
+            sandbox
+                .path()
+                .join("trash-home/info")
+                .join(std::ffi::OsStr::from_bytes(&info))
+                .exists()
+        );
+
+        let restore = RestoreRequest {
+            journal_directory: sandbox.path().join("state"),
+            journal_id: summary.journal_id,
+        };
+        let (restored, items) =
+            collect(|report| run_restore(&restore, report, &AtomicBool::new(false)));
+        assert_eq!(
+            restored.ok().expect("the undo ran").completed,
+            1,
+            "{:?}",
+            items[0].message
+        );
+        assert!(
+            sandbox
+                .path()
+                .join("work")
+                .join(std::ffi::OsStr::from_bytes(&name))
+                .exists(),
+            "it is back under its whole name"
+        );
+    }
+
+    #[test]
+    fn a_file_whose_name_is_as_long_as_allowed_can_be_moved() {
+        let sandbox = Sandbox::new("move-long-name");
+        sandbox.directory(b"state");
+        sandbox.directory(b"elsewhere");
+        sandbox.directory(b"work");
+        let name = longest_name(".bin");
+        sandbox.file(&under_work(&name), 4096);
+        let request = moving(&sandbox, &under_work(&name), SourceDisposition::Permanent);
+
+        let (summary, items) =
+            collect(|report| run_copy_move(&request, report, &AtomicBool::new(false)));
+        assert_eq!(
+            summary.ok().expect("the move ran").completed,
+            1,
+            "{:?}",
+            items[0].message
+        );
+        let arrived = sandbox
+            .path()
+            .join("elsewhere")
+            .join(std::ffi::OsStr::from_bytes(&name));
+        assert_eq!(std::fs::read(arrived).unwrap().len(), 4096);
+    }
+
+    #[test]
+    fn a_long_name_is_compressed_when_its_archive_name_fits_and_refused_when_not() {
+        let sandbox = Sandbox::new("compress-long-name");
+        sandbox.directory(b"state");
+        sandbox.directory(b"work");
+        // Room for ".zst" and not for a staging suffix on top of it.
+        let fits = vec![b'f'; 250];
+        // No room for ".zst" at all.
+        let too_long = vec![b'g'; 253];
+        sandbox.file(&under_work(&fits), 4096);
+        sandbox.file(&under_work(&too_long), 4096);
+        let request = CompressRequest {
+            plan_id: "plan-0123456789abcd".to_owned(),
+            journal_directory: sandbox.path().join("state"),
+            home_trash_directory: joined(&sandbox, b"trash-home"),
+            destination_directory: Vec::new(),
+            source_disposition: SourceDisposition::Permanent,
+            targets: vec![
+                reviewed(&joined(&sandbox, &under_work(&fits)), 4096),
+                reviewed(&joined(&sandbox, &under_work(&too_long)), 4096),
+            ],
+        };
+
+        let (summary, items) =
+            collect(|report| run_compress(&request, report, &AtomicBool::new(false)));
+        summary.ok().expect("the compress ran");
+
+        assert_eq!(
+            items[0].outcome,
+            Outcome::Completed,
+            "{:?}",
+            items[0].message
+        );
+        let mut archive = fits.clone();
+        archive.extend_from_slice(b".zst");
+        assert!(
+            sandbox
+                .path()
+                .join("work")
+                .join(std::ffi::OsStr::from_bytes(&archive))
+                .exists()
+        );
+        assert_eq!(items[1].outcome, Outcome::Failed);
+        assert_eq!(items[1].reason, Some("invalid-arguments"));
+        assert!(
+            items[1].message.as_deref().unwrap().contains("name"),
+            "{:?}",
+            items[1].message
+        );
+        assert!(
+            sandbox
+                .path()
+                .join("work")
+                .join(std::ffi::OsStr::from_bytes(&too_long))
+                .exists(),
+            "the source was left alone"
+        );
+        let staged: Vec<_> = std::fs::read_dir(sandbox.path().join("work"))
+            .unwrap()
+            .flatten()
+            .filter(|entry| {
+                entry
+                    .file_name()
+                    .to_string_lossy()
+                    .contains(".disktop-partial")
+            })
+            .collect();
+        assert!(staged.is_empty());
+    }
+
+    /// The planner refuses an archive destination inside what it archives, and
+    /// the helper does not take its word for it: archiving into the tree being
+    /// walked would read the growing archive back into itself.
+    #[test]
+    fn an_archive_destination_inside_the_source_is_refused_before_anything_is_written() {
+        let sandbox = Sandbox::new("compress-into-itself");
+        sandbox.directory(b"state");
+        sandbox.directory(b"work/tree/inner");
+        sandbox.file(b"work/tree/inner/file", 4096);
+        let request = CompressRequest {
+            plan_id: "plan-0123456789abcd".to_owned(),
+            journal_directory: sandbox.path().join("state"),
+            home_trash_directory: joined(&sandbox, b"trash-home"),
+            destination_directory: joined(&sandbox, b"work/tree/inner"),
+            source_disposition: SourceDisposition::Permanent,
+            targets: vec![reviewed(&joined(&sandbox, b"work/tree"), 4096)],
+        };
+
+        let (summary, items) =
+            collect(|report| run_compress(&request, report, &AtomicBool::new(false)));
+        summary.ok().expect("the compress ran");
+
+        assert_eq!(items[0].outcome, Outcome::Failed, "{:?}", items[0].message);
+        assert_eq!(items[0].reason, Some("invalid-arguments"));
+        let inside: Vec<_> = std::fs::read_dir(sandbox.path().join("work/tree/inner"))
+            .unwrap()
+            .flatten()
+            .map(|entry| entry.file_name())
+            .collect();
+        assert_eq!(inside, vec![std::ffi::OsString::from("file")]);
+    }
+
+    /// A dangling symlink is a name that is taken. Asking through it says the
+    /// name is free, and the whole copy then runs only for the publish to
+    /// refuse it at the end.
+    #[test]
+    fn a_dangling_symlink_at_the_destination_refuses_before_anything_is_copied() {
+        let sandbox = Sandbox::new("move-onto-dangling-link");
+        sandbox.directory(b"state");
+        sandbox.directory(b"elsewhere");
+        sandbox.directory(b"work");
+        sandbox.file(b"work/data.bin", 4096);
+        sandbox.symlink(b"/nonexistent/disktop-target", b"elsewhere/data.bin");
+        let request = moving(&sandbox, b"work/data.bin", SourceDisposition::Permanent);
+
+        let staged = std::rc::Rc::new(std::cell::Cell::new(0));
+        let counted = std::rc::Rc::clone(&staged);
+        at_checkpoint(move |at| {
+            if at == Checkpoint::NameChosen {
+                counted.set(counted.get() + 1);
+            }
+        });
+        let (summary, items) =
+            collect(|report| run_copy_move(&request, report, &AtomicBool::new(false)));
+        summary.ok().expect("the move ran");
+
+        assert_eq!(items[0].outcome, Outcome::Failed);
+        assert_eq!(items[0].reason, Some("destination-exists"));
+        assert_eq!(staged.get(), 0, "nothing was staged");
+        assert!(
+            std::fs::symlink_metadata(sandbox.path().join("elsewhere/data.bin"))
+                .unwrap()
+                .file_type()
+                .is_symlink(),
+            "the link is still there"
+        );
+        assert!(sandbox.path().join("work/data.bin").exists());
+    }
+
+    /// A cancel that arrives while a large item is being copied or compressed
+    /// stops it there: nothing was published yet, so the staged output is taken
+    /// back, the source is untouched, and the item reads as stopped rather than
+    /// running to the end of a copy nobody wants any more.
+    #[test]
+    fn a_cancel_during_a_copy_or_a_compression_stops_that_item_and_touches_nothing() {
+        for operation in ["copy", "compress"] {
+            let sandbox = Sandbox::new(&format!("cancel-during-{operation}"));
+            sandbox.directory(b"state");
+            sandbox.directory(b"elsewhere");
+            sandbox.directory(b"work");
+            sandbox.file(b"work/big.bin", 8 * 1024 * 1024);
+            sandbox.file(b"work/next.bin", 4096);
+
+            let cancelled = std::sync::Arc::new(AtomicBool::new(false));
+            let flag = std::sync::Arc::clone(&cancelled);
+            at_checkpoint(move |at| {
+                if at == Checkpoint::NameChosen {
+                    flag.store(true, Ordering::Relaxed);
+                }
+            });
+            let targets = vec![
+                reviewed(&joined(&sandbox, b"work/big.bin"), 0),
+                reviewed(&joined(&sandbox, b"work/next.bin"), 0),
+            ];
+            let (summary, items) = if operation == "copy" {
+                let mut request = moving(&sandbox, b"work/big.bin", SourceDisposition::Permanent);
+                request.targets = targets;
+                collect(|report| run_copy_move(&request, report, &cancelled))
+            } else {
+                let request = CompressRequest {
+                    plan_id: "plan-0123456789abcd".to_owned(),
+                    journal_directory: sandbox.path().join("state"),
+                    home_trash_directory: joined(&sandbox, b"trash-home"),
+                    destination_directory: joined(&sandbox, b"elsewhere"),
+                    source_disposition: SourceDisposition::Permanent,
+                    targets,
+                };
+                collect(|report| run_compress(&request, report, &cancelled))
+            };
+            let summary = summary.ok().expect("the action ran");
+
+            assert_eq!(summary.completed, 0, "{operation}");
+            assert_eq!(summary.state, State::Partial);
+            for item in &items {
+                assert_eq!(
+                    item.outcome,
+                    Outcome::Skipped,
+                    "{operation}: {:?}",
+                    item.message
+                );
+                assert_eq!(item.reason, Some("cancelled"));
+            }
+            let arrived: Vec<_> = std::fs::read_dir(sandbox.path().join("elsewhere"))
+                .unwrap()
+                .flatten()
+                .map(|entry| entry.file_name())
+                .collect();
+            assert!(arrived.is_empty(), "{operation}: {arrived:?}");
+            assert_eq!(
+                std::fs::metadata(sandbox.path().join("work/big.bin"))
+                    .unwrap()
+                    .len(),
+                8 * 1024 * 1024
+            );
+            let record = Journal::open(&sandbox.path().join("state"))
+                .unwrap()
+                .get(&summary.journal_id)
+                .unwrap()
+                .unwrap();
+            assert_eq!(record.items[0].outcome, Outcome::Skipped, "{operation}");
+        }
+    }
+
+    /// Disktop never changes permissions on somebody's files to force a
+    /// removal through, so a tree holding a directory this user may not write
+    /// cannot be removed completely. Finding that out halfway through would
+    /// leave part of the tree gone for good; it is found out before anything
+    /// is removed.
+    #[test]
+    fn a_tree_that_cannot_be_removed_completely_is_not_removed_at_all() {
+        if unsafe { libc::geteuid() } == 0 {
+            return;
+        }
+        let sandbox = Sandbox::new("erase-read-only-inside");
+        sandbox.directory(b"state");
+        sandbox.directory(b"work/tree/a-first");
+        sandbox.directory(b"work/tree/z-locked");
+        sandbox.file(b"work/tree/a-first/file", 100);
+        sandbox.file(b"work/tree/top-file", 100);
+        sandbox.file(b"work/tree/z-locked/file", 100);
+        sandbox.chmod(b"work/tree/z-locked", 0o555);
+        let request = EraseRequest {
+            plan_id: "plan-0123456789abcd".to_owned(),
+            journal_directory: sandbox.path().join("state"),
+            targets: vec![reviewed(&joined(&sandbox, b"work/tree"), 300)],
+        };
+
+        let (summary, items) =
+            collect(|report| run_erase(&request, report, &AtomicBool::new(false)));
+        summary.ok().expect("the action ran");
+
+        assert_eq!(items[0].outcome, Outcome::Failed, "{:?}", items[0].message);
+        assert_eq!(items[0].reason, Some("permission-denied"));
+        assert!(
+            items[0].message.as_deref().unwrap().contains("z-locked"),
+            "{:?}",
+            items[0].message
+        );
+        for file in ["a-first/file", "top-file", "z-locked/file"] {
+            assert!(
+                sandbox.path().join("work/tree").join(file).exists(),
+                "{file} was removed although the tree could not be"
+            );
+        }
+    }
+
+    fn linking(sandbox: &Sandbox, keep: &[u8], targets: &[&[u8]]) -> DedupHardlinkRequest {
+        DedupHardlinkRequest {
+            plan_id: "plan-0123456789abcd".to_owned(),
+            journal_directory: sandbox.path().join("state"),
+            keep: reviewed(&joined(sandbox, keep), 0),
+            targets: targets
+                .iter()
+                .map(|target| reviewed(&joined(sandbox, target), 0))
+                .collect(),
+        }
+    }
+
+    fn duplicates(label: &str) -> Sandbox {
+        let sandbox = Sandbox::new(label);
+        sandbox.directory(b"state");
+        sandbox.directory(b"work");
+        std::fs::write(sandbox.path().join("work/keep.txt"), b"the same words").unwrap();
+        std::fs::write(sandbox.path().join("work/copy.txt"), b"the same words").unwrap();
+        sandbox
+    }
+
+    fn leftovers(sandbox: &Sandbox) -> Vec<String> {
+        std::fs::read_dir(sandbox.path().join("work"))
+            .unwrap()
+            .flatten()
+            .map(|entry| entry.file_name().to_string_lossy().into_owned())
+            .filter(|name| name.starts_with(".disktop-link"))
+            .collect()
+    }
+
+    /// An editor saves by writing a new file and renaming it over the old
+    /// one. If that lands after the bytes were compared, the name no longer
+    /// holds what was compared, and exchanging it would swap the saved
+    /// version out and release it.
+    #[test]
+    fn a_duplicate_saved_over_after_the_compare_keeps_what_was_saved() {
+        let sandbox = duplicates("link-saved-over");
+        let request = linking(&sandbox, b"work/keep.txt", &[b"work/copy.txt"]);
+
+        let work = sandbox.path().join("work");
+        at_checkpoint(move |at| {
+            if at == Checkpoint::Compared {
+                std::fs::write(work.join("copy.txt.new"), b"an edit nobody reviewed").unwrap();
+                std::fs::rename(work.join("copy.txt.new"), work.join("copy.txt")).unwrap();
+            }
+        });
+        let (summary, items) =
+            collect(|report| run_dedup_hardlink(&request, report, &AtomicBool::new(false)));
+        summary.ok().expect("the replacement ran");
+
+        assert_eq!(items[0].outcome, Outcome::Skipped, "{:?}", items[0].message);
+        assert_eq!(items[0].reason, Some("changed-target"));
+        assert_eq!(
+            std::fs::read(sandbox.path().join("work/copy.txt")).unwrap(),
+            b"an edit nobody reviewed",
+            "the saved version is still under its name",
+        );
+        assert_eq!(
+            std::fs::read(sandbox.path().join("work/keep.txt")).unwrap(),
+            b"the same words"
+        );
+        assert!(leftovers(&sandbox).is_empty(), "{:?}", leftovers(&sandbox));
+    }
+
+    #[test]
+    fn a_duplicate_written_to_after_the_compare_keeps_what_was_written() {
+        let sandbox = duplicates("link-written-to");
+        let request = linking(&sandbox, b"work/keep.txt", &[b"work/copy.txt"]);
+
+        let copy = sandbox.path().join("work/copy.txt");
+        at_checkpoint(move |at| {
+            if at == Checkpoint::Compared {
+                append_to(&copy, b", and then some");
+            }
+        });
+        let (summary, items) =
+            collect(|report| run_dedup_hardlink(&request, report, &AtomicBool::new(false)));
+        summary.ok().expect("the replacement ran");
+
+        assert_eq!(items[0].outcome, Outcome::Skipped, "{:?}", items[0].message);
+        assert_eq!(
+            std::fs::read(sandbox.path().join("work/copy.txt")).unwrap(),
+            b"the same words, and then some",
+        );
+        assert_eq!(
+            std::fs::read(sandbox.path().join("work/keep.txt")).unwrap(),
+            b"the same words",
+            "the kept file did not take on the write",
+        );
+        assert!(leftovers(&sandbox).is_empty(), "{:?}", leftovers(&sandbox));
+    }
+
+    /// An item whose output was published and whose source could not then be
+    /// dealt with is uncertain, and the journal has to say so. An item left
+    /// reading `in-progress` inside an action that finished is never looked at
+    /// again: reconciliation only resolves actions that never finished.
+    #[test]
+    fn a_source_that_could_not_be_disposed_of_is_journalled_as_uncertain() {
+        let sandbox = Sandbox::new("dispose-journalled");
+        sandbox.directory(b"state");
+        sandbox.directory(b"elsewhere");
+        sandbox.directory(b"work");
+        sandbox.file(b"work/data.bin", 4096);
+        let request = moving(&sandbox, b"work/data.bin", SourceDisposition::Permanent);
+
+        let source = sandbox.path().join("work/data.bin");
+        at_checkpoint(move |at| {
+            if at == Checkpoint::Published {
+                use std::io::Write;
+                let mut file = std::fs::OpenOptions::new()
+                    .append(true)
+                    .open(&source)
+                    .unwrap();
+                file.write_all(b"written after the copy").unwrap();
+            }
+        });
+        let (summary, items) =
+            collect(|report| run_copy_move(&request, report, &AtomicBool::new(false)));
+        let summary = summary.ok().expect("the move ran");
+
+        assert_eq!(items[0].outcome, Outcome::Uncertain);
+        assert!(sandbox.path().join("work/data.bin").exists());
+        let record = Journal::open(&sandbox.path().join("state"))
+            .unwrap()
+            .get(&summary.journal_id)
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            record.items[0].outcome,
+            Outcome::Uncertain,
+            "the journal says what happened to the item, not that it is still running",
+        );
+        assert!(record.items[0].reason.is_some());
+    }
+
+    /// A crash can leave a staged copy of a read-only directory behind, and it
+    /// is Disktop's own: reconciliation takes it back rather than leaving it
+    /// because its own copy refused the removal.
+    #[test]
+    fn a_staged_copy_holding_a_read_only_directory_is_released_after_a_crash() {
+        if unsafe { libc::geteuid() } == 0 {
+            return;
+        }
+        let sandbox = Sandbox::new("release-read-only");
+        sandbox.directory(b"elsewhere/staged/ro");
+        sandbox.file(b"elsewhere/staged/ro/file", 100);
+        sandbox.chmod(b"elsewhere/staged/ro", 0o555);
+        sandbox.chmod(b"elsewhere/staged", 0o555);
+        let staged = joined(&sandbox, b"elsewhere/staged");
+        let live = std::fs::symlink_metadata(sandbox.path().join("elsewhere/staged")).unwrap();
+
+        let journal = Journal::open(&sandbox.path().join("state")).unwrap();
+        let id = journal
+            .begin("plan-0123456789abcd", "copy-move", None)
+            .unwrap();
+        journal
+            .record_intent(&id, 0, b"/work/tree", Some(b"/elsewhere/tree"))
+            .unwrap();
+        use std::os::unix::fs::MetadataExt;
+        journal
+            .record_staging(
+                &id,
+                0,
+                &staged,
+                &Identity {
+                    device: live.dev(),
+                    inode: live.ino(),
+                },
+            )
+            .unwrap();
+        crate::journal::tests_support::abandon(&journal, &id);
+        journal.reconcile().unwrap();
+
+        assert_eq!(release_abandoned_staging(&journal, 1000).unwrap(), 1);
+        assert!(!sandbox.path().join("elsewhere/staged").exists());
     }
 }

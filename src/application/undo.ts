@@ -69,6 +69,13 @@ const PUBLISHING: ReadonlySet<string> = new Set(["copy-move", "compress"]);
  * answer is the same for the whole action and a person should read it once.
  */
 function trashedAnything(record: JournalRecord): boolean {
+  // A history page carries a bounded number of a large action's items. What
+  // it left out may be exactly the items that went to Trash, so a shortened
+  // list is no reason to refuse; the helper reads the whole record and answers
+  // item by item.
+  if ((record.itemsOmitted ?? 0n) > 0n) {
+    return true;
+  }
   return record.items.some(
     (item) => item.outcome === "completed" && item.destination !== undefined,
   );

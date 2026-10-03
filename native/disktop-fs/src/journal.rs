@@ -23,6 +23,15 @@ pub const JOURNAL_FILE: &str = "journal-v1.sqlite";
 /// The most records one page may return, whatever the request asks for.
 pub const MAX_LIMIT: u32 = 200;
 
+/// The most items one record carries in a history page. The rest are counted
+/// in `items_omitted`; `get` always returns every one.
+pub const PAGE_ITEMS_PER_RECORD: u64 = 1_000;
+
+/// The most items one history page carries across all its records, so a page
+/// stays a line a client can read whatever the actions in it did. A page always
+/// holds at least one record.
+pub const PAGE_ITEMS: u64 = 5_000;
+
 /// How long a write waits for another Disktop to finish with the journal.
 const BUSY_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
 
@@ -153,6 +162,9 @@ pub struct ActionRecord {
     pub free_bytes_before: Option<u64>,
     pub free_bytes_after: Option<u64>,
     pub items: Vec<ItemRecord>,
+    /// Items a history page left out of `items`. Always zero from `get`,
+    /// which is what anything that acts on a record reads.
+    pub items_omitted: u64,
     pub manager: Option<ManagerRecord>,
 }
 
@@ -170,6 +182,36 @@ pub struct JournalPage {
 
 pub struct Journal {
     connection: Connection,
+    /// Actions this handle began and has not finished. Dropping the handle
+    /// without finishing them is what an abandoned action looks like from
+    /// inside the process, so they stop counting as in flight then.
+    began: std::cell::RefCell<Vec<String>>,
+}
+
+/// Every action this process has begun and not yet finished or abandoned.
+///
+/// A record's owner is the process that began it, and while that process is
+/// alive its record is in flight, not abandoned. That cannot be told from the
+/// process ID alone when the process asking is the owner itself: a
+/// `journal-reconcile` that reaches a helper in the middle of its own action
+/// would otherwise declare that action uncertain and release the output it is
+/// staging at that moment.
+static IN_FLIGHT: std::sync::Mutex<std::collections::BTreeSet<String>> =
+    std::sync::Mutex::new(std::collections::BTreeSet::new());
+
+fn in_flight() -> std::sync::MutexGuard<'static, std::collections::BTreeSet<String>> {
+    IN_FLIGHT
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
+impl Drop for Journal {
+    fn drop(&mut self) {
+        let mut flying = in_flight();
+        for id in self.began.borrow().iter() {
+            flying.remove(id);
+        }
+    }
 }
 
 pub fn journal_path(directory: &Path) -> PathBuf {
@@ -204,7 +246,10 @@ impl Journal {
         // The journal names every path Disktop has acted on, so it is private
         // to the user who owns it whichever process created it first.
         make_private(&path, 0o600);
-        Ok(Journal { connection })
+        Ok(Journal {
+            connection,
+            began: std::cell::RefCell::new(Vec::new()),
+        })
     }
 
     /// Record an action's intent and return its ID. Nothing may touch a user
@@ -229,6 +274,8 @@ impl Journal {
                 i64::from(std::process::id()),
             ],
         )?;
+        in_flight().insert(id.clone());
+        self.began.borrow_mut().push(id.clone());
         Ok(id)
     }
 
@@ -398,6 +445,8 @@ impl Journal {
                 free_bytes_after.map(clamp),
             ],
         )?;
+        in_flight().remove(action_id);
+        self.began.borrow_mut().retain(|began| began != action_id);
         Ok(())
     }
 
@@ -422,7 +471,7 @@ impl Journal {
         // operation uncertain; leaving it alone costs one more reconcile.
         let unresolved: Vec<String> = candidates
             .into_iter()
-            .filter(|(_, pid)| !owner_alive(*pid))
+            .filter(|(id, pid)| !owner_alive(*pid, id))
             .map(|(id, _)| id)
             .collect();
 
@@ -467,9 +516,12 @@ impl Journal {
                         -- Only an operation that puts things into Trash has
                         -- bytes in it. A restore's items carry a destination
                         -- too, and counting those would have an undo report
-                        -- that it filled Trash up.
+                        -- that it filled Trash up. A move or a compress whose
+                        -- disposition was Trash records where each source
+                        -- went; one whose disposition was permanent records
+                        -- no destination, so it counts nothing here.
                         trashed_bytes = CASE
-                          WHEN operation = 'trash' THEN (
+                          WHEN operation IN ('trash', 'copy-move', 'compress') THEN (
                             SELECT coalesce(sum(bytes), 0) FROM action_item
                              WHERE action_id = ?1 AND outcome = 'completed'
                                AND destination IS NOT NULL
@@ -525,12 +577,31 @@ impl Journal {
             .query_map(params![started, id, i64::from(limit) + 1], read_action)?
             .collect::<rusqlite::Result<Vec<ActionRecord>>>()?;
 
-        let overflow = records.len() > limit as usize;
+        let mut overflow = records.len() > limit as usize;
         records.truncate(limit as usize);
+
+        // A page is one line on the wire, and one action can hold hundreds of
+        // thousands of items. Each record carries at most a bounded number of
+        // them and says how many it left out, and a page stops taking records
+        // once it holds a bounded number in all; the cursor continues from
+        // there. Nothing that acts on a record reads it from here: `restore`
+        // and a manager's finish read the whole record with `get`.
+        let mut shown = 0u64;
+        let mut kept = 0;
         for record in &mut records {
-            record.items = self.items(&record.id)?;
+            let total = self.item_count(&record.id)?;
+            let carried = total.min(PAGE_ITEMS_PER_RECORD);
+            if kept > 0 && shown + carried > PAGE_ITEMS {
+                overflow = true;
+                break;
+            }
+            record.items = self.items_up_to(&record.id, carried)?;
+            record.items_omitted = total - record.items.len() as u64;
             record.manager = self.manager(&record.id)?;
+            shown += carried;
+            kept += 1;
         }
+        records.truncate(kept);
 
         let next_cursor = match (overflow, records.last()) {
             (true, Some(last)) => {
@@ -583,11 +654,24 @@ impl Journal {
             }
             Ok(id)
         })();
+        // A manager action spans one helper session of several requests, each
+        // with its own handle, so it stays in flight past this handle until it
+        // is finished or the process goes.
+        let forget = |id: &str| {
+            self.began.borrow_mut().retain(|began| began != id);
+        };
         match outcome {
-            Ok(id) => {
-                self.connection.execute_batch("COMMIT")?;
-                Ok(id)
-            }
+            Ok(id) => match self.connection.execute_batch("COMMIT") {
+                Ok(()) => {
+                    forget(&id);
+                    Ok(id)
+                }
+                Err(error) => {
+                    forget(&id);
+                    in_flight().remove(&id);
+                    Err(error)
+                }
+            },
             Err(error) => {
                 let _ = self.connection.execute_batch("ROLLBACK");
                 Err(error)
@@ -702,12 +786,27 @@ impl Journal {
     }
 
     fn items(&self, action_id: &str) -> rusqlite::Result<Vec<ItemRecord>> {
+        self.items_up_to(action_id, u64::MAX)
+    }
+
+    fn item_count(&self, action_id: &str) -> rusqlite::Result<u64> {
+        self.connection
+            .query_row(
+                "SELECT count(*) FROM action_item WHERE action_id = ?1",
+                params![action_id],
+                |row| row.get::<_, i64>(0),
+            )
+            .map(unclamp)
+    }
+
+    /// The first `limit` items in position order.
+    fn items_up_to(&self, action_id: &str, limit: u64) -> rusqlite::Result<Vec<ItemRecord>> {
         let mut statement = self.connection.prepare(
             "SELECT position, path, destination, outcome, reason, bytes, moved_device, moved_inode
-               FROM action_item WHERE action_id = ?1 ORDER BY position",
+               FROM action_item WHERE action_id = ?1 ORDER BY position LIMIT ?2",
         )?;
         statement
-            .query_map(params![action_id], |row| {
+            .query_map(params![action_id, clamp(limit)], |row| {
                 let outcome: String = row.get(3)?;
                 let device: Option<i64> = row.get(6)?;
                 let inode: Option<i64> = row.get(7)?;
@@ -751,6 +850,7 @@ fn read_action(row: &rusqlite::Row<'_>) -> rusqlite::Result<ActionRecord> {
         free_bytes_before: before.map(unclamp),
         free_bytes_after: after.map(unclamp),
         items: Vec::new(),
+        items_omitted: 0,
         manager: None,
     })
 }
@@ -853,9 +953,12 @@ pub mod tests_support {
 /// kernel has since handed to something else reads as alive, which only delays
 /// reconciliation; the record stays visibly unresolved rather than being
 /// wrongly declared.
-fn owner_alive(pid: i64) -> bool {
-    if pid <= 0 || pid == i64::from(std::process::id()) {
+fn owner_alive(pid: i64, id: &str) -> bool {
+    if pid <= 0 {
         return false;
+    }
+    if pid == i64::from(std::process::id()) {
+        return in_flight().contains(id);
     }
     let Ok(pid) = libc::pid_t::try_from(pid) else {
         return false;
@@ -1161,6 +1264,183 @@ CREATE TABLE action_item (action_id TEXT NOT NULL REFERENCES action(id) ON DELET
             "an undo moved bytes out of Trash, not into it"
         );
         assert_eq!(record.selected_bytes, 512);
+    }
+
+    /// A reconcile that reaches the helper while that same helper is running
+    /// an action must not judge the action abandoned: its owner is alive, it is
+    /// just the process asking. Once the action's handle is gone without a
+    /// finish, it is abandoned and reads as such.
+    #[test]
+    fn this_process_never_reconciles_an_action_it_is_still_running() {
+        let sandbox = Sandbox::new("journal-own-in-flight");
+        let running = Journal::open(sandbox.path()).unwrap();
+        let id = running
+            .begin("plan-0123456789ab", "copy-move", None)
+            .unwrap();
+        running
+            .record_intent(&id, 0, b"/work/a", Some(b"/elsewhere/a"))
+            .unwrap();
+
+        let asking = Journal::open(sandbox.path()).unwrap();
+        assert_eq!(asking.reconcile().unwrap(), 0, "the action is in flight");
+        assert_eq!(
+            asking.get(&id).unwrap().unwrap().items[0].outcome,
+            Outcome::InProgress
+        );
+
+        drop(running);
+        assert_eq!(
+            asking.reconcile().unwrap(),
+            1,
+            "abandoned once its handle is gone"
+        );
+        assert_eq!(asking.get(&id).unwrap().unwrap().state, State::Uncertain);
+    }
+
+    #[test]
+    fn a_manager_action_stays_in_flight_between_the_requests_of_its_session() {
+        let sandbox = Sandbox::new("journal-manager-in-flight");
+        let id = Journal::open(sandbox.path())
+            .unwrap()
+            .begin_manager(
+                "plan-0123456789ab",
+                "docker",
+                "docker.remove-dangling-images",
+                "user",
+                &[("docker".to_owned(), vec!["image".to_owned()])],
+                &[(b"sha256:1".to_vec(), 1)],
+                None,
+                None,
+            )
+            .unwrap();
+
+        let asking = Journal::open(sandbox.path()).unwrap();
+        assert_eq!(asking.reconcile().unwrap(), 0);
+        asking
+            .finish(&id, State::Complete, &Counts::default(), None)
+            .unwrap();
+        assert_eq!(asking.get(&id).unwrap().unwrap().state, State::Complete);
+    }
+
+    /// A move or a compress whose plan said `trash` puts its sources in Trash
+    /// just as a Trash action does, and the action reported those bytes while
+    /// it ran. Reconciling an interrupted one must not report zero instead.
+    #[test]
+    fn a_reconciled_move_counts_the_sources_it_put_in_trash() {
+        let sandbox = Sandbox::new("journal-move-trashed");
+        let journal = Journal::open(sandbox.path()).unwrap();
+        let mut ids = Vec::new();
+        for (operation, destination) in [
+            ("copy-move", Some(&b"/trash/files/a"[..])),
+            ("compress", Some(&b"/trash/files/b"[..])),
+            ("copy-move", None),
+        ] {
+            let id = journal.begin("plan-0123456789ab", operation, None).unwrap();
+            journal
+                .record_intent(&id, 0, b"/work/a", destination)
+                .unwrap();
+            journal
+                .record_moved(
+                    &id,
+                    0,
+                    512,
+                    Some(&Identity {
+                        device: 1,
+                        inode: 2,
+                    }),
+                )
+                .unwrap();
+            journal.record_intent(&id, 1, b"/work/b", None).unwrap();
+            abandon(&journal, &id);
+            ids.push(id);
+        }
+        journal.reconcile().unwrap();
+
+        let trashed: Vec<u64> = ids
+            .iter()
+            .map(|id| journal.get(id).unwrap().unwrap().trashed_bytes)
+            .collect();
+        assert_eq!(
+            trashed,
+            vec![512, 512, 0],
+            "a source put in Trash counts; one removed permanently does not",
+        );
+    }
+
+    fn action_with_items(journal: &Journal, items: u64) -> String {
+        let id = journal.begin("plan-0123456789ab", "trash", None).unwrap();
+        journal.connection.execute_batch("BEGIN").unwrap();
+        for position in 0..items {
+            journal
+                .record_intent(
+                    &id,
+                    position,
+                    format!("/home/example/{position}").as_bytes(),
+                    Some(b"/trash/files/x"),
+                )
+                .unwrap();
+        }
+        journal.connection.execute_batch("COMMIT").unwrap();
+        journal
+            .finish(&id, State::Complete, &Counts::default(), None)
+            .unwrap();
+        id
+    }
+
+    /// One action can hold hundreds of thousands of items, and a history page
+    /// is one line on the wire. A page carries a bounded number of each
+    /// record's items and says how many it left out; the record itself, which
+    /// is what an undo reads, still holds every one.
+    #[test]
+    fn a_history_page_bounds_the_items_it_carries_and_says_what_it_left_out() {
+        let sandbox = Sandbox::new("journal-page-items");
+        let journal = Journal::open(sandbox.path()).unwrap();
+        let id = action_with_items(&journal, PAGE_ITEMS_PER_RECORD + 1_500);
+
+        let page = journal.page(None, 10).unwrap();
+        let record = &page.records[0];
+        assert_eq!(record.items.len() as u64, PAGE_ITEMS_PER_RECORD);
+        assert_eq!(record.items_omitted, 1_500);
+        assert_eq!(record.items[0].position, 0, "the first items, in order");
+
+        let whole = journal.get(&id).unwrap().unwrap();
+        assert_eq!(whole.items.len() as u64, PAGE_ITEMS_PER_RECORD + 1_500);
+        assert_eq!(whole.items_omitted, 0);
+    }
+
+    #[test]
+    fn a_history_page_stops_taking_records_once_it_holds_enough_items() {
+        let sandbox = Sandbox::new("journal-page-budget");
+        let journal = Journal::open(sandbox.path()).unwrap();
+        let records = PAGE_ITEMS / PAGE_ITEMS_PER_RECORD + 2;
+        for _ in 0..records {
+            action_with_items(&journal, PAGE_ITEMS_PER_RECORD);
+        }
+
+        let first = journal.page(None, MAX_LIMIT).unwrap();
+        let carried: u64 = first
+            .records
+            .iter()
+            .map(|record| record.items.len() as u64)
+            .sum();
+        assert!(carried <= PAGE_ITEMS, "{carried} items on one page");
+        assert!(first.next_cursor.is_some(), "the rest is a page away");
+
+        let mut seen: Vec<String> = first
+            .records
+            .iter()
+            .map(|record| record.id.clone())
+            .collect();
+        let mut cursor = first.next_cursor;
+        while let Some(next) = cursor {
+            let page = journal.page(Some(&next), MAX_LIMIT).unwrap();
+            assert!(!page.records.is_empty(), "a page always holds a record");
+            seen.extend(page.records.iter().map(|record| record.id.clone()));
+            cursor = page.next_cursor;
+        }
+        assert_eq!(seen.len() as u64, records, "every record, once");
+        seen.dedup();
+        assert_eq!(seen.len() as u64, records);
     }
 
     #[test]
