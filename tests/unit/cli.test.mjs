@@ -244,3 +244,37 @@ test("without --notify or the setting, alerts check notifies nobody", async () =
   assert.equal(asked, 0);
   assert.equal(JSON.parse(context.captured.stdout).data.notification, undefined);
 });
+
+test("an empty value or operand is refused, never read as the working directory", () => {
+  // `--path="$TARGET"` with TARGET unset arrives as `--path=`; resolved, an
+  // empty path is the directory the command was run from.
+  for (const args of [
+    ["clean", "plan", "--path="],
+    ["clean", "plan", "--path", ""],
+    ["scan", ""],
+    ["explore", "--min-size="],
+    ["find", "empty", "--path="],
+  ]) {
+    const result = parseArguments(args);
+    assert.equal(result.kind, "error", JSON.stringify(args));
+    assert.match(result.message, /empty/, JSON.stringify(args));
+  }
+});
+
+test("an option given twice is refused rather than one of them silently winning", () => {
+  const result = parseArguments(["history", "--limit", "5", "--limit", "500"]);
+  assert.equal(result.kind, "error");
+  assert.match(result.message, /'--limit' was given more than once/);
+  // A flag repeated says the same thing twice and is harmless.
+  assert.equal(parseArguments(["devices", "--json", "--json"]).kind, "command");
+});
+
+test("an argument whose bytes were not UTF-8 is refused, because it no longer names what was typed", () => {
+  // Node decodes argv as UTF-8 and replaces what it cannot read with U+FFFD,
+  // so `disktop scan $'\xff'` would otherwise scan a path nobody typed.
+  for (const args of [["scan", "dir�"], ["clean", "plan", "--path", "/home/example/�"]]) {
+    const result = parseArguments(args);
+    assert.equal(result.kind, "error", JSON.stringify(args));
+    assert.match(result.message, /not valid UTF-8/);
+  }
+});

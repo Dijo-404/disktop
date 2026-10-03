@@ -212,6 +212,18 @@ test("an invalid argument exits 2 with the reason on stderr and nothing on stdou
   validate("error", JSON.parse(json.stdout));
 });
 
+test("an argument that is not UTF-8 is refused before anything is scanned or planned", () => {
+  // A real process argument with a byte that is not UTF-8, which no Node API
+  // can produce directly; the shell writes it.
+  const result = spawnSync("sh", ["-c", "node dist/bin/disktop.js scan \"$(printf 'dir\\377')\""], {
+    encoding: "utf8",
+    env: { ...process.env, NO_COLOR: "1" },
+  });
+  assert.equal(result.status, 2, result.stderr);
+  assert.equal(result.stdout, "");
+  assert.match(result.stderr, /not valid UTF-8/);
+});
+
 test("disktop history reads the journal and validates against its schema", () => {
   const result = disktop(["history", "--json"]);
   const envelope = envelopeFrom(result);

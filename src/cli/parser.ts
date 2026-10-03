@@ -221,6 +221,15 @@ const VALUE_OPTION_NAMES: ReadonlySet<string> = new Set(
 
 /** Resolve the argument list against the command table without performing any work. */
 export function parseArguments(args: readonly string[]): ParseResult {
+  // Node decodes arguments as UTF-8 and puts U+FFFD wherever it could not, so
+  // an argument holding one no longer names what was typed. A path built from
+  // it would be a different path, so it is refused rather than guessed at.
+  if (args.some((argument) => argument.includes("�"))) {
+    return {
+      kind: "error",
+      message: "An argument held bytes that are not valid UTF-8, so Disktop cannot tell what it named. A path like that is reached through a finding, never typed.",
+    };
+  }
   const words = commandWords(args);
   const command = selectCommand(words.map((word) => word.value));
   if (command === undefined) {
@@ -251,6 +260,11 @@ export function parseArguments(args: readonly string[]): ParseResult {
       if (operand !== undefined) {
         return { kind: "error", message: `'${command.path.join(" ")}' takes one ${command.operand.name}, but received more than one.` };
       }
+      if (argument === "") {
+        // An unset variable in a script arrives as an empty argument, and an
+        // empty path resolves to wherever the command happened to run.
+        return { kind: "error", message: `'${command.path.join(" ")}' received an empty ${command.operand.name}, which names nothing.` };
+      }
       operand = argument;
       continue;
     }
@@ -276,8 +290,14 @@ export function parseArguments(args: readonly string[]): ParseResult {
     if (value === undefined || (inlineValue === undefined && value.startsWith("-"))) {
       return { kind: "error", message: `'--${option.name}' needs a ${option.placeholder ?? "value"}.` };
     }
+    if (value === "") {
+      return { kind: "error", message: `'--${option.name}' received an empty ${option.placeholder ?? "value"}, which names nothing.` };
+    }
     if (option.choices !== undefined && !option.choices.includes(value)) {
       return { kind: "error", message: `'--${option.name}' accepts ${option.choices.join(" or ")}, not '${value}'.` };
+    }
+    if (values.has(option.name)) {
+      return { kind: "error", message: `'--${option.name}' was given more than once; give it once.` };
     }
     values.set(option.name, value);
     if (inlineValue === undefined) {
