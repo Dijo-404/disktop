@@ -345,3 +345,61 @@ test("a filter the parser refuses says why on the prompt row itself", async () =
   assert.ok(controller.state.prompt !== undefined, "the prompt stays open to be corrected");
   assert.ok(screen(controller).some((line) => line.includes("not a kind")), screen(controller).join("\n"));
 });
+
+test("a duplicate copy is offered Trash or a byte-compared hardlink, never a plain permanent removal", async () => {
+  const file = (display, inode) => ({
+    path: { bytesBase64: Buffer.from(display).toString("base64"), display, utf8: display },
+    device: 1n,
+    inode,
+    apparentBytes: 4n << 20n,
+    modifiedNanoseconds: inode,
+    ownerId: 1000n,
+    groupId: 1000n,
+    permissions: 0o644,
+  });
+  const kept = file("/home/example/a.iso", 1n);
+  const copy = file("/home/example/b.iso", 2n);
+  const services = fakeServices();
+  services.find.find = async (request) => {
+    services.calls.push(["find", request.kind]);
+    if (request.kind !== "duplicates") return { kind: "found", entries: [] };
+    return {
+      kind: "duplicates",
+      result: {
+        kind: "found",
+        groups: [{ group: { apparentBytes: 4n << 20n, digest: "ab", files: [kept, copy] }, decision: { kind: "decided", kept, others: [copy], basis: "oldest", arbitrary: false }, reclaimableBytes: 4n << 20n }],
+        reclaimableBytes: 4n << 20n,
+        complete: true,
+        warnings: [],
+        candidatesRead: 2n,
+        filesHashed: 2n,
+      },
+    };
+  };
+  const plans = [];
+  services.plan = async (request) => {
+    plans.push(request);
+    const reversible = request.operation === "trash";
+    return { kind: "planned", plan: { ...PLAN, id: `plan-${plans.length}`, operation: request.operation, reversibility: reversible ? "undo-from-trash" : "irreversible" } };
+  };
+  const { controller } = setup(services);
+  await controller.idle();
+  for (const key of ["2", "f", "f"]) {
+    controller.handleKey(key);
+    await controller.idle();
+  }
+  // Rows: the group, the kept copy, the other copy.
+  for (const key of ["j", "j", "c"]) {
+    controller.handleKey(key);
+    await controller.idle();
+  }
+  assert.equal(plans[0].operation, "trash");
+  assert.equal(plans[0].path.display, "/home/example/b.iso");
+  assert.ok(!controller.state.dialog.alternatives.includes("permanent"));
+  controller.handleKey("o");
+  await controller.idle();
+  assert.equal(plans[1].operation, "dedup-hardlink");
+  assert.equal(plans[1].path.display, "/home/example/a.iso", "the kept copy is the plan's subject");
+  assert.equal(plans[1].replacePath.display, "/home/example/b.iso");
+  assert.equal(plans[1].keepPath.display, "/home/example/a.iso");
+});

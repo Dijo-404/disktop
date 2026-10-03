@@ -186,6 +186,14 @@ function reviewDialog(dialog: Extract<Dialog, { kind: "review" }>, context: View
   const minutes = Math.max(0, Math.round((Date.parse(plan.expiresAt) - context.now) / 60_000));
   content.push(field("Expires", minutes < 1 ? "in under a minute" : minutes < 120 ? `in ${minutes} min` : `in ${Math.round(minutes / 60)} h`, inner));
 
+  if (dialog.pair !== undefined && plan.operation === "trash") {
+    for (const text of wrap(
+      "This is one copy of a duplicate group. A Trash move does not compare it with the kept copy again; it can be undone from History. o offers a hardlink replacement, which compares both in full first.",
+      inner - 2,
+    )) {
+      content.push(new LineBuilder(inner).add(`${theme.glyphs.info} `, "info").add(text, "dim").build());
+    }
+  }
   if (plan.manager !== undefined) {
     content.push({ spans: [] });
     for (const command of plan.manager.commands.slice(0, 3)) {

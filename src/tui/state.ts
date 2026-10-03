@@ -155,6 +155,8 @@ export type Dialog =
       readonly origin: "finding" | "path";
       readonly findingId?: string;
       readonly path?: RawPath;
+      /** For a duplicate copy: the copy a hardlink replacement would keep, and this one. */
+      readonly pair?: { readonly keep: RawPath; readonly copy: RawPath };
     }
   | { readonly kind: "applied"; readonly outcome: ApplyOutcome }
   | { readonly kind: "undo-confirm"; readonly record: JournalRecord }

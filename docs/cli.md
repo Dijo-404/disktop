@@ -557,8 +557,10 @@ A plan is reviewed in a dialog showing its operation, whether and how it can be 
 the selected bytes and item count, the permission it needs, its expiry, its warnings,
 and its entries. `y` applies a reversible plan; an irreversible one needs `yes` typed
 and Enter. `o` re-plans with the finding's other operation. The TUI plans Trash,
-permanent removal, emptying Trash, and manager actions; move, compress, and hardlink
-need a destination or a pair and are planned with `clean plan`. A plan that needs root
+permanent removal, emptying Trash, and manager actions, and for a copy in a duplicate
+group offers Trash or a hardlink replacement (byte-compared by the helper) — never a
+plain permanent removal; move and compress need a destination and are planned with
+`clean plan`. A plan that needs root
 suspends the TUI while `sudo` or `pkexec` asks for the password, then takes the
 terminal back. Results keep selected bytes, bytes moved to Trash, and the observed
 free-space change apart, as `clean apply --json` does.

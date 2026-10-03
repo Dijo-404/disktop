@@ -1269,7 +1269,17 @@ export class TuiController {
           this.#set(withNotice(state, "This is the copy the keep rule keeps. Select one of the others to clean.", "info"));
           return;
         }
-        this.#plan({ operation: "trash", path: row.file.path }, ["trash", "permanent"], "path");
+        // Releasing a copy because another exists is only offered through an
+        // operation that compares the two in full before it acts (ADR 0006):
+        // a hardlink replacement. Trash stays on offer because it can be
+        // undone. A plain permanent removal is not offered for a duplicate.
+        const group = state.explore.rows.find((candidate) => candidate.kind === "group" && candidate.index === row.groupIndex);
+        const kept = group?.kind === "group" && group.group.decision.kind === "decided" ? group.group.decision.kept.path : undefined;
+        if (kept === undefined) {
+          this.#plan({ operation: "trash", path: row.file.path }, ["trash"], "path");
+        } else {
+          this.#plan({ operation: "trash", path: row.file.path }, ["trash", "dedup-hardlink"], "path", undefined, { keep: kept, copy: row.file.path });
+        }
       }
     }
   }
@@ -1295,6 +1305,15 @@ export class TuiController {
   #replan(dialog: Extract<Dialog, { kind: "review" }>, operation: ActionOperation): void {
     if (dialog.origin === "finding" && dialog.findingId !== undefined) {
       this.#plan({ operation, findingId: dialog.findingId }, dialog.alternatives, "finding", dialog.plan.id);
+    } else if (dialog.pair !== undefined) {
+      // A duplicate copy: a hardlink names the kept copy as its subject and
+      // the copy as the one replaced; Trash moves the copy alone.
+      const { keep, copy } = dialog.pair;
+      const request =
+        operation === "dedup-hardlink"
+          ? { operation, path: keep, replacePath: copy, keepPath: keep }
+          : { operation, path: copy };
+      this.#plan(request, dialog.alternatives, "path", dialog.plan.id, dialog.pair);
     } else if (dialog.path !== undefined) {
       this.#plan({ operation, path: dialog.path }, dialog.alternatives, "path", dialog.plan.id);
     }
@@ -1305,10 +1324,11 @@ export class TuiController {
    * asked for from (`o`), which is the one dialog its answer may replace.
    */
   #plan(
-    request: { operation: ActionOperation; findingId?: string; path?: RawPath },
+    request: { operation: ActionOperation; findingId?: string; path?: RawPath; replacePath?: RawPath; keepPath?: RawPath },
     alternatives: readonly ActionOperation[],
     origin: "finding" | "path",
     replacing?: string,
+    pair?: { readonly keep: RawPath; readonly copy: RawPath },
   ): void {
     this.#run("plan", { label: "Reviewing", detail: "fingerprinting every entry as it is now", cancellable: true }, async (signal, generation) => {
       const outcome = await this.#services.plan(request, signal);
@@ -1333,6 +1353,7 @@ export class TuiController {
             origin,
             ...(request.findingId === undefined ? {} : { findingId: request.findingId }),
             ...(request.path === undefined ? {} : { path: request.path }),
+            ...(pair === undefined ? {} : { pair }),
           },
         };
       });
