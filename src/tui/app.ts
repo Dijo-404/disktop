@@ -34,6 +34,8 @@ export async function runTui(options: TuiOptions): Promise<number> {
   const home = services.home.display;
 
   let paintTimer: NodeJS.Timeout | undefined;
+  // True while the terminal is lent to a sudo or pkexec password prompt.
+  let suspended = false;
   let spinner: NodeJS.Timeout | undefined;
   let resolveExit: ((code: number) => void) | undefined;
   const exited = new Promise<number>((resolve) => {
@@ -72,8 +74,12 @@ export async function runTui(options: TuiOptions): Promise<number> {
   const controller: TuiController = new TuiController(services, initialState(view, options.units, services.defaults.staleAfterDays), {
     changed: schedule,
     pageRows: () => Math.max(1, renderer.size().rows - 8),
-    suspend: (message) => renderer.suspend(message),
+    suspend: (message) => {
+      suspended = true;
+      renderer.suspend(message);
+    },
     resume: () => {
+      suspended = false;
       renderer.resume();
       schedule();
     },
@@ -82,7 +88,12 @@ export async function runTui(options: TuiOptions): Promise<number> {
 
   let exitCode: number;
   try {
-    restore.arm(() => controller.shutdown(1_000));
+    restore.arm({
+      lentToPrompt: () => suspended,
+      acting: () => controller.acting,
+      cancelActions: () => controller.cancelActions(),
+      shutdown: (graceMilliseconds) => controller.shutdown(graceMilliseconds),
+    });
     await renderer.start();
     renderer.onResize(() => {
       if (paintTimer !== undefined) {
@@ -109,6 +120,18 @@ export async function runTui(options: TuiOptions): Promise<number> {
   return exitCode;
 }
 
+/** What the signal handler needs to know about the work in progress. */
+interface SignalPolicy {
+  /** True while the terminal is lent to a password prompt. */
+  lentToPrompt(): boolean;
+  /** True while an action that changes the disk is running. */
+  acting(): boolean;
+  /** Ask running actions to stop after their current item. */
+  cancelActions(): void;
+  /** Stop everything; actions are waited for in full, reads for the grace. */
+  shutdown(graceMilliseconds: number): Promise<void>;
+}
+
 /**
  * Owns terminal restoration for the lifetime of the TUI. `stop` is idempotent,
  * so running it twice on the way out of a signal is harmless.
@@ -129,16 +152,34 @@ class TerminalRestoration {
    * at once — and then up to a second for a scan or an action to record where
    * it stopped before the signal is delivered again with its default action.
    */
-  arm(drain: () => Promise<void>): void {
+  arm(policy: SignalPolicy): void {
     this.#onExit = () => this.#renderer.stop();
     this.#onSignal = (signal) => {
+      // While a password prompt has the terminal it is in cooked mode, so a
+      // Ctrl+C there is a real SIGINT. It means "not this", about the action
+      // asking for the password: that action is stopped and the TUI carries on.
+      if (signal === "SIGINT" && policy.lentToPrompt()) {
+        policy.cancelActions();
+        return;
+      }
       this.#renderer.stop();
       this.disarm();
+      if (policy.acting()) {
+        // An action is never abandoned on a timer: it is asked to stop after
+        // its current item and waited for, however long that item takes. The
+        // handlers are disarmed, so a second signal takes its default course
+        // for somebody who insists.
+        process.stderr.write(`Disktop received ${signal}: stopping after the current item so it is journalled. Send ${signal} again to stop at once.\n`);
+        void policy.shutdown(1_000).finally(() => process.kill(process.pid, signal));
+        return;
+      }
+      // Nothing that changes the disk is running: a scan gets up to three
+      // seconds to record what it read, and then the signal takes its course.
       let timer: NodeJS.Timeout | undefined;
       const limit = new Promise<void>((resolve) => {
         timer = setTimeout(resolve, 3_000);
       });
-      void Promise.race([drain(), limit]).finally(() => {
+      void Promise.race([policy.shutdown(1_000), limit]).finally(() => {
         clearTimeout(timer);
         process.kill(process.pid, signal);
       });

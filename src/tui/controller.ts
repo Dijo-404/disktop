@@ -116,6 +116,20 @@ export class TuiController {
     return this.#running.size > 0;
   }
 
+  /** Whether an action that changes the disk is running. */
+  get acting(): boolean {
+    return [...this.#running.keys()].some((kind) => MUTATING.has(kind));
+  }
+
+  /** Ask every running action to stop after its current item. */
+  cancelActions(): void {
+    for (const [kind, running] of this.#running) {
+      if (MUTATING.has(kind)) {
+        running.controller.abort();
+      }
+    }
+  }
+
   /** The exit status a normal quit reports: incomplete when the inventory was. */
   get exitCode(): number {
     if (this.#interrupted) {
