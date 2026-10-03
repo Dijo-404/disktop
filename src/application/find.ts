@@ -1,11 +1,11 @@
 import type { KeepRule } from "../domain/duplicates.js";
-import type { OperationFailure } from "../domain/errors.js";
+import { StaleScanIndex, type OperationFailure } from "../domain/errors.js";
 import type { Capability, IndexedEntry, RawPath } from "../domain/models.js";
 import { stalenessBasis, type StalenessBasis } from "../domain/staleness.js";
 import type { InventoryPort } from "../ports/inventory.js";
 import type { EntryFilter } from "../ports/scan.js";
 import type { DuplicateOutcome, DuplicateService } from "./duplicates.js";
-import { DEFAULT_PAGE, boundedLimit, type ExploreService } from "./explore.js";
+import { DEFAULT_PAGE, boundedLimit, type ExploreOutcome, type ExploreService } from "./explore.js";
 
 /** What `disktop find` can be asked for. */
 export type FindKind = "empty" | "broken" | "duplicates" | "stale";
@@ -121,7 +121,7 @@ export function createFindService(
           : await inventory.mountOptionsFor(request.path);
         const basis = stalenessBasis(options);
 
-        const page = await index.page({
+        const page = await pageOf(index, request, {
           scanId: request.scanId,
           filter: {
             kinds: ["file"],
@@ -133,6 +133,9 @@ export function createFindService(
           limit: boundedLimit(request.limit ?? DEFAULT_PAGE),
           ...(request.cursor === undefined ? {} : { cursor: request.cursor }),
         });
+        if (page.kind === "refused") {
+          return page;
+        }
         if (page.kind === "unavailable") {
           return { kind: "unavailable", capability: page.capability };
         }
@@ -155,7 +158,7 @@ export function createFindService(
         };
       }
 
-      const outcome = await index.page({
+      const outcome = await pageOf(index, request, {
         scanId: request.scanId,
         filter: { ...filter, underPath: request.path },
         sort: "allocated",
@@ -164,6 +167,9 @@ export function createFindService(
         ...(request.cursor === undefined ? {} : { cursor: request.cursor }),
       });
 
+      if (outcome.kind === "refused") {
+        return outcome;
+      }
       if (outcome.kind === "unavailable") {
         return { kind: "unavailable", capability: outcome.capability };
       }
@@ -174,6 +180,32 @@ export function createFindService(
       };
     },
   };
+}
+
+/**
+ * One page from the index, with a pruned scan turned into a refusal that says
+ * what to run. The index keeps only the newest scans, so a snapshot can
+ * outlive its rows; that is routine, not a fault.
+ */
+async function pageOf(
+  index: Pick<ExploreService, "page">,
+  request: FindRequest,
+  query: Parameters<ExploreService["page"]>[0],
+): Promise<ExploreOutcome | { readonly kind: "refused"; readonly failure: OperationFailure }> {
+  try {
+    return await index.page(query);
+  } catch (error) {
+    if (error instanceof StaleScanIndex) {
+      return {
+        kind: "refused",
+        failure: {
+          code: "invalid-input",
+          message: `${error.message} Run 'disktop scan ${request.path.display}' and search again.`,
+        },
+      };
+    }
+    throw error;
+  }
 }
 
 function filterFor(kind: FindKind): EntryFilter | undefined {

@@ -359,3 +359,18 @@ test("explore --owners in text names each owner and their share", async () => {
   assert.match(context.captured.stdout, /alice \(1000\)/);
   assert.match(context.captured.stdout, /user 1001/);
 });
+
+test("explore on a scan the index has since pruned says to scan again, not that Disktop broke", async () => {
+  const { StaleScanIndex } = await import("../../dist/domain/errors.js");
+  const context = fakeContext({
+    storage: undefined,
+  });
+  context.storage.explore.page = async () => {
+    throw new StaleScanIndex(FIXTURE_SNAPSHOT.scanId, "That scan is not in the index. It may have been pruned; run a new scan.");
+  };
+  const status = await runCli(["explore", "/home/example/projects", "--json"], context);
+  assert.equal(status, 2);
+  const envelope = envelopeOf(context, "explore");
+  assert.equal(envelope.error.code, "invalid-input");
+  assert.match(envelope.error.message, /disktop scan/);
+});

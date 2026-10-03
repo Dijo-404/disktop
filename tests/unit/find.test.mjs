@@ -195,3 +195,18 @@ test("a duplicate search receives the caller's signal, so Ctrl+C reaches it", as
   controller.abort();
   assert.equal(received.aborted, true);
 });
+
+test("a stale, empty, or broken search over a pruned scan is refused with what to run, not thrown", async () => {
+  const { StaleScanIndex } = await import("../../dist/domain/errors.js");
+  const find = createFindService({
+    async page() {
+      throw new StaleScanIndex("scan-1", "That scan is not in the index. It may have been pruned; run a new scan.");
+    },
+  });
+  for (const kind of ["empty", "broken", "stale"]) {
+    const outcome = await find.find({ kind, scanId: "scan-1", path: rawPathFromUtf8("/home/example"), staleBeforeNanoseconds: 1n });
+    assert.equal(outcome.kind, "refused", kind);
+    assert.equal(outcome.failure.code, "invalid-input");
+    assert.match(outcome.failure.message, /disktop scan \/home\/example/);
+  }
+});
