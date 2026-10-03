@@ -2,7 +2,7 @@ import { spawn as spawnProcess } from "node:child_process";
 import { MANAGER_TOOLS, type ManagerPrivilege } from "../../domain/managers.js";
 import { sanitizeText } from "../../domain/paths.js";
 import type { CommandRun, CommandRunner } from "../../ports/managers.js";
-import { resolveTrustedExecutable } from "./process.js";
+import { resolveTrustedExecutable, toolEnvironment } from "./process.js";
 
 export interface Escalation {
   readonly kind: "none" | "sudo" | "pkexec";
@@ -61,6 +61,15 @@ export interface SpawnOptions {
   readonly signal: AbortSignal;
   readonly timeoutMilliseconds: number;
   readonly env: Readonly<Record<string, string>>;
+  /**
+   * Whether the program is sudo or pkexec standing in front of the command.
+   * Such a command is only ever sent SIGTERM, which the escalation tool relays:
+   * killing sudo itself would leave the root command running with nobody left
+   * to see how it ended, and the journal would say it finished.
+   */
+  readonly escalated?: boolean;
+  /** How long an unescalated command has after SIGTERM before it is killed. */
+  readonly killGraceMilliseconds?: number;
 }
 
 export type SpawnLike = (program: string, argv: readonly string[], options: SpawnOptions) => Promise<SpawnResult>;
@@ -73,8 +82,6 @@ export interface RunnerOptions {
   readonly environment?: Readonly<Record<string, string | undefined>>;
 }
 
-const TRUSTED_PATH = "/usr/bin:/bin:/usr/sbin:/sbin";
-const PASSED_THROUGH = ["HOME", "XDG_RUNTIME_DIR", "DBUS_SESSION_BUS_ADDRESS", "DOCKER_HOST", "CONTAINER_HOST"];
 const OUTPUT_BYTES = 4096;
 const CAPTURE_BYTES = 64 * 1024;
 
@@ -83,14 +90,9 @@ export function createCommandRunner(options: RunnerOptions = {}): CommandRunner 
   const resolve = options.resolve ?? resolveTrustedExecutable;
   const euid = options.euid ?? process.geteuid?.() ?? -1;
   const timeoutMilliseconds = options.timeoutMilliseconds ?? 30 * 60_000;
-  const environment = options.environment ?? process.env;
-  const env: Record<string, string> = { PATH: TRUSTED_PATH, LC_ALL: "C" };
-  for (const name of PASSED_THROUGH) {
-    const value = environment[name];
-    if (value !== undefined) {
-      env[name] = value;
-    }
-  }
+  // The same environment the read-only queries get, so a manager is asked
+  // about and acted on through the same daemon and session.
+  const env = toolEnvironment(options.environment ?? process.env);
 
   return {
     async run(command, privilege, runOptions) {
@@ -110,6 +112,11 @@ export function createCommandRunner(options: RunnerOptions = {}): CommandRunner 
       if ("refusal" in escalation) {
         return outcome("denied", null, "", escalation.refusal);
       }
+      // Ctrl+C can land while the journal records that this command is about
+      // to start. A command asked to stop before it began is not begun.
+      if (runOptions.signal.aborted) {
+        return outcome("cancelled", null, "", "Stopped before this command started; it was never run.");
+      }
 
       const [program, ...prefix] = escalation.kind === "none" ? [executable] : escalation.argv;
       const argv = escalation.kind === "none" ? [...command.arguments] : [...prefix, executable, ...command.arguments];
@@ -118,6 +125,7 @@ export function createCommandRunner(options: RunnerOptions = {}): CommandRunner 
         signal: runOptions.signal,
         timeoutMilliseconds,
         env,
+        escalated: escalation.kind !== "none",
       });
       const output = tail(`${result.stdout}${result.stderr}`);
 
@@ -161,7 +169,17 @@ function tail(text: string): string {
   return sanitizeText(kept.toString("utf8"));
 }
 
-const spawnCommand: SpawnLike = (program, argv, options) =>
+const KILL_GRACE_MILLISECONDS = 10_000;
+
+/**
+ * Run one manager command with bounded capture.
+ *
+ * An abort or the time limit sends SIGTERM, and an unescalated command that
+ * is still running after the grace period is killed. An abort that landed
+ * before the spawn still stops the command at once: an abort event fires
+ * only once, and a listener added after it would never hear it.
+ */
+export const spawnCommand: SpawnLike = (program, argv, options) =>
   new Promise((resolvePromise) => {
     let stdout = "";
     let stderr = "";
@@ -174,25 +192,33 @@ const spawnCommand: SpawnLike = (program, argv, options) =>
       env: { ...options.env },
       stdio: [options.interactive ? "inherit" : "ignore", "pipe", "pipe"],
     });
+    let killer: NodeJS.Timeout | undefined;
     const stop = (): void => {
+      if (killer !== undefined || child.exitCode !== null || child.signalCode !== null) {
+        return;
+      }
       child.kill("SIGTERM");
+      if (options.escalated !== true) {
+        killer = setTimeout(() => child.kill("SIGKILL"), options.killGraceMilliseconds ?? KILL_GRACE_MILLISECONDS);
+      }
     };
     const timer = setTimeout(stop, options.timeoutMilliseconds);
+    const settle = (result: SpawnResult): void => {
+      clearTimeout(timer);
+      clearTimeout(killer);
+      options.signal.removeEventListener("abort", stop);
+      resolvePromise(result);
+    };
     options.signal.addEventListener("abort", stop, { once: true });
+    if (options.signal.aborted) {
+      stop();
+    }
     child.stdout?.on("data", (chunk: Buffer) => {
       stdout = keep(stdout, chunk);
     });
     child.stderr?.on("data", (chunk: Buffer) => {
       stderr = keep(stderr, chunk);
     });
-    child.on("error", (error) => {
-      clearTimeout(timer);
-      options.signal.removeEventListener("abort", stop);
-      resolvePromise({ exitCode: null, stdout, stderr, error: error.message });
-    });
-    child.on("close", (code, signal) => {
-      clearTimeout(timer);
-      options.signal.removeEventListener("abort", stop);
-      resolvePromise({ exitCode: code, stdout, stderr, signal });
-    });
+    child.on("error", (error) => settle({ exitCode: null, stdout, stderr, error: error.message }));
+    child.on("close", (code, signal) => settle({ exitCode: code, stdout, stderr, signal }));
   });
