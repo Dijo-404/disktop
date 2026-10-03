@@ -108,6 +108,14 @@ test("disktop report describes this machine as a document that validates", () =>
   assert.ok(document.capacity.filesystems.length > 0);
 });
 
+test("disktop completion prints a script its shell accepts", () => {
+  const result = disktop(["completion", "bash"]);
+  assert.equal(result.status, 0);
+  assert.equal(result.stderr, "");
+  const check = spawnSync("bash", ["-n"], { input: result.stdout, encoding: "utf8" });
+  assert.equal(check.status, 0, check.stderr);
+});
+
 test("structured output goes to stdout and diagnostics stay on stderr", () => {
   const result = disktop(["--json"]);
   assert.doesNotThrow(() => JSON.parse(result.stdout), "stdout must hold only the envelope");
