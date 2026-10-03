@@ -140,6 +140,12 @@ phases that were never published; this is the first version anybody can install.
     directory even where a directory's own size ties with its files (Btrfs).
   - `explore` and `find` over a scan the index has since pruned say which scan to run
     again instead of failing as an internal error.
+- The TUI plans a move to another disk and a compression, which it used to send to
+  `disktop clean plan`: `o` on an Explore entry's review goes on to them, and a dialog
+  that plans nothing asks for the destination (absolute or `~/`; a compression left
+  empty goes beside its source) and, with Tab, whether the source then goes to Trash or
+  is removed permanently. The review shows the destination, and `o` now steps through
+  every operation on offer rather than only the first other one.
 - Category totals no longer compare every finding with every other: at the most
   findings discovery returns, a findings tab redraws in 3 ms instead of half a second.
 - Ctrl+C typed at a terminal reached the helper too (it shared the terminal's process
