@@ -1,6 +1,6 @@
 # Disktop: single-release implementation blueprint
 
-Status: the blueprint the `1.0.0` release candidate was built from. Every feature below is implemented; the tree is the code layout as planned, and where a planned file was folded into a neighbour the tree says which. `disktop` is the npm package and executable name; check registry availability once more immediately before the one publication.
+Status: the blueprint the `1.0.0` release candidate was built from. Every feature below is implemented; the tree is the code layout as planned, and the note under "Target repository layout" says where a planned file was folded into a neighbour. `disktop` is the npm package and executable name; check registry availability once more immediately before the one publication.
 
 ## Release contract
 
