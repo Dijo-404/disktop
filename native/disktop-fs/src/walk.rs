@@ -18,8 +18,15 @@ use std::time::{Duration, Instant};
 /// process descriptor limit with its open directory streams.
 pub const MAX_DEPTH: u32 = 512;
 
+/// A progress snapshot goes out after this many entries or this long,
+/// whichever comes first, so a slow walk still looks alive...
 const PROGRESS_ENTRIES: u64 = 4096;
 const PROGRESS_INTERVAL: Duration = Duration::from_millis(250);
+/// ...and never sooner than this after the last one, however fast the walk
+/// reads. Ten a second is as often as anybody can read a number change, and
+/// a cap in time rather than in entries keeps a fast disk from turning
+/// progress into the bulk of what crosses the pipe.
+const PROGRESS_MIN_INTERVAL: Duration = Duration::from_millis(100);
 
 /// The most individual warnings one scan reports.
 ///
@@ -542,8 +549,9 @@ impl Walk<'_> {
 
     fn report(&mut self, path: &[u8]) {
         self.throttle();
-        if self.since_progress < PROGRESS_ENTRIES
-            && self.last_progress.elapsed() < PROGRESS_INTERVAL
+        let elapsed = self.last_progress.elapsed();
+        if elapsed < PROGRESS_MIN_INTERVAL
+            || (self.since_progress < PROGRESS_ENTRIES && elapsed < PROGRESS_INTERVAL)
         {
             return;
         }
@@ -990,6 +998,38 @@ mod tests {
                 "a 255-byte name did not survive as bytes"
             );
         }
+    }
+
+    #[test]
+    fn a_fast_walk_reports_progress_at_most_ten_times_a_second() {
+        let sandbox = Sandbox::new("walk-progress-rate");
+        for bucket in 0..40 {
+            let directory = format!("bucket-{bucket}");
+            sandbox.directory(directory.as_bytes());
+            for file in 0..500 {
+                std::fs::write(
+                    sandbox.path().join(&directory).join(format!("f{file}")),
+                    b"",
+                )
+                .expect("a sandbox file");
+            }
+        }
+
+        let mut sink = Collector::default();
+        let started = Instant::now();
+        let totals = walk(&options(sandbox.path()), &mut sink, &AtomicBool::new(false)).unwrap();
+        let elapsed = started.elapsed();
+
+        assert_eq!(totals.scanned_entries, 1 + 40 + 40 * 500);
+        // However many entries a second the walk reads, a reader is sent no
+        // more than one snapshot per hundred milliseconds: a fast disk must not
+        // turn progress into the bulk of what crosses the pipe.
+        let allowed = (elapsed.as_millis() / 100) as usize;
+        assert!(
+            sink.progress_calls <= allowed,
+            "{} progress events in {elapsed:?}",
+            sink.progress_calls
+        );
     }
 
     #[test]
