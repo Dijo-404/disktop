@@ -256,6 +256,10 @@ answered with no duplicates.
 | `3` | Scan or action ended incomplete, including partial results. |
 | `130` | Interrupted before a completed or partial result could be reported. |
 
+`--help`, `--version`, and a command line that does not parse are answered from the command table before anything else runs: no configuration is read and, as root, the install is not inspected, so help is available even where every real command would refuse to start. A refused command line exits `2` with its reason on stderr and nothing on stdout; with `--json` the reason is instead one `invalid-input` error envelope on stdout. Anything a command did not expect is reported as one sanitized line (or one `internal-error` envelope) and exit `2`, never as a stack trace.
+
+A reader that stops early — `disktop devices | head -1` — is not an error: the rest of the output is dropped, the command finishes, and it exits with its own status. Any other failure to write stdout, such as a full disk behind a redirect, is reported on stderr and exits `2`, because nobody received the answer.
+
 An alert threshold is an expected monitoring outcome, so `1` is reserved for that command: `disktop --json` reports the same alerts and still exits `0`. Incomplete reporting takes precedence over both, so an `alerts check` that reached a threshold on readings it could not complete exits `3` rather than `1`; an alert drawn from partial readings is not the whole picture. Contract tests must check stdout, stderr, status, and schema together.
 
 An inventory is incomplete whenever anything could not be read: a mount whose `statfs` was denied, a missing `lsblk`, an unparsable `mountinfo` line, or a configuration file that could not be applied. Each one adds a warning naming what was missed, and no missing reading is ever reported as a zero.
