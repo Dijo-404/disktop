@@ -29,6 +29,7 @@
     "dist/**/*.js",
     "vendor/bin/disktop-fs-linux-*",
     "vendor/bin/SHA256SUMS",
+    "!vendor/bin/README.md",
     "schemas/cli/v1/*.json",
     "schemas/cli/v1/README.md",
     "README.md",
