@@ -19,10 +19,18 @@ Rules the schemas enforce rather than merely document:
   `status: "incomplete"` requires at least one warning.
 - A missing tool or denied permission is a `capability`, never a zero.
 
-`dashboard.json`, `devices.json`, and `alerts.json` cover the implemented commands;
-`error.json` covers a command that cannot produce its payload, including one that is
-declared but not yet built. Exit `1` belongs to `alerts check` alone: the dashboard
-reports the same alerts and still exits `0`.
+Each command's file narrows the envelope for that command; `error.json` covers a
+command that cannot produce its payload, including one that is declared but not yet
+built. Exit `1` belongs to `alerts check` alone: the dashboard reports the same alerts
+and still exits `0`.
+
+`report-document.json` is the one schema here that is not an envelope. It is the
+standalone document `disktop report --format json` writes: a file somebody keeps, so it
+carries its own `schemaVersion`, `generatedAt`, and generator version, and each of its
+sections says whether it is complete. It reuses the definitions in `common.json`, so a
+filesystem, an entry, or a finding has one shape whether it arrives in a report or in
+`--json` output. `report.json` is the envelope `report --output FILE --json` writes about
+the file it published.
 
 `examples/valid/` and `examples/invalid/` are checked by `tests/contract/cli-schema.test.mjs`.
 Each file is named `<schema>.<case>.json`, and the invalid cases exist to prove a rule

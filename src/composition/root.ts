@@ -10,6 +10,7 @@ import { createDuplicateService } from "../application/duplicates.js";
 import { createFindService, type FindService } from "../application/find.js";
 import { createFootprintService, type FootprintService } from "../application/footprint.js";
 import { createPlanService, type PlanService } from "../application/plan-action.js";
+import { createReportService, type ReportService } from "../application/report.js";
 import { createUndoService, type UndoService } from "../application/undo.js";
 import { createScanService, type ScanService } from "../application/scan.js";
 import { createSnapshotService, type SnapshotService } from "../application/snapshots.js";
@@ -47,6 +48,7 @@ import type { RetentionLimits } from "../ports/snapshots.js";
 import { loadConfigFile } from "../storage/config.js";
 import { ruleSlug } from "../providers/rules/index.js";
 import { createPlanStore } from "../storage/plans.js";
+import { createReportFiles } from "../storage/report-files.js";
 import { ruleHash } from "../storage/rules.js";
 import { createSnapshotStore } from "../storage/snapshots.js";
 import { resolveLocations } from "../storage/xdg.js";
@@ -68,6 +70,7 @@ export interface Services {
   readonly apply: ApplyService;
   readonly undo: UndoService;
   readonly find: FindService;
+  readonly report: ReportService;
   readonly scanDefaults: {
     readonly accounting: Accounting;
     readonly crossFilesystems: boolean;
@@ -277,6 +280,14 @@ export async function createServices(options: CompositionOptions = {}): Promise<
     explore,
     snapshots,
     footprint,
+    report: createReportService({
+      dashboard,
+      snapshots,
+      explore,
+      footprint,
+      files: createReportFiles(),
+      effectiveUserId: process.geteuid?.() ?? -1,
+    }),
     scanDefaults: {
       accounting: config.scan.accounting,
       crossFilesystems: config.scan.crossFilesystems,

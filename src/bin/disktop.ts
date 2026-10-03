@@ -46,6 +46,7 @@ async function buildContext(): Promise<CliContext> {
       restore: (journalId, signal) => services.undo.restore(journalId, signal),
       find: (request, signal) => services.find.find(request, signal),
     },
+    report: services.report,
     // Ctrl+C asks a running command to stop at a safe boundary; it does not
     // tear the process down and leave the work unreported.
     startupWarnings: services.startupWarnings,

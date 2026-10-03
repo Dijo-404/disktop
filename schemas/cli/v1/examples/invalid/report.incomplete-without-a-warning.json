@@ -1,0 +1,16 @@
+{
+  "schemaVersion": "1",
+  "command": "report",
+  "generatedAt": "2026-09-29T08:15:04.117Z",
+  "status": "incomplete",
+  "exitCode": 3,
+  "data": {
+    "format": "html",
+    "output": {
+      "bytesBase64": "L2hvbWUvZXhhbXBsZS9yZXBvcnQuaHRtbA==",
+      "display": "/home/example/report.html"
+    },
+    "bytesWritten": "48213",
+    "sections": ["capacity", "findings"]
+  }
+}

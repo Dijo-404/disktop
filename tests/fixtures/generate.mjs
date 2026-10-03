@@ -143,6 +143,63 @@ async function buildStandardFixture(root) {
 }
 
 /**
+ * Names chosen to break an export: a spreadsheet formula, a script tag,
+ * quotes and commas, line breaks, terminal escapes, a direction override,
+ * bytes that are not UTF-8, an emoji, and the longest name Linux allows.
+ * Each is a file of a different size at the top of the tree, beside a
+ * directory with a hostile name of its own holding one more, so a report
+ * lists them as files, as a subtree, and in a ranking.
+ */
+export const HOSTILE_NAMES = [
+  ["formula", Buffer.from("=cmd|' /C calc'!A0")],
+  ["formula-at", Buffer.from("@SUM(1+1)")],
+  ["formula-plus", Buffer.from("+1+1")],
+  ["formula-minus", Buffer.from("-2+3")],
+  // A name cannot hold a slash, so this one spans a directory and a file and
+  // the path a report shows reads `<script>alert(1)</script>`.
+  ["script", Buffer.from("<script>alert(1)</script>")],
+  ["quoted", Buffer.from('"quoted", with a comma')],
+  ["ampersand", Buffer.from("a&b<c>d'e&amp;")],
+  ["newline", Buffer.from("first\nsecond\r\nthird")],
+  ["escape", Buffer.from("\u001b[31mred\u001b[0m")],
+  ["tab", Buffer.from("\t=1+1")],
+  // U+202E, RIGHT-TO-LEFT OVERRIDE, written as its UTF-8 bytes so this file
+  // holds no invisible character of its own.
+  ["bidi", Buffer.concat([Buffer.from("invoice"), Buffer.from([0xe2, 0x80, 0xae]), Buffer.from("txt.exe")])],
+  ["invalid-utf8", Buffer.from([0x62, 0x61, 0x64, 0x2d, 0xff, 0xfe, 0x2e, 0x62, 0x69, 0x6e])],
+  ["emoji", Buffer.from("report \u{1F4C4}.txt")],
+  ["formula-extension", Buffer.from("data.=1+1")],
+  ["long", Buffer.from("l".repeat(255))],
+];
+
+export async function createHostileNameFixture() {
+  const root = await sandbox();
+  try {
+    const manifest = [];
+    const parent = bytePath(root, Buffer.from("<b>=HYPERLINK(\"x\")"));
+    await mkdir(parent);
+    for (const [index, [name, nameBytes]] of HOSTILE_NAMES.entries()) {
+      const path = bytePath(root, nameBytes);
+      await mkdir(path.subarray(0, path.lastIndexOf(0x2f)), { recursive: true });
+      // Different sizes, so a ranking by size has an order to get right.
+      await writeFile(path, "x".repeat(4096 * (index + 1)));
+      manifest.push({ name, path, bytes: Buffer.from(path) });
+    }
+    const nested = Buffer.concat([parent, Buffer.from("/"), Buffer.from("inner <i>&amp;<i>.log")]);
+    await writeFile(nested, "y".repeat(8192));
+    manifest.push({ name: "nested", path: nested, bytes: Buffer.from(nested) });
+    manifest.push({ name: "hostile-directory", path: parent, bytes: Buffer.from(parent) });
+
+    const fixture = { root, manifest };
+    fixture.cleanup = sandboxCleanup(fixture);
+    return fixture;
+  } catch (error) {
+    await rm(assertSandbox(root), { recursive: true, force: true });
+    throw error;
+  }
+}
+
+/**
  * A wide, shallow tree for the memory and scan-time budget.
  *
  * `bytesPerFile` gives the files real content, which is what makes an

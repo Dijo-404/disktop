@@ -7,6 +7,7 @@ import { runClean } from "./commands/clean.js";
 import { runDashboard } from "./commands/dashboard.js";
 import { runDevices } from "./commands/devices.js";
 import { runExplore } from "./commands/explore.js";
+import { runReport } from "./commands/report.js";
 import { runScan } from "./commands/scan.js";
 import { runSnapshots } from "./commands/snapshots.js";
 import { runTimer } from "./commands/timer.js";
@@ -133,6 +134,16 @@ export async function runCli(args: readonly string[], context: CliContext): Prom
   }
   if (name === "timer") {
     return runTimer(withUnits, { asJson, action: parsed.operand ?? "" });
+  }
+  if (name === "report") {
+    return runReport(withUnits, {
+      asJson,
+      ...(optional(parsed, "format")),
+      ...(optional(parsed, "output")),
+      ...(optional(parsed, "path")),
+      ...(optional(parsed, "limit")),
+      findings: parsed.flags.has("findings"),
+    });
   }
   if (name === "alerts check") {
     const threshold = parseThreshold(parsed.values.get("threshold"));
