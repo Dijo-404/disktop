@@ -79,6 +79,14 @@ filesystem mounted anywhere inside it, or one Disktop cannot read all the way do
 is refused at planning time. The window between that last digest and the syscall
 remains, as the race below describes.
 
+No action goes more than 512 directories below a reviewed one — the same ceiling
+as the scan's walk. Reviewing, copying, archiving, and removing a tree each keep
+their directories on an explicit stack with one descriptor open per level, so no
+tree is deep enough to overflow the helper's stack partway through an item; a
+deeper one is refused when it is planned, and refused again before anything in
+it is touched, rather than half-processed. The helper raises its own descriptor
+soft limit to the hard limit at startup so a tree at the ceiling fits.
+
 The identity comparison is the device, inode, type, size, and modification time. The
 kernel's mount id travels with them as context and is not compared, because the Node
 side cannot read it and would be sending a number it invented.

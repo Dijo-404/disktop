@@ -1282,6 +1282,9 @@ fn stage_copy(
 }
 
 fn describe_copy(error: std::io::Error) -> (&'static str, String) {
+    if crate::subtree::is_too_deep(&error) {
+        return ("invalid-arguments", crate::subtree::TOO_DEEP.to_owned());
+    }
     let code = match error.raw_os_error() {
         Some(libc::ENOSPC) | Some(libc::EDQUOT) => "no-space",
         Some(libc::EACCES) | Some(libc::EPERM) => "permission-denied",
@@ -2302,19 +2305,53 @@ fn remove_entry(parent: libc::c_int, name: &[u8], kind: EntryKind) -> std::io::R
 /// `openat2` without mount crossing is what refuses a nested mount: a tree with
 /// something mounted inside it fails rather than deleting through the mount
 /// point, and the item reports why.
+///
+/// The directories being emptied are kept on an explicit stack rather than the
+/// call stack, so no tree is deep enough to crash the helper halfway through a
+/// removal; past `subtree::MAX_DEPTH` levels it stops with an error instead.
+/// A directory is only ever removed once everything below it has gone.
 fn remove_children(descriptor: libc::c_int) -> std::io::Result<()> {
-    let mut stream = sys::Directory::from_descriptor(descriptor)?;
+    struct Frame {
+        directory: sys::Directory,
+        names: Vec<Vec<u8>>,
+        /// The name this directory has in the one above it, which is what is
+        /// removed once it is empty. The top directory is the caller's.
+        entered_as: Option<Vec<u8>>,
+    }
+
     // One directory's names are read before any of them is removed: what
     // `readdir` returns after entries have been unlinked under it is
     // unspecified, and a walk that silently missed one would report a tree as
     // gone while something was still in it. Memory follows the widest
-    // directory, not the size of the tree.
-    let mut names = Vec::new();
-    while let Some(name) = stream.next_name()? {
-        names.push(name);
+    // directory times the depth, not the size of the tree.
+    fn enter(descriptor: libc::c_int, entered_as: Option<Vec<u8>>) -> std::io::Result<Frame> {
+        let mut directory = sys::Directory::from_descriptor(descriptor)?;
+        let mut names = Vec::new();
+        while let Some(name) = directory.next_name()? {
+            names.push(name);
+        }
+        names.reverse();
+        Ok(Frame {
+            directory,
+            names,
+            entered_as,
+        })
     }
-    let descriptor = stream.descriptor();
-    for name in names {
+
+    let mut stack = vec![enter(descriptor, None)?];
+    while let Some(frame) = stack.last_mut() {
+        let Some(name) = frame.names.pop() else {
+            let finished = stack.pop().expect("the frame being read is on the stack");
+            let entered_as = finished.entered_as.clone();
+            // Closed before it is removed, so nothing holds the directory open
+            // while its name goes.
+            drop(finished);
+            if let (Some(name), Some(above)) = (entered_as, stack.last()) {
+                sys::unlinkat(above.directory.descriptor(), &name, true)?;
+            }
+            continue;
+        };
+        let descriptor = frame.directory.descriptor();
         let metadata = match sys::metadata_at(descriptor, &name) {
             Ok(metadata) => metadata,
             // Something else removed it first. The outcome is the one asked
@@ -2322,18 +2359,25 @@ fn remove_children(descriptor: libc::c_int) -> std::io::Result<()> {
             Err(error) if error.raw_os_error() == Some(libc::ENOENT) => continue,
             Err(error) => return Err(error),
         };
-        if metadata.kind == EntryKind::Directory {
-            let child = open_for_removal(descriptor, &name)?;
-            remove_children(child)?;
-            sys::unlinkat(descriptor, &name, true)?;
-        } else {
+        if metadata.kind != EntryKind::Directory {
             sys::unlinkat(descriptor, &name, false)?;
+            continue;
         }
+        // The frames on the stack are this directory's ancestors below the
+        // one being emptied, so their count is how deep it is.
+        if stack.len() > crate::subtree::MAX_DEPTH {
+            return Err(crate::subtree::too_deep());
+        }
+        let child = open_for_removal(descriptor, &name)?;
+        stack.push(enter(child, Some(name))?);
     }
     Ok(())
 }
 
 fn describe_removal(error: &std::io::Error) -> (&'static str, String) {
+    if crate::subtree::is_too_deep(error) {
+        return ("invalid-arguments", crate::subtree::TOO_DEEP.to_owned());
+    }
     match error.raw_os_error() {
         Some(libc::EXDEV) | Some(libc::ELOOP) => (
             "protected-path",
@@ -2783,6 +2827,199 @@ fn parent_path(path: &[u8]) -> Vec<u8> {
 mod tests {
     use super::*;
     use crate::testing::Sandbox;
+
+    fn joined(sandbox: &Sandbox, relative: &[u8]) -> Vec<u8> {
+        let mut path = sandbox.bytes();
+        path.push(b'/');
+        path.extend_from_slice(relative);
+        path
+    }
+
+    /// What a reviewed plan would hold for a live path. A directory too deep
+    /// to digest gets a digest that matches nothing, which is the most a plan
+    /// could ever carry for one.
+    fn reviewed(path: &[u8], reviewed_bytes: u64) -> Target {
+        let parent = guard::resolve_parent(path).expect("the path resolves");
+        let live = sys::metadata_at(parent.descriptor(), &parent.name).expect("it is there");
+        let subtree = (live.kind == EntryKind::Directory).then(|| {
+            crate::subtree::digest(parent.descriptor(), &parent.name, &NEVER_CANCELLED).unwrap_or(
+                crate::subtree::Subtree {
+                    entries: 0,
+                    digest: [0; 32],
+                },
+            )
+        });
+        Target {
+            path: path.to_vec(),
+            expected: Fingerprint {
+                device: live.device,
+                inode: live.inode,
+                mount_id: live.mount_id,
+                kind: live.kind,
+                apparent_bytes: live.apparent_bytes,
+                modified_nanoseconds: live.modified_nanoseconds,
+            },
+            reviewed_bytes,
+            subtree,
+        }
+    }
+
+    /// Run an action on a thread with the stack a helper worker gets, so a
+    /// walk that recursed once per level would overflow here exactly as it
+    /// would in the helper.
+    fn on_a_worker<T: Send + 'static>(work: impl FnOnce() -> T + Send + 'static) -> T {
+        std::thread::Builder::new()
+            .spawn(work)
+            .unwrap()
+            .join()
+            .expect("the action returned rather than crashing")
+    }
+
+    fn collect(
+        run: impl FnOnce(&mut dyn FnMut(ItemReport)) -> Result<ActionSummary, ActionRefusal>,
+    ) -> (Result<ActionSummary, ActionRefusal>, Vec<ItemReport>) {
+        let mut items = Vec::new();
+        let summary = run(&mut |item| items.push(item));
+        (summary, items)
+    }
+
+    fn bottom_exists(sandbox: &Sandbox, relative: &[u8], levels: usize) -> bool {
+        let mut path = joined(sandbox, relative);
+        let mut descriptor = sys::open_root(&path).expect("the top of the chain");
+        for _ in 0..levels {
+            let Ok(next) = sys::open_child_directory(descriptor, b"d", false) else {
+                sys::close(descriptor);
+                return false;
+            };
+            sys::close(descriptor);
+            descriptor = next;
+        }
+        let found = sys::metadata_at(descriptor, b"bottom").is_ok();
+        sys::close(descriptor);
+        path.clear();
+        found
+    }
+
+    #[test]
+    fn erasing_a_tree_ten_thousand_levels_deep_refuses_and_leaves_it_whole() {
+        crate::testing::raise_descriptor_limit();
+        let sandbox = Sandbox::new("erase-very-deep");
+        sandbox.directory(b"state");
+        sandbox.deep_directory(b"tree", 10_000);
+        let request = EraseRequest {
+            plan_id: "plan-0123456789abcd".to_owned(),
+            journal_directory: sandbox.path().join("state"),
+            targets: vec![reviewed(&joined(&sandbox, b"tree"), 0)],
+        };
+
+        let (summary, items) = on_a_worker(move || {
+            collect(|report| run_erase(&request, report, &AtomicBool::new(false)))
+        });
+
+        let summary = summary.ok().expect("the action ran");
+        assert_eq!(summary.completed, 0);
+        assert_eq!(items[0].outcome, Outcome::Failed);
+        assert_eq!(items[0].reason, Some("invalid-arguments"));
+        assert!(
+            bottom_exists(&sandbox, b"tree", 10_000),
+            "nothing was removed"
+        );
+    }
+
+    #[test]
+    fn a_tree_as_deep_as_the_limit_is_erased_completely() {
+        crate::testing::raise_descriptor_limit();
+        let sandbox = Sandbox::new("erase-at-limit");
+        sandbox.directory(b"state");
+        sandbox.deep_directory(b"tree", crate::subtree::MAX_DEPTH);
+        let request = EraseRequest {
+            plan_id: "plan-0123456789abcd".to_owned(),
+            journal_directory: sandbox.path().join("state"),
+            targets: vec![reviewed(&joined(&sandbox, b"tree"), 0)],
+        };
+
+        let (summary, items) = on_a_worker(move || {
+            collect(|report| run_erase(&request, report, &AtomicBool::new(false)))
+        });
+
+        assert_eq!(
+            summary.ok().expect("the action ran").completed,
+            1,
+            "{:?}",
+            items[0].message
+        );
+        assert!(!sandbox.path().join("tree").exists());
+    }
+
+    #[test]
+    fn a_removal_that_meets_a_tree_deeper_than_the_limit_stops_without_crashing() {
+        crate::testing::raise_descriptor_limit();
+        let sandbox = Sandbox::new("remove-past-limit");
+        sandbox.deep_directory(b"tree", crate::subtree::MAX_DEPTH + 5);
+        let root = sandbox.bytes();
+        let outcome = on_a_worker(move || {
+            let parent = sys::open_root(&root).unwrap();
+            let outcome = remove_entry(parent, b"tree", EntryKind::Directory);
+            sys::close(parent);
+            outcome
+        });
+        let error = outcome.expect_err("too deep to remove");
+        assert!(crate::subtree::is_too_deep(&error), "{error}");
+        assert_eq!(describe_removal(&error).0, "invalid-arguments");
+    }
+
+    #[test]
+    fn a_tree_as_deep_as_the_limit_is_moved_and_compressed_whole() {
+        crate::testing::raise_descriptor_limit();
+        let sandbox = Sandbox::new("move-at-limit");
+        sandbox.directory(b"state");
+        sandbox.directory(b"elsewhere");
+        sandbox.deep_directory(b"moved", crate::subtree::MAX_DEPTH);
+        sandbox.deep_directory(b"packed", crate::subtree::MAX_DEPTH);
+        let state = sandbox.path().join("state");
+        let moving = CopyMoveRequest {
+            plan_id: "plan-0123456789abcd".to_owned(),
+            journal_directory: state.clone(),
+            home_trash_directory: joined(&sandbox, b"trash-home"),
+            destination_directory: joined(&sandbox, b"elsewhere"),
+            source_disposition: SourceDisposition::Permanent,
+            targets: vec![reviewed(&joined(&sandbox, b"moved/d"), 0)],
+        };
+        let packing = CompressRequest {
+            plan_id: "plan-0123456789abcd".to_owned(),
+            journal_directory: state,
+            home_trash_directory: joined(&sandbox, b"trash-home"),
+            destination_directory: Vec::new(),
+            source_disposition: SourceDisposition::Permanent,
+            targets: vec![reviewed(&joined(&sandbox, b"packed/d"), 0)],
+        };
+
+        let ((moved, move_items), (packed, pack_items)) = on_a_worker(move || {
+            (
+                collect(|report| run_copy_move(&moving, report, &AtomicBool::new(false))),
+                collect(|report| run_compress(&packing, report, &AtomicBool::new(false))),
+            )
+        });
+
+        assert_eq!(
+            moved.ok().expect("the move ran").completed,
+            1,
+            "{:?}",
+            move_items[0].message
+        );
+        assert!(
+            bottom_exists(&sandbox, b"elsewhere", crate::subtree::MAX_DEPTH),
+            "the bottom of the tree arrived"
+        );
+        assert!(!sandbox.path().join("moved/d").exists());
+        assert_eq!(
+            packed.ok().expect("the compress ran").completed,
+            1,
+            "{:?}",
+            pack_items[0].message
+        );
+        assert!(sandbox.path().join("packed/d.tar.zst").exists());
+    }
 
     #[test]
     fn a_removal_never_descends_into_another_filesystem() {
