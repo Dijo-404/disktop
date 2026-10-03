@@ -15,6 +15,7 @@ import {
 } from "../output.js";
 import { entryLines, ownerLines, typeTotalLines, warningLines } from "../text.js";
 import type { Warning } from "../../domain/models.js";
+import { StaleScanIndex } from "../../domain/errors.js";
 
 export interface ExploreOptions {
   readonly asJson: boolean;
@@ -74,19 +75,34 @@ export async function runExplore(context: CliContext, options: ExploreOptions): 
     return refuse(context, options.asJson, "invalid-input", "'--older-than' accepts a whole number of days.");
   }
 
-  const outcome = await context.storage.explore.page({
-    scanId: snapshot.scanId,
-    // The path narrows the listing to that subtree. Using it only to choose a
-    // snapshot would answer with the largest entries in the whole scan while
-    // appearing to answer about this directory.
-    filter: { ...filter, underPath: wanted },
-    sort: options.sort ?? "allocated",
-    order: options.order ?? "descending",
-    limit: boundedLimit(options.limit === undefined ? undefined : Number(options.limit)),
-    ...(options.cursor === undefined ? {} : { cursor: options.cursor }),
-    includeTypeTotals: options.typeTotals,
-    ...(options.owners === true ? { includeOwnerTotals: true } : {}),
-  });
+  // The index keeps only the newest scans, so a snapshot can outlive its rows.
+  // That is a reason to scan again, and it is said as one.
+  let outcome: Awaited<ReturnType<typeof context.storage.explore.page>>;
+  try {
+    outcome = await context.storage.explore.page({
+      scanId: snapshot.scanId,
+      // The path narrows the listing to that subtree. Using it only to choose a
+      // snapshot would answer with the largest entries in the whole scan while
+      // appearing to answer about this directory.
+      filter: { ...filter, underPath: wanted },
+      sort: options.sort ?? "allocated",
+      order: options.order ?? "descending",
+      limit: boundedLimit(options.limit === undefined ? undefined : Number(options.limit)),
+      ...(options.cursor === undefined ? {} : { cursor: options.cursor }),
+      includeTypeTotals: options.typeTotals,
+      ...(options.owners === true ? { includeOwnerTotals: true } : {}),
+    });
+  } catch (error) {
+    if (error instanceof StaleScanIndex) {
+      return refuse(
+        context,
+        options.asJson,
+        "invalid-input",
+        `The index no longer holds the scan that covered ${wanted.display}. Run 'disktop scan ${wanted.display}' and explore again.`,
+      );
+    }
+    throw error;
+  }
 
   if (outcome.kind === "unavailable") {
     return refuse(
