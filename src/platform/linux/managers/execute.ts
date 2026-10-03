@@ -61,6 +61,7 @@ export function createManagerExecutor(options: ManagerExecutorOptions): Pick<Act
         const skipped = new Map(preflight.skipped);
         const attempted = new Set<number>();
         const runs: CommandRun[] = [];
+        const exitFailures = new Map<number, string>();
         let stopped: string | undefined;
 
         for (const [index, command] of scope.commands.entries()) {
@@ -95,20 +96,24 @@ export function createManagerExecutor(options: ManagerExecutorOptions): Pick<Act
           });
           runs.push(run);
 
-          if (run.status === "ran") {
+          if (run.status === "ran" || run.status === "cancelled") {
             for (const position of positions) {
               if (!skipped.has(position)) {
                 attempted.add(position);
+                if (scope.perItem && run.status === "ran" && run.exitCode !== 0) {
+                  exitFailures.set(position, `${command.tool} exited with status ${String(run.exitCode)}, so Disktop does not count it as removed.`);
+                }
               }
+            }
+            if (run.status === "cancelled") {
+              stopped = NOT_RUN;
             }
             continue;
           }
           stopped =
             run.status === "denied"
               ? `Administrator rights were refused: ${run.explanation}`
-              : run.status === "cancelled"
-                ? NOT_RUN
-                : run.explanation;
+              : run.explanation;
           for (const position of positions) {
             if (!skipped.has(position)) {
               skipped.set(position, stopped);
@@ -123,10 +128,14 @@ export function createManagerExecutor(options: ManagerExecutorOptions): Pick<Act
           if (reason !== undefined) {
             return { position: String(position), outcome: "skipped", message: reason };
           }
-          const verdict = verification.verdicts.get(position) ?? {
-            outcome: "failed" as const,
-            message: "Disktop could not confirm the manager removed it.",
-          };
+          const exited = exitFailures.get(position);
+          const verdict =
+            exited !== undefined
+              ? { outcome: "failed" as const, message: exited }
+              : (verification.verdicts.get(position) ?? {
+                  outcome: "failed" as const,
+                  message: "Disktop could not confirm the manager removed it.",
+                });
           return {
             position: String(position),
             outcome: verdict.outcome,

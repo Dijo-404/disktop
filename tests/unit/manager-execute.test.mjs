@@ -199,3 +199,27 @@ test("a manager this machine has no adapter for is a missing capability", async 
   });
   await assert.rejects(executor.apply(plan, SIGNAL), (error) => error.capability?.status === "missing-tool");
 });
+
+test("a command cancelled while it ran is verified, not recorded as never run", async () => {
+  const { calls, executor } = harness({
+    runs: [{ status: "cancelled", exitCode: null, output: "", explanation: "Stopped while the command was running." }],
+    gone: [IDS[0]],
+  });
+  await executor.apply(containersPlan(2), new AbortController().signal);
+  const finish = calls.find((call) => call.operation === "manager-finish").arguments;
+  assert.equal(finish.items[0].outcome, "completed", "the manager removed it before it was stopped");
+  assert.notEqual(finish.items[0].message, "Stopped before this command; it was never run.");
+  assert.equal(finish.items[1].outcome, "skipped");
+});
+
+test("a per-item command that exited non-zero is never counted as done, whatever a listing says", async () => {
+  const { calls, executor } = harness({
+    runs: [{ status: "ran", exitCode: 1, output: "Error: container is running", explanation: "docker exited with status 1." }],
+  });
+  const result = await executor.apply(containersPlan(2), SIGNAL);
+  const finish = calls.find((call) => call.operation === "manager-finish").arguments;
+  assert.equal(finish.items[0].outcome, "failed");
+  assert.match(finish.items[0].message, /exited/);
+  assert.equal(finish.items[1].outcome, "completed");
+  assert.equal(result.state, "partial");
+});
