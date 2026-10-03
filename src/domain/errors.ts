@@ -53,3 +53,14 @@ export class CapabilityUnavailable extends Error {
     this.capability = capability;
   }
 }
+
+/** Raised before any command runs when Disktop may not start here at all. */
+export class StartupRefused extends Error {
+  readonly failure: OperationFailure;
+
+  constructor(failure: OperationFailure) {
+    super(failure.message);
+    this.name = "StartupRefused";
+    this.failure = failure;
+  }
+}
