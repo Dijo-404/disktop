@@ -133,7 +133,10 @@ is never a reason to try another way.
 Under EUID 0, Disktop starts only from a root-owned install: every entry of the
 package, and every directory above it, must be owned by root and closed to other
 accounts, or it refuses with `permission-denied`, because root running code an ordinary
-account can change is that account running as root. Inside an unprivileged user
+account can change is that account running as root. A link inside the package must
+lead somewhere inside it, and the Node.js binary itself is held to the same rule as
+the package, so `sudo env PATH=$PATH disktop` with Node from a version manager in a
+home directory is refused too. Inside an unprivileged user
 namespace, where EUID 0 has only its creator's power, this is not required. Running as
 root, Disktop plans and applies no change to a file itself, the helper refuses every
 user-file mutation from its side as well, and reconciliation releases nothing a crash
