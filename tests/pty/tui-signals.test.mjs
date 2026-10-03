@@ -49,7 +49,8 @@ test("a signal during an action waits for it to journal its item, however long t
       return original(request, signal);
     };
     setTimeout(async () => {
-      keys("2"); await wait(100); keys("c"); await wait(100); keys("y"); await wait(200);
+      // The review is read for longer than the type-ahead guard before y.
+      keys("2"); await wait(100); keys("c"); await wait(600); keys("y"); await wait(200);
       process.kill(process.pid, "SIGTERM");
     }, 200);
     await runTui({ services, units: "iec", theme: ASCII_THEME, createRenderer: async () => renderer });
@@ -71,7 +72,7 @@ test("Ctrl+C at a sudo password prompt cancels the action and the TUI carries on
       return original(request, signal);
     };
     setTimeout(async () => {
-      keys("3"); await wait(100); keys("c"); await wait(100);
+      keys("3"); await wait(100); keys("c"); await wait(600);
       for (const key of ["y", "e", "s", "ENTER"]) keys(key);
       await wait(300);
       process.kill(process.pid, "SIGINT");
