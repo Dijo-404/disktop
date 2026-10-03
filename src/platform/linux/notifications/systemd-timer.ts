@@ -36,8 +36,8 @@ export function createSystemdUserTimer(options: SystemdTimerOptions): UserTimerP
     try {
       const text = await readFile(pathOf(name), "utf8");
       return text.startsWith(TIMER_MARKER) ? "ours" : "foreign";
-    } catch {
-      return "absent";
+    } catch (error) {
+      return (error as NodeJS.ErrnoException).code === "ENOENT" ? "absent" : "foreign";
     }
   }
 
@@ -73,12 +73,21 @@ export function createSystemdUserTimer(options: SystemdTimerOptions): UserTimerP
 
     async uninstall() {
       const capability = await probe();
-      if (capability.status === "available") {
+      const owners = await Promise.all(names.map(ownership));
+      if (owners.includes("foreign")) {
+        return outcome(
+          capability,
+          owners.map((owner) => (owner === "foreign" ? "kept-foreign" : owner === "ours" ? "written" : "absent")),
+          false,
+          true,
+        );
+      }
+      if (capability.status === "available" && owners[1] === "ours") {
         await systemctl(["--user", "disable", "--now", TIMER_UNIT]);
       }
       const states: UnitState[] = [];
-      for (const name of names) {
-        const owner = await ownership(name);
+      for (const [index, name] of names.entries()) {
+        const owner = owners[index];
         if (owner === "ours") {
           await unlink(pathOf(name));
           states.push("removed");
