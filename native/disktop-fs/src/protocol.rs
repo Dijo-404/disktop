@@ -282,6 +282,8 @@ struct FilterArguments {
     #[serde(default)]
     under_path: Option<String>,
     #[serde(default)]
+    at_path: Option<String>,
+    #[serde(default)]
     parent_id: Option<String>,
     #[serde(default)]
     name_contains: Option<String>,
@@ -884,6 +886,33 @@ fn query_index(responder: &Responder, arguments: Map<String, Value>) {
                     responder,
                     "internal-error",
                     &format!("The subtree could not be resolved: {error}"),
+                );
+            }
+        }
+    }
+
+    // The row at exactly one path, resolved the same way and refused the same
+    // way when the scan never saw it: an empty page would read as "there is
+    // nothing there", which is a different answer.
+    if let Some(encoded) = &arguments.filter.at_path {
+        let path = match decode_path(encoded) {
+            Ok(path) => path,
+            Err(message) => return fail(responder, "invalid-arguments", &message),
+        };
+        match crate::index::subtree_range(&connection, &path) {
+            Ok(None) => {
+                return fail(
+                    responder,
+                    "invalid-arguments",
+                    "That path is not in this scan. Scan it before exploring it.",
+                );
+            }
+            Ok(Some((own, _))) => request.filter.at = Some(own),
+            Err(error) => {
+                return fail(
+                    responder,
+                    "internal-error",
+                    &format!("The path could not be resolved: {error}"),
                 );
             }
         }
@@ -2126,7 +2155,7 @@ fn query_request(arguments: &QueryIndexArguments) -> Result<QueryRequest, String
     Ok(QueryRequest {
         scan_id: arguments.scan_id.clone(),
         filter: EntryFilter {
-            // Resolved against the index once the connection is open.
+            // Both resolved against the index once the connection is open.
             under: None,
             at: None,
             parent_id: optional_u64(filter.parent_id.as_deref(), "parentId")?
@@ -2702,6 +2731,52 @@ mod tests {
                 .unwrap()
                 .contains("not in this scan")
         );
+    }
+
+    #[test]
+    fn a_query_at_a_path_answers_with_that_one_row_and_refuses_a_path_never_scanned() {
+        let sandbox = Sandbox::new("protocol-at-path");
+        sandbox.directory(b"index");
+        sandbox.directory(b"projects");
+        sandbox.file(b"projects/big.bin", 200_000);
+        let index = sandbox.path().join("index");
+        let index_bytes = index.as_os_str().as_bytes();
+
+        let scan = session(
+            &[scan_request("scan-1", &sandbox.bytes(), index_bytes)],
+            |events| terminal(events, "scan-1"),
+        );
+        let scan_id = scan.last().unwrap()["result"]["scanId"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+
+        let at = |request_id: &str, path: &[u8]| {
+            format!(
+                "{{\"protocolVersion\":1,\"requestId\":\"{request_id}\",\"operation\":\"query-index\",\
+                  \"arguments\":{{\"scanId\":\"{scan_id}\",\"indexDirectory\":\"{}\",\
+                  \"filter\":{{\"atPath\":\"{}\"}},\"sort\":\"allocated\",\"order\":\"descending\",\
+                  \"limit\":\"10\"}}}}\n",
+                crate::base64::encode(index_bytes),
+                crate::base64::encode(path),
+            )
+        };
+        let mut projects = sandbox.bytes();
+        projects.extend_from_slice(b"/projects");
+        let mut absent = sandbox.bytes();
+        absent.extend_from_slice(b"/never-created");
+        let output = responses(&format!("{}{}", at("at-1", &projects), at("at-2", &absent)));
+
+        // The directory's own row, not the larger file below it.
+        let entries = output[0]["result"]["entries"].as_array().expect("a page");
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0]["path"], crate::base64::encode(&projects));
+        assert_eq!(entries[0]["kind"], "directory");
+        assert!(output[0]["result"]["nextCursor"].is_null());
+
+        // A path the scan never saw is refused as `underPath` refuses one.
+        assert_eq!(output[1]["event"], "error");
+        assert_eq!(output[1]["error"]["code"], "invalid-arguments");
     }
 
     #[test]

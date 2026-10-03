@@ -54,6 +54,8 @@ export type EntryKindFilter = IndexedEntry["kind"];
 export interface EntryFilter {
   /** Restrict the page to this path and everything below it. */
   readonly underPath?: RawPath;
+  /** Restrict the page to the one entry at exactly this path, if the scan holds it. */
+  readonly atPath?: RawPath;
   readonly parentId?: string;
   readonly nameContains?: string;
   readonly extension?: string;
