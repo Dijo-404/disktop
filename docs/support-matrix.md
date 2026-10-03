@@ -59,7 +59,7 @@ Node 24 remains the [LTS baseline](https://nodejs.org/en/about/previous-releases
 | Arch | pacman adapter and Linux integration tests in container or VM. | CI container (`archlinux:latest`): the same checks. Adapters not validated. |
 | Host or VM with systemd and representative mounts | User timer, scoped privilege, mount topology, SMART where hardware permits, Btrfs/ZFS where available. | Not validated. |
 | WSL | Detect Windows mounts and exclude `/mnt/c` by default; explicit selection behavior. | Not validated. |
-| tmux and SSH terminal | 80×24 layout, mouse fallback, `NO_COLOR`, ASCII rendering, and terminal restoration. | Not validated. |
+| tmux and SSH terminal | 80×24 layout, mouse fallback, `NO_COLOR`, ASCII rendering, and terminal restoration. | tmux: `tests/pty/tmux.test.mjs` drew at 80×24, redrew on resize, said so below the minimum, and gave the shell's screen back on `q`, on an Arch host with tmux 3.7c; it is skipped where tmux is not installed. `NO_COLOR` and ASCII are covered by the PTY suite outside tmux. Mouse inside tmux and SSH not validated. |
 
 Containers cannot prove hardware health, real mount behavior, privilege prompts, or terminal behavior for every host. Those cases need a host or VM check before a support claim is made. Linux distribution names above describe the CI targets, not a complete compatibility list.
 
