@@ -125,7 +125,7 @@ function packageFinding(inventory: ManagerInventory, entry: InstalledPackage): F
         : findingSize(entry.reportedBytes, "manager-reported", inventory.sizeMeaning),
     confidence: "likely",
     capability: inventory.capability,
-    actions: ["manager"],
+    actions: [],
     active: true,
   });
 }

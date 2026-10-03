@@ -91,8 +91,10 @@ test("a truncated SMART document is absent rather than a throw", () => {
 });
 
 test("journalctl's disk usage is read in the units it printed", () => {
-  assert.equal(parseJournalUsage("Archived and active journals take up 1.2G in the file system."), 1_200_000_000n);
-  assert.equal(parseJournalUsage("Archived and active journals take up 512.0M in the file system."), 512_000_000n);
+  // systemd prints binary sizes with a bare suffix: 1.2G is 1.2 GiB.
+  assert.equal(parseJournalUsage("Archived and active journals take up 1.2G in the file system."), 1_288_490_189n);
+  assert.equal(parseJournalUsage("Archived and active journals take up 512.0M in the file system."), 536_870_912n);
+  assert.equal(parseJournalUsage("Archived and active journals take up 1.5GB in the file system."), 1_500_000_000n);
   assert.equal(parseJournalUsage("Archived and active journals take up 4.0GiB in the file system."), 4_294_967_296n);
   assert.equal(parseJournalUsage("nothing resembling a size"), undefined);
 });

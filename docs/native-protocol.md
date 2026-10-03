@@ -1,6 +1,6 @@
 # Native helper protocol
 
-Status: version 1 is normative in [`schemas/native/v1/`](../schemas/native/v1/); the current Rust build implements the reads `hello`, `probe`, `scan`, `query-index`, and `cancel`, the user-file actions `trash`, `erase`, `empty-trash`, and `restore`, and the recovery operation `journal-reconcile`. It reports `buildChecksum: null` for development builds unless a build checksum is injected, and returns `unsupported-operation` for every planned operation it does not yet implement. It cannot hash files, run a manager, copy across devices, or compress. `schemas/native/v1/request.json` and `event.json` are the normative wire contract, validated by `tests/contract/native-schema.test.mjs` and, against the real process, by `tests/integration/native.test.mjs`. The operation list there is complete for `1.0.0`; argument schemas exist for every implemented operation, result schemas for `hello`/`probe`, `scan`, `query-index`, the actions, and the journal, and the remaining planned operations narrow their `arguments` in the phase that implements them.
+Status: version 1 is normative in [`schemas/native/v1/`](../schemas/native/v1/) and the current Rust build implements every operation in it: the reads `hello`, `probe`, `scan`, `query-index`, `hash-candidates`, and `inspect`; `cancel`; the user-file actions `trash`, `erase`, `empty-trash`, `restore`, `dedup-hardlink`, `copy-move`, and `compress`; the manager journal operations `manager-begin`, `manager-append`, and `manager-finish`; and the recovery operation `journal-reconcile`. It reports `buildChecksum: null` for development builds unless a build checksum is injected, and answers `unknown-operation` for anything else. `schemas/native/v1/request.json` and `event.json` are the normative wire contract, validated by `tests/contract/native-schema.test.mjs` and, against the real process, by `tests/integration/native.test.mjs`.
 
 ## Transport and negotiation
 
@@ -22,10 +22,9 @@ Device and inode IDs, counts, byte sizes, and nanosecond timestamps will cross I
 | --- | --- | --- |
 | Handshake | `hello`, `probe` | Version, platform, checksum field, supported-operation list, and `openat2` capability probe only. |
 | Control | `cancel` | Stop a named in-flight request at a safe item boundary; the cancelled request still emits a final event. |
-| Implemented read | `scan`, `query-index`, `hash-candidates` | Bounded `openat2` traversal into a SQLite index, keyset-paginated pages out of it, and the staged duplicate pipeline over it. |
+| Implemented read | `scan`, `query-index`, `hash-candidates`, `inspect` | Bounded `openat2` traversal into a SQLite index, keyset-paginated pages out of it, the staged duplicate pipeline over it, and a digest of everything below a reviewed directory. |
 | Implemented actions | `trash`, `erase`, `empty-trash`, `restore`, `dedup-hardlink`, `copy-move`, `compress` | Recheck plan and target, perform one constrained syscall or a staged and verified output, journal per-item outcome. |
-| Planned read | `inspect` | Live metadata for one path. |
-| Manager journal | `manager-begin`, `manager-append`, `manager-finish` | Record intent, progress, command result, and verification for a fixed-argument Linux manager adapter. The helper does not invent or execute manager commands. |
+| Manager journal | `manager-begin`, `manager-append`, `manager-finish` | Record a manager action's commands and reviewed items before anything runs, each command's start before it is spawned and its exit status after, and every item's outcome at the end. The helper never runs a manager command. |
 | Recovery | `journal-reconcile` | Resolve interrupted records into honest completed, partial, or uncertain states, and return a page of history. Reconciling and listing are one operation because a caller that could list without reconciling would read a history still claiming an abandoned action is running. |
 
 The scanner opens each directory with `openat2` and `RESOLVE_BENEATH | RESOLVE_NO_SYMLINKS | RESOLVE_NO_MAGICLINKS`, adding `RESOLVE_NO_XDEV` unless `crossFilesystems` is set, so a symlink, a `..`, a procfs magic link, or a bind mount of the same filesystem cannot move it out of the subtree it was given. There is no fallback that drops those guarantees: a kernel that refuses `openat2` gets `unsupported-kernel` and no scan. It holds one open directory stream per level, so its descriptors and memory follow the tree's depth rather than its entry count, and it aggregates each directory on the way back up so a listing can rank directories by subtree size without a second pass.
@@ -37,6 +36,25 @@ Bytes are attributed once per `(device, inode)`. A second hardlink is indexed wi
 `hash-candidates` reads that index and then reads content, which is why it runs on its own thread and answers `cancel` like a scan does. It is a three-stage funnel. SQL groups regular files by apparent size and returns only the sizes with more than one member, so a file with no possible twin is never opened. Each surviving group is narrowed by a digest of its first and last 64 KiB, and each group that survives that is narrowed again by a digest of every byte. Rows the index marked `shared` are excluded at the query, and two names reaching one inode collapse to one member, because removing the second frees nothing. Each candidate is opened read-only through the same descent a mutation makes — from `/`, one segment at a time, never following a symlink — and the descriptor's own identity is what the result reports, so the group describes the files that are there now rather than the ones the scan remembered.
 
 The digests group candidates. They never authorise anything: an operation that releases one copy of something because another copy exists re-opens both files and compares them byte for byte first. [ADR 0006](adr/0006-content-identity-and-archive-dependencies.md) records why the line is drawn there. A result with `complete: false` carries a warning saying what it missed — a cap it hit, a file it could not read, or a cancellation.
+
+## Manager actions
+
+Node runs a manager command; the helper only records it, so the journal stays
+the one record a crash is judged against. `manager-begin` writes the action,
+its commands in order, and the items the plan reviewed, in one transaction, and
+answers with the action's id. `manager-append` with `phase: "started"` is
+written before Node spawns that command and `phase: "finished"` after, with its
+exit status and the tail of what it printed. `manager-finish` records what
+became of every reviewed item, plus anything the manager removed of its own
+choosing (`observed`), and closes the action: `complete` only when every item
+completed and every command finished with status 0, `partial` otherwise.
+
+Only the helper process that began an action may append to or finish it, and
+Node keeps that one process open for the whole action. If it dies in between,
+reconciliation marks a command that started and never finished `uncertain`,
+and the action with it: the command may or may not have run, and nothing here
+guesses which. The helper validates every tool against its own copy of the
+manager tool list and refuses an argument or item holding a control byte.
 
 ## Mutation invariants
 

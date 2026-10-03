@@ -10,6 +10,7 @@ Architecture decision records (ADRs) explain choices that affect multiple module
 | [0004](0004-reviewed-action-pipeline.md) | One reviewed action pipeline and one durable journal | accepted |
 | [0005](0005-lossless-values-in-contracts.md) | Decimal strings and base64 path bytes in every contract | accepted |
 | [0006](0006-content-identity-and-archive-dependencies.md) | A digest groups candidates, a byte compare authorises a mutation | accepted |
+| [0007](0007-manager-adapters-and-scoped-privilege.md) | Manager actions are derived argv, journalled by the helper, escalated one command at a time | accepted |
 
 Create one numbered Markdown file per decision, for example `0001-terminal-renderer.md`. Use this structure:
 

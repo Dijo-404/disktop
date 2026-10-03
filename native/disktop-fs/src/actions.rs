@@ -36,6 +36,8 @@ pub struct Target {
     /// re-measure a subtree it is about to rename in one syscall; it reports
     /// the plan's own number, partitioned by what actually happened to it.
     pub reviewed_bytes: u64,
+    /// What a reviewed directory held, to be compared before it is touched.
+    pub subtree: Option<crate::subtree::Subtree>,
 }
 
 /// A permanent removal. There is no Trash here and no undo; the plan that
@@ -56,7 +58,7 @@ pub struct EmptyTrashRequest {
     /// `$XDG_DATA_HOME/Trash`, so the helper can recognise it without asking
     /// Node which directories it is allowed to empty.
     pub home_trash_directory: Vec<u8>,
-    pub trash_directories: Vec<Vec<u8>>,
+    pub trash_directories: Vec<(Vec<u8>, crate::subtree::Subtree)>,
 }
 
 /// Putting back what a Trash move moved. The journal is the authority for
@@ -234,6 +236,16 @@ pub fn run_dedup_hardlink(
             "The file being kept is not a regular file, so nothing can be linked to it.",
         ));
     }
+    if request
+        .targets
+        .iter()
+        .any(|target| target.expected.device != keep_live.device)
+    {
+        return Err(ActionRefusal::new(
+            "different-filesystem",
+            "Not every file in this group is on the same filesystem as the one being kept, so a hardlink cannot join them.",
+        ));
+    }
 
     let keep_descriptor = sys::openat_read_no_symlinks(keep_parent.descriptor(), &keep_parent.name)
         .map_err(|error| {
@@ -318,6 +330,9 @@ fn hardlink_one(
             return refuse(refusal.code, refusal.message, outcome);
         }
     };
+    if let Err((code, message)) = subtree_unchanged(&parent, target) {
+        return refuse(code, message, outcome_for(code));
+    }
 
     if live.kind != EntryKind::File {
         return refuse(
@@ -416,6 +431,29 @@ fn hardlink_one(
             );
         }
     };
+    let directory = parent_path(&target.path);
+    let record = StagingRecord {
+        journal,
+        journal_id,
+        position,
+        directory: &directory,
+    };
+    if let Err(error) = record.record_identity(
+        &staging,
+        &Identity {
+            device: keep.metadata.device,
+            inode: keep.metadata.inode,
+        },
+    ) {
+        let _ = sys::unlinkat(parent.descriptor(), &staging, false);
+        return settle(
+            journal,
+            journal_id,
+            position,
+            target,
+            refuse("journal-write-failed", error.to_string(), Outcome::Failed),
+        );
+    }
 
     // After this the reviewed name holds the kept inode and the staging name
     // holds the old one. The name never points at nothing in between.
@@ -426,6 +464,7 @@ fn hardlink_one(
         &parent.name,
     ) {
         let _ = sys::unlinkat(parent.descriptor(), &staging, false);
+        record.forget();
         let (code, message) = match error.raw_os_error() {
             Some(libc::EINVAL) | Some(libc::ENOSYS) => (
                 "unsupported-filesystem",
@@ -454,6 +493,7 @@ fn hardlink_one(
     // Removing the staging name releases the old inode, if this was its last
     // name. That is the step this operation cannot take back.
     let leftover = sys::unlinkat(parent.descriptor(), &staging, false).is_err();
+    record.forget();
 
     // Removing one of several names to an inode frees nothing; only the last
     // one does. Reporting the plan's number either way would claim space back
@@ -729,6 +769,9 @@ fn compress_one(
             return refuse(refusal.code, refusal.message, outcome);
         }
     };
+    if let Err((code, message)) = subtree_unchanged(&parent, target) {
+        return refuse(code, message, outcome_for(code));
+    }
     if live.kind != EntryKind::File && live.kind != EntryKind::Directory {
         return refuse(
             "invalid-arguments",
@@ -789,7 +832,13 @@ fn compress_one(
         );
     }
 
-    let staged = match stage_archive(&parent, destination, &live, &archive_name) {
+    let staging = StagingRecord {
+        journal,
+        journal_id,
+        position,
+        directory: &destination_path,
+    };
+    let staged = match stage_archive(&parent, destination, &live, &archive_name, &staging) {
         Ok(staged) => staged,
         Err((code, message)) => {
             return settle(
@@ -802,8 +851,12 @@ fn compress_one(
         }
     };
 
-    if let Err(error) = sys::renameat_no_replace(destination, &staged, destination, &archive_name) {
+    let publish = sys::renameat_no_replace(destination, &staged, destination, &archive_name);
+    if publish.is_err() {
         let _ = sys::unlinkat(destination, &staged, false);
+    }
+    staging.forget();
+    if let Err(error) = publish {
         let (code, message) = match error.raw_os_error() {
             Some(libc::EEXIST) => (
                 "destination-exists",
@@ -851,6 +904,7 @@ fn stage_archive(
     destination: libc::c_int,
     live: &sys::Metadata,
     archive_name: &[u8],
+    record: &StagingRecord<'_>,
 ) -> Result<Vec<u8>, (&'static str, String)> {
     for attempt in 0..64u32 {
         let mut staging = archive_name.to_vec();
@@ -860,6 +914,8 @@ fn stage_archive(
         if sys::target_exists(destination, &staging) {
             continue;
         }
+        let staged_name = staging.clone();
+        let mut on_created = |descriptor| record.record(&staged_name, descriptor);
 
         // An archive holds everything that was inside the source, including
         // whatever was private in there, so it takes Disktop's own private mode
@@ -874,6 +930,7 @@ fn stage_archive(
                 destination,
                 &staging,
                 PRIVATE_FILE_MODE,
+                &mut on_created,
             )
             .and_then(|written| {
                 // Read back the way somebody recovering from it would, and
@@ -897,17 +954,23 @@ fn stage_archive(
         } else {
             let source = sys::openat_read_no_symlinks(parent.descriptor(), &parent.name)
                 .map_err(describe_copy)?;
-            let result = archive::compress_file(source, destination, &staging, PRIVATE_FILE_MODE)
-                .and_then(|written| {
-                    let recovered = archive::verify_file(destination, &staging)?;
-                    if recovered != written {
-                        return Err(std::io::Error::new(
-                            std::io::ErrorKind::InvalidData,
-                            "the archive did not read back as the bytes that went into it",
-                        ));
-                    }
-                    Ok(())
-                });
+            let result = archive::compress_file(
+                source,
+                destination,
+                &staging,
+                PRIVATE_FILE_MODE,
+                &mut on_created,
+            )
+            .and_then(|written| {
+                let recovered = archive::verify_file(destination, &staging)?;
+                if recovered != written {
+                    return Err(std::io::Error::new(
+                        std::io::ErrorKind::InvalidData,
+                        "the archive did not read back as the bytes that went into it",
+                    ));
+                }
+                Ok(())
+            });
             sys::close(source);
             result
         };
@@ -916,6 +979,7 @@ fn stage_archive(
             Ok(()) => Ok(staging),
             Err(error) => {
                 let _ = sys::unlinkat(destination, &staging, false);
+                record.forget();
                 Err(describe_copy(error))
             }
         };
@@ -978,6 +1042,9 @@ fn move_one(
             return refuse(refusal.code, refusal.message, outcome);
         }
     };
+    if let Err((code, message)) = subtree_unchanged(&parent, target) {
+        return refuse(code, message, outcome_for(code));
+    }
     if live.kind != EntryKind::File && live.kind != EntryKind::Directory {
         return refuse(
             "invalid-arguments",
@@ -1030,7 +1097,13 @@ fn move_one(
         );
     }
 
-    let staged = match stage_copy(&parent, context.destination, &live) {
+    let staging = StagingRecord {
+        journal,
+        journal_id,
+        position,
+        directory: context.destination_path,
+    };
+    let staged = match stage_copy(&parent, context.destination, &live, &staging) {
         Ok(staged) => staged,
         Err((code, message)) => {
             return settle(
@@ -1046,13 +1119,17 @@ fn move_one(
     // Publishing is a rename that refuses to overwrite. Between the check
     // above and this, somebody could have created the name; this is what
     // actually decides, and it decides without destroying what they made.
-    if let Err(error) = sys::renameat_no_replace(
+    let publish = sys::renameat_no_replace(
         context.destination,
         &staged,
         context.destination,
         &parent.name,
-    ) {
+    );
+    if publish.is_err() {
         discard_staged(context.destination, &staged, live.kind);
+    }
+    staging.forget();
+    if let Err(error) = publish {
         let (code, message) = match error.raw_os_error() {
             Some(libc::EEXIST) | Some(libc::ENOTEMPTY) => (
                 "destination-exists",
@@ -1109,26 +1186,68 @@ fn room_for(destination_path: &[u8], needed: u64) -> Result<(), (&'static str, S
     ))
 }
 
+struct StagingRecord<'a> {
+    journal: &'a Journal,
+    journal_id: &'a str,
+    position: u64,
+    directory: &'a [u8],
+}
+
+impl StagingRecord<'_> {
+    fn record(&self, name: &[u8], descriptor: libc::c_int) -> std::io::Result<()> {
+        let metadata = sys::metadata_of(descriptor)?;
+        self.record_identity(
+            name,
+            &Identity {
+                device: metadata.device,
+                inode: metadata.inode,
+            },
+        )
+    }
+
+    fn record_identity(&self, name: &[u8], identity: &Identity) -> std::io::Result<()> {
+        let mut path = self.directory.to_vec();
+        path.push(b'/');
+        path.extend_from_slice(name);
+        self.journal
+            .record_staging(self.journal_id, self.position, &path, identity)
+            .map_err(|error| {
+                std::io::Error::other(format!("what was staged could not be journalled: {error}"))
+            })
+    }
+
+    fn forget(&self) {
+        let _ = self.journal.clear_staging(self.journal_id, self.position);
+    }
+}
+
 /// Copy one reviewed target under a staging name, returning that name.
 fn stage_copy(
     parent: &guard::ResolvedParent,
     destination: libc::c_int,
     live: &sys::Metadata,
+    staging: &StagingRecord<'_>,
 ) -> Result<Vec<u8>, (&'static str, String)> {
     for attempt in 0..64u32 {
-        let mut staging = parent.name.clone();
-        staging.extend_from_slice(
+        let mut name = parent.name.clone();
+        name.extend_from_slice(
             format!(".disktop-partial-{}-{attempt}", std::process::id()).as_bytes(),
         );
-        if sys::target_exists(destination, &staging) {
+        if sys::target_exists(destination, &name) {
             continue;
         }
 
         let outcome = if live.kind == EntryKind::Directory {
             let source = sys::open_directory_no_symlinks(parent.descriptor(), &parent.name)
                 .map_err(describe_copy)?;
-            let result =
-                transfer::copy_tree(source, destination, &staging, live.permissions).map(|_| ());
+            let result = transfer::copy_tree(
+                source,
+                destination,
+                &name,
+                live.permissions,
+                &mut |descriptor| staging.record(&name, descriptor),
+            )
+            .map(|_| ());
             sys::close(source);
             result
         } else {
@@ -1137,9 +1256,10 @@ fn stage_copy(
             let result = transfer::copy_file(
                 source,
                 destination,
-                &staging,
+                &name,
                 live.permissions,
                 Some(live.modified_nanoseconds),
+                &mut |descriptor| staging.record(&name, descriptor),
             )
             .map(|_| ());
             sys::close(source);
@@ -1147,9 +1267,10 @@ fn stage_copy(
         };
 
         return match outcome {
-            Ok(()) => Ok(staging),
+            Ok(()) => Ok(name),
             Err(error) => {
-                discard_staged(destination, &staging, live.kind);
+                discard_staged(destination, &name, live.kind);
+                staging.forget();
                 Err(describe_copy(error))
             }
         };
@@ -1200,6 +1321,9 @@ fn dispose_of_source(
     // strength of the earlier check would release bytes nobody reviewed.
     if let Err(refusal) = guard::revalidate(&parent, &target.expected) {
         return published_but_kept(target, &refusal.message);
+    }
+    if let Err((_, message)) = subtree_unchanged(&parent, target) {
+        return published_but_kept(target, &message);
     }
 
     let removed = match context.disposition {
@@ -1462,6 +1586,9 @@ fn trash_one(
             return refuse(refusal.code, refusal.message, outcome);
         }
     };
+    if let Err((code, message)) = subtree_unchanged(&parent, target) {
+        return refuse(code, message, outcome_for(code));
+    }
 
     let destination = match choose_trash(guard, home_trash, &target.path, live.device) {
         Ok(destination) => destination,
@@ -1589,6 +1716,9 @@ fn erase_one(
             return refuse(refusal.code, refusal.message, outcome);
         }
     };
+    if let Err((code, message)) = subtree_unchanged(&parent, target) {
+        return refuse(code, message, outcome_for(code));
+    }
 
     if let Err(error) = journal.record_intent(journal_id, position, &target.path, None) {
         return refuse(
@@ -1692,6 +1822,7 @@ pub fn run_restore(
             path: item.path.clone(),
             expected: UNCHECKED,
             reviewed_bytes: item.bytes,
+            subtree: None,
         })
         .collect();
     let destinations: Vec<(Vec<u8>, Option<Identity>)> = restorable
@@ -1919,10 +2050,11 @@ pub fn run_empty_trash(
     let targets: Vec<Target> = request
         .trash_directories
         .iter()
-        .map(|path| Target {
+        .map(|(path, subtree)| Target {
             path: path.clone(),
             expected: UNCHECKED,
             reviewed_bytes: 0,
+            subtree: Some(*subtree),
         })
         .collect();
 
@@ -2011,6 +2143,15 @@ fn empty_one(
         Ok(parent) => parent,
         Err(refusal) => return refuse(refusal.code, refusal.message),
     };
+    if let Err((code, message)) = subtree_unchanged(&parent, target) {
+        return ItemReport {
+            path: target.path.clone(),
+            outcome: outcome_for(code),
+            reason: Some(code),
+            message: Some(message),
+            bytes: 0,
+        };
+    }
     let directory = match sys::open_directory_no_symlinks(parent.descriptor(), &parent.name) {
         Ok(descriptor) => descriptor,
         Err(error) => {
@@ -2076,9 +2217,70 @@ fn empty_one(
 }
 
 /// Remove everything inside a directory, leaving the directory itself.
+/// Release what interrupted actions staged and never published.
+///
+/// Only a name still holding the exact inode the helper journalled when it
+/// created it is removed; anything else is left where it is and named.
+pub fn release_abandoned_staging(journal: &Journal, euid: u32) -> rusqlite::Result<u64> {
+    if euid == 0 {
+        return Ok(0);
+    }
+    let mut released = 0;
+    for left in journal.abandoned_staging()? {
+        let display = String::from_utf8_lossy(&left.path).into_owned();
+        let note = match release_one(&left) {
+            Released::Removed => {
+                released += 1;
+                "What Disktop had staged for this item was removed; it was never published."
+                    .to_owned()
+            }
+            Released::Gone => {
+                "Nothing remains under the name Disktop staged this item at.".to_owned()
+            }
+            Released::Kept => format!(
+                "Something may remain at {display}; it is not what Disktop staged, so it was left in place."
+            ),
+        };
+        journal.resolve_staging(&left.action_id, left.position, &note)?;
+    }
+    Ok(released)
+}
+
+enum Released {
+    Removed,
+    Gone,
+    Kept,
+}
+
+fn release_one(left: &crate::journal::AbandonedStaging) -> Released {
+    let Some(identity) = left.identity else {
+        return Released::Kept;
+    };
+    let Ok(parent) = guard::resolve_parent(&left.path) else {
+        return Released::Kept;
+    };
+    match sys::metadata_at(parent.descriptor(), &parent.name) {
+        Err(error) if error.raw_os_error() == Some(libc::ENOENT) => Released::Gone,
+        Err(_) => Released::Kept,
+        Ok(live) if live.device == identity.device && live.inode == identity.inode => {
+            if remove_entry(parent.descriptor(), &parent.name, live.kind).is_ok() {
+                Released::Removed
+            } else {
+                Released::Kept
+            }
+        }
+        Ok(_) => Released::Kept,
+    }
+}
+
 fn empty_directory(parent: libc::c_int, name: &[u8]) -> std::io::Result<()> {
     // `remove_children` takes the descriptor and closes it with its stream.
-    remove_children(sys::open_directory_no_symlinks(parent, name)?)
+    remove_children(open_for_removal(parent, name)?)
+}
+
+/// Open a directory being removed: never through a symlink, never into another mount.
+fn open_for_removal(parent: libc::c_int, name: &[u8]) -> std::io::Result<libc::c_int> {
+    sys::open_child_directory(parent, name, false)
 }
 
 /// Remove one entry, recursively if it is a directory.
@@ -2090,7 +2292,7 @@ fn remove_entry(parent: libc::c_int, name: &[u8], kind: EntryKind) -> std::io::R
     if kind != EntryKind::Directory {
         return sys::unlinkat(parent, name, false);
     }
-    let descriptor = sys::open_directory_no_symlinks(parent, name)?;
+    let descriptor = open_for_removal(parent, name)?;
     remove_children(descriptor)?;
     sys::unlinkat(parent, name, true)
 }
@@ -2121,7 +2323,7 @@ fn remove_children(descriptor: libc::c_int) -> std::io::Result<()> {
             Err(error) => return Err(error),
         };
         if metadata.kind == EntryKind::Directory {
-            let child = sys::open_directory_no_symlinks(descriptor, &name)?;
+            let child = open_for_removal(descriptor, &name)?;
             remove_children(child)?;
             sys::unlinkat(descriptor, &name, true)?;
         } else {
@@ -2219,6 +2421,25 @@ fn unrecorded(target: &Target, error: &str) -> ItemReport {
 /// thing it named is not what the plan reviewed, so the item is skipped and
 /// everything else goes ahead. A protected path or a denied permission is a
 /// failure, because the plan asked for something it may not have.
+static NEVER_CANCELLED: AtomicBool = AtomicBool::new(false);
+
+fn subtree_unchanged(
+    parent: &guard::ResolvedParent,
+    target: &Target,
+) -> Result<(), (&'static str, String)> {
+    let Some(reviewed) = &target.subtree else {
+        return Ok(());
+    };
+    match crate::subtree::digest(parent.descriptor(), &parent.name, &NEVER_CANCELLED) {
+        Ok(live) if live == *reviewed => Ok(()),
+        Ok(_) => Err((
+            "changed-target",
+            "Something inside it changed since it was reviewed, so it was left alone.".to_owned(),
+        )),
+        Err(refusal) => Err((refusal.code, refusal.message)),
+    }
+}
+
 fn outcome_for(code: &str) -> Outcome {
     match code {
         "changed-target" => Outcome::Skipped,
@@ -2555,5 +2776,31 @@ fn parent_path(path: &[u8]) -> Vec<u8> {
     match path.iter().rposition(|byte| *byte == b'/') {
         Some(0) | None => b"/".to_vec(),
         Some(position) => path[..position].to_vec(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::testing::Sandbox;
+
+    #[test]
+    fn a_removal_never_descends_into_another_filesystem() {
+        let root = sys::open_root(b"/").unwrap();
+        let crossing = open_for_removal(root, b"proc");
+        sys::close(root);
+        assert_eq!(
+            crossing.err().and_then(|error| error.raw_os_error()),
+            Some(libc::EXDEV),
+            "/proc is its own mount, so a removal walk must refuse to enter it"
+        );
+
+        let sandbox = Sandbox::new("removal-same-filesystem");
+        sandbox.directory(b"inner");
+        let parent = sys::open_root(&sandbox.bytes()).unwrap();
+        let inner =
+            open_for_removal(parent, b"inner").expect("a directory on the same filesystem opens");
+        sys::close(inner);
+        sys::close(parent);
     }
 }

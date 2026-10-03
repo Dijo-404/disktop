@@ -1,0 +1,10 @@
+{
+  "protocolVersion": 1,
+  "requestId": "manager-append-2",
+  "operation": "manager-append",
+  "arguments": {
+    "journalDirectory": "L2hvbWUvZXhhbXBsZS8ubG9jYWwvc3RhdGUvZGlza3RvcA==",
+    "actionId": "act-1790957024565-9f2c1ab07d4e5610",
+    "command": "0"
+  }
+}

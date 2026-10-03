@@ -33,13 +33,14 @@ use std::thread::JoinHandle;
 
 const PROTOCOL_VERSION: u16 = 1;
 const MAX_REQUEST_BYTES: usize = 1024 * 1024;
-const SUPPORTED_OPERATIONS: [&str; 14] = [
+const SUPPORTED_OPERATIONS: [&str; 18] = [
     "hello",
     "probe",
     "cancel",
     "scan",
     "query-index",
     "hash-candidates",
+    "inspect",
     "trash",
     "erase",
     "empty-trash",
@@ -47,13 +48,10 @@ const SUPPORTED_OPERATIONS: [&str; 14] = [
     "dedup-hardlink",
     "copy-move",
     "compress",
-    "journal-reconcile",
-];
-const PLANNED_OPERATIONS: [&str; 4] = [
-    "inspect",
     "manager-begin",
     "manager-append",
     "manager-finish",
+    "journal-reconcile",
 ];
 
 #[derive(Deserialize)]
@@ -89,6 +87,92 @@ struct TargetArguments {
     expected: FingerprintArguments,
     #[serde(default)]
     reviewed_bytes: Option<String>,
+    #[serde(default)]
+    subtree: Option<SubtreeArguments>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct SubtreeArguments {
+    entries: String,
+    digest: String,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct ManagerBeginArguments {
+    plan_id: String,
+    journal_directory: String,
+    adapter: String,
+    action: String,
+    privilege: String,
+    commands: Vec<ManagerCommandArguments>,
+    items: Vec<ManagerItemArguments>,
+    #[serde(default)]
+    estimated_bytes: Option<String>,
+    #[serde(default)]
+    free_bytes_before: Option<String>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct ManagerCommandArguments {
+    tool: String,
+    arguments: Vec<String>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct ManagerItemArguments {
+    id: String,
+    #[serde(default)]
+    bytes: Option<String>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct ManagerAppendArguments {
+    journal_directory: String,
+    action_id: String,
+    command: String,
+    phase: String,
+    #[serde(default)]
+    exit_code: Option<String>,
+    #[serde(default)]
+    output: Option<String>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct ManagerFinishArguments {
+    journal_directory: String,
+    action_id: String,
+    items: Vec<ManagerVerdictArguments>,
+    #[serde(default)]
+    observed: Vec<ManagerObservedArguments>,
+    #[serde(default)]
+    free_bytes_after: Option<String>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct ManagerVerdictArguments {
+    position: String,
+    outcome: String,
+    #[serde(default)]
+    message: Option<String>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct ManagerObservedArguments {
+    id: String,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct InspectArguments {
+    paths: Vec<String>,
 }
 
 #[derive(Deserialize)]
@@ -154,7 +238,14 @@ struct EmptyTrashArguments {
     plan_id: String,
     journal_directory: String,
     home_trash_directory: String,
-    trash_directories: Vec<String>,
+    trash_directories: Vec<TrashDirectoryArguments>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct TrashDirectoryArguments {
+    path: String,
+    subtree: SubtreeArguments,
 }
 
 #[derive(Deserialize)]
@@ -445,6 +536,9 @@ fn handle_request(server: &Arc<Server>, line: &[u8]) {
         "compress" => compress(server, responder, request.arguments),
         "restore" => restore(server, responder, request.arguments),
         "journal-reconcile" => journal_reconcile(&responder, request.arguments),
+        "manager-begin" => manager_begin(&responder, request.arguments),
+        "manager-append" => manager_append(&responder, request.arguments),
+        "manager-finish" => manager_finish(&responder, request.arguments),
         "hello" | "probe" if request.arguments.is_empty() => {
             responder.emit("complete", json!({ "result": hello_result() }));
         }
@@ -457,11 +551,7 @@ fn handle_request(server: &Arc<Server>, line: &[u8]) {
         "scan" => scan(server, responder, request.arguments),
         "query-index" => query_index(&responder, request.arguments),
         "hash-candidates" => hash_candidates(server, responder, request.arguments),
-        operation if PLANNED_OPERATIONS.contains(&operation) => fail(
-            &responder,
-            "unsupported-operation",
-            "This operation is not implemented in this helper build",
-        ),
+        "inspect" => inspect(server, responder, request.arguments),
         _ => fail(&responder, "unknown-operation", "Unknown helper operation"),
     }
 }
@@ -1047,6 +1137,9 @@ fn duplicate_result(report: &duplicates::Report) -> Value {
 }
 
 fn trash(server: &Arc<Server>, responder: Responder, arguments: Map<String, Value>) {
+    if refuse_as_root(&responder) {
+        return;
+    }
     let arguments: TrashArguments = match decode(arguments) {
         Ok(arguments) => arguments,
         Err(message) => return fail(&responder, "invalid-arguments", &message),
@@ -1076,6 +1169,9 @@ fn trash(server: &Arc<Server>, responder: Responder, arguments: Map<String, Valu
 
 /// Replace every reviewed duplicate with a link to one kept file.
 fn dedup_hardlink(server: &Arc<Server>, responder: Responder, arguments: Map<String, Value>) {
+    if refuse_as_root(&responder) {
+        return;
+    }
     let arguments: DedupHardlinkArguments = match decode(arguments) {
         Ok(arguments) => arguments,
         Err(message) => return fail(&responder, "invalid-arguments", &message),
@@ -1103,6 +1199,9 @@ fn dedup_hardlink(server: &Arc<Server>, responder: Responder, arguments: Map<Str
 
 /// Copy every reviewed target onto another filesystem, then dispose of the source.
 fn copy_move(server: &Arc<Server>, responder: Responder, arguments: Map<String, Value>) {
+    if refuse_as_root(&responder) {
+        return;
+    }
     let arguments: CopyMoveArguments = match decode(arguments) {
         Ok(arguments) => arguments,
         Err(message) => return fail(&responder, "invalid-arguments", &message),
@@ -1130,6 +1229,9 @@ fn copy_move(server: &Arc<Server>, responder: Responder, arguments: Map<String, 
 
 /// Compress every reviewed target, then dispose of the source.
 fn compress(server: &Arc<Server>, responder: Responder, arguments: Map<String, Value>) {
+    if refuse_as_root(&responder) {
+        return;
+    }
     let arguments: CompressArguments = match decode(arguments) {
         Ok(arguments) => arguments,
         Err(message) => return fail(&responder, "invalid-arguments", &message),
@@ -1157,6 +1259,9 @@ fn compress(server: &Arc<Server>, responder: Responder, arguments: Map<String, V
 
 /// Remove every reviewed target permanently.
 fn erase(server: &Arc<Server>, responder: Responder, arguments: Map<String, Value>) {
+    if refuse_as_root(&responder) {
+        return;
+    }
     let arguments: EraseArguments = match decode(arguments) {
         Ok(arguments) => arguments,
         Err(message) => return fail(&responder, "invalid-arguments", &message),
@@ -1184,6 +1289,9 @@ fn erase(server: &Arc<Server>, responder: Responder, arguments: Map<String, Valu
 
 /// Empty every directory that really is a Trash.
 fn empty_trash(server: &Arc<Server>, responder: Responder, arguments: Map<String, Value>) {
+    if refuse_as_root(&responder) {
+        return;
+    }
     let arguments: EmptyTrashArguments = match decode(arguments) {
         Ok(arguments) => arguments,
         Err(message) => return fail(&responder, "invalid-arguments", &message),
@@ -1211,6 +1319,9 @@ fn empty_trash(server: &Arc<Server>, responder: Responder, arguments: Map<String
 
 /// Put back what a Trash move moved.
 fn restore(server: &Arc<Server>, responder: Responder, arguments: Map<String, Value>) {
+    if refuse_as_root(&responder) {
+        return;
+    }
     let arguments: RestoreArguments = match decode(arguments) {
         Ok(arguments) => arguments,
         Err(message) => return fail(&responder, "invalid-arguments", &message),
@@ -1246,6 +1357,256 @@ fn restore(server: &Arc<Server>, responder: Responder, arguments: Map<String, Va
             );
         },
     );
+}
+
+fn manager_begin(responder: &Responder, arguments: Map<String, Value>) {
+    let parsed = decode::<ManagerBeginArguments>(arguments).and_then(|arguments| {
+        Ok(crate::manager::BeginRequest {
+            plan_id: arguments.plan_id,
+            journal_directory: decoded_directory(&arguments.journal_directory)?,
+            adapter: arguments.adapter,
+            action: arguments.action,
+            privilege: arguments.privilege,
+            commands: arguments
+                .commands
+                .into_iter()
+                .map(|command| crate::manager::ManagerCommand {
+                    tool: command.tool,
+                    arguments: command.arguments,
+                })
+                .collect(),
+            items: arguments
+                .items
+                .into_iter()
+                .map(|item| {
+                    Ok(crate::manager::ManagerItem {
+                        id: item.id,
+                        bytes: optional_u64(item.bytes.as_deref(), "bytes")?,
+                    })
+                })
+                .collect::<Result<Vec<_>, String>>()?,
+            estimated_bytes: optional_u64(arguments.estimated_bytes.as_deref(), "estimatedBytes")?,
+            free_bytes_before: optional_u64(
+                arguments.free_bytes_before.as_deref(),
+                "freeBytesBefore",
+            )?,
+        })
+    });
+    let request = match parsed {
+        Ok(request) => request,
+        Err(message) => return fail(responder, "invalid-arguments", &message),
+    };
+    match crate::manager::begin(&request) {
+        Ok(action_id) => responder.emit("complete", json!({ "result": { "actionId": action_id } })),
+        Err((code, message)) => fail(responder, code, &message),
+    }
+}
+
+fn manager_append(responder: &Responder, arguments: Map<String, Value>) {
+    let parsed = decode::<ManagerAppendArguments>(arguments).and_then(|arguments| {
+        Ok(crate::manager::AppendRequest {
+            journal_directory: decoded_directory(&arguments.journal_directory)?,
+            action_id: arguments.action_id,
+            command: parse_u64(Some(&arguments.command))
+                .ok_or_else(|| "command must be a decimal position".to_owned())?,
+            phase: match arguments.phase.as_str() {
+                "started" => crate::manager::Phase::Started,
+                "finished" => crate::manager::Phase::Finished,
+                _ => return Err("phase is 'started' or 'finished'".to_owned()),
+            },
+            exit_code: match arguments.exit_code.as_deref() {
+                None => None,
+                Some(text) => Some(
+                    text.parse::<i64>()
+                        .map_err(|_| "exitCode must be a signed decimal integer".to_owned())?,
+                ),
+            },
+            output: arguments.output,
+        })
+    });
+    let request = match parsed {
+        Ok(request) => request,
+        Err(message) => return fail(responder, "invalid-arguments", &message),
+    };
+    match crate::manager::append(&request) {
+        Ok(()) => responder.emit("complete", json!({ "result": { "recorded": true } })),
+        Err((code, message)) => fail(responder, code, &message),
+    }
+}
+
+fn manager_finish(responder: &Responder, arguments: Map<String, Value>) {
+    let parsed = decode::<ManagerFinishArguments>(arguments).and_then(|arguments| {
+        Ok(crate::manager::FinishRequest {
+            journal_directory: decoded_directory(&arguments.journal_directory)?,
+            action_id: arguments.action_id,
+            items: arguments
+                .items
+                .into_iter()
+                .map(|verdict| {
+                    Ok(crate::manager::Verdict {
+                        position: parse_u64(Some(&verdict.position))
+                            .ok_or_else(|| "position must be a decimal integer".to_owned())?,
+                        outcome: match verdict.outcome.as_str() {
+                            "completed" => crate::journal::Outcome::Completed,
+                            "skipped" => crate::journal::Outcome::Skipped,
+                            "failed" => crate::journal::Outcome::Failed,
+                            _ => return Err("outcome is completed, skipped, or failed".to_owned()),
+                        },
+                        message: verdict.message,
+                    })
+                })
+                .collect::<Result<Vec<_>, String>>()?,
+            observed: arguments.observed.into_iter().map(|item| item.id).collect(),
+            free_bytes_after: optional_u64(
+                arguments.free_bytes_after.as_deref(),
+                "freeBytesAfter",
+            )?,
+        })
+    });
+    let request = match parsed {
+        Ok(request) => request,
+        Err(message) => return fail(responder, "invalid-arguments", &message),
+    };
+    match crate::manager::finish(&request) {
+        Ok(summary) => {
+            let mut result = Map::new();
+            result.insert("journalId".to_owned(), summary.journal_id.into());
+            result.insert("state".to_owned(), summary.state.as_str().into());
+            result.insert("completed".to_owned(), summary.completed.to_string().into());
+            result.insert("skipped".to_owned(), summary.skipped.to_string().into());
+            result.insert("failed".to_owned(), summary.failed.to_string().into());
+            if let Some(selected) = summary.selected_bytes {
+                result.insert("selectedBytes".to_owned(), selected.to_string().into());
+            }
+            result.insert("bytesMovedToTrash".to_owned(), "0".into());
+            if let Some(before) = summary.free_bytes_before {
+                result.insert("freeBytesBefore".to_owned(), before.to_string().into());
+            }
+            if let Some(after) = summary.free_bytes_after {
+                result.insert("freeBytesAfter".to_owned(), after.to_string().into());
+            }
+            result.insert("undoAvailable".to_owned(), false.into());
+            responder.emit("complete", json!({ "result": Value::Object(result) }));
+        }
+        Err((code, message)) => fail(responder, code, &message),
+    }
+}
+
+fn manager_record(manager: &journal::ManagerRecord) -> Value {
+    let commands: Vec<Value> = manager
+        .commands
+        .iter()
+        .map(|command| {
+            let mut entry = Map::new();
+            entry.insert("position".to_owned(), command.position.to_string().into());
+            entry.insert("tool".to_owned(), command.tool.clone().into());
+            entry.insert("arguments".to_owned(), json!(command.arguments));
+            entry.insert("state".to_owned(), command.state.clone().into());
+            if let Some(code) = command.exit_code {
+                entry.insert("exitCode".to_owned(), code.to_string().into());
+            }
+            if let Some(output) = &command.output {
+                entry.insert("output".to_owned(), output.clone().into());
+            }
+            Value::Object(entry)
+        })
+        .collect();
+    let mut object = Map::new();
+    object.insert("adapter".to_owned(), manager.adapter.clone().into());
+    object.insert("action".to_owned(), manager.action.clone().into());
+    object.insert("privilege".to_owned(), manager.privilege.clone().into());
+    if let Some(estimated) = manager.estimated_bytes {
+        object.insert("estimatedBytes".to_owned(), estimated.to_string().into());
+    }
+    object.insert("commands".to_owned(), Value::Array(commands));
+    Value::Object(object)
+}
+
+fn inspect(server: &Arc<Server>, responder: Responder, arguments: Map<String, Value>) {
+    let arguments: InspectArguments = match decode(arguments) {
+        Ok(arguments) => arguments,
+        Err(message) => return fail(&responder, "invalid-arguments", &message),
+    };
+    if arguments.paths.is_empty() || arguments.paths.len() > 1000 {
+        return fail(
+            &responder,
+            "invalid-arguments",
+            "inspect takes between 1 and 1000 paths",
+        );
+    }
+    let mut paths = Vec::with_capacity(arguments.paths.len());
+    for encoded in &arguments.paths {
+        match decode_path(encoded) {
+            Ok(path) => paths.push(path),
+            Err(message) => return fail(&responder, "invalid-arguments", &message),
+        }
+    }
+    if let Err(message) = require_containment() {
+        return fail(&responder, "unsupported-kernel", &message);
+    }
+
+    spawn_cancellable(
+        server,
+        responder,
+        "inspect",
+        SEARCH_ABANDONED,
+        move |responder, cancelled| {
+            let answers: Vec<Value> = paths
+                .iter()
+                .map(|path| {
+                    let encoded = crate::base64::encode(path);
+                    match inspect_one(path, cancelled) {
+                        Ok(subtree) => json!({
+                            "path": encoded,
+                            "subtree": { "entries": subtree.entries.to_string(), "digest": subtree.hex() },
+                        }),
+                        Err(refusal) => json!({
+                            "path": encoded,
+                            "refusal": { "code": refusal.code, "message": refusal.message },
+                        }),
+                    }
+                })
+                .collect();
+            responder.emit("complete", json!({ "result": { "paths": answers } }));
+        },
+    );
+}
+
+fn inspect_one(
+    path: &[u8],
+    cancelled: &AtomicBool,
+) -> Result<crate::subtree::Subtree, crate::guard::Refusal> {
+    let parent = crate::guard::resolve_parent(path)?;
+    let live = crate::sys::metadata_at(parent.descriptor(), &parent.name).map_err(|error| {
+        crate::guard::Refusal::new(
+            "changed-target",
+            format!("It is not there any more: {error}"),
+        )
+    })?;
+    if live.kind != crate::sys::EntryKind::Directory {
+        return Err(crate::guard::Refusal::new(
+            "invalid-arguments",
+            "Only a directory has contents to inspect.",
+        ));
+    }
+    crate::subtree::digest(parent.descriptor(), &parent.name, cancelled)
+}
+
+/// Running as root, the helper journals manager actions and changes no user file itself.
+fn generic_mutation_refusal(euid: u32) -> Option<&'static str> {
+    (euid == 0).then_some(
+        "The helper is running as root, where it changes no user file itself. Run Disktop as the user who owns these files.",
+    )
+}
+
+fn refuse_as_root(responder: &Responder) -> bool {
+    match generic_mutation_refusal(unsafe { libc::geteuid() }) {
+        Some(message) => {
+            fail(responder, "permission-denied", message);
+            true
+        }
+        None => false,
+    }
 }
 
 fn require_containment() -> Result<(), String> {
@@ -1471,12 +1832,12 @@ fn empty_trash_request(
         return Err("Emptying Trash needs at least one directory".to_owned());
     }
     let mut directories = Vec::with_capacity(arguments.trash_directories.len());
-    for encoded in &arguments.trash_directories {
-        let path = decode_path(encoded)?;
+    for directory in &arguments.trash_directories {
+        let path = decode_path(&directory.path)?;
         if path.first() != Some(&b'/') {
             return Err("A Trash directory must be an absolute path".to_owned());
         }
-        directories.push(path);
+        directories.push((path, subtree_from(&directory.subtree)?));
     }
     let home_trash_directory = decode_path(&arguments.home_trash_directory)?;
     if home_trash_directory.first() != Some(&b'/') {
@@ -1497,14 +1858,32 @@ fn decoded_directory(encoded: &str) -> Result<PathBuf, String> {
 fn decoded_targets(arguments: &[TargetArguments]) -> Result<Vec<actions::Target>, String> {
     let mut targets = Vec::with_capacity(arguments.len());
     for target in arguments {
+        let expected = fingerprint(&target.expected)?;
+        let subtree = match &target.subtree {
+            None => None,
+            Some(reviewed) => Some(subtree_from(reviewed)?),
+        };
+        if expected.kind == crate::sys::EntryKind::Directory && subtree.is_none() {
+            return Err(
+                "A directory target needs the subtree it was reviewed with, so its contents can be checked again".to_owned(),
+            );
+        }
         targets.push(actions::Target {
             path: decode_path(&target.path)?,
-            expected: fingerprint(&target.expected)?,
+            expected,
             reviewed_bytes: optional_u64(target.reviewed_bytes.as_deref(), "reviewedBytes")?
                 .unwrap_or(0),
+            subtree,
         });
     }
     Ok(targets)
+}
+
+fn subtree_from(arguments: &SubtreeArguments) -> Result<crate::subtree::Subtree, String> {
+    let entries = parse_u64(Some(&arguments.entries))
+        .ok_or_else(|| "subtree.entries must be a decimal integer".to_owned())?;
+    crate::subtree::Subtree::from_hex(entries, &arguments.digest)
+        .ok_or_else(|| "subtree.digest must be 64 lowercase hexadecimal characters".to_owned())
 }
 
 fn fingerprint(arguments: &FingerprintArguments) -> Result<Fingerprint, String> {
@@ -1567,6 +1946,13 @@ fn journal_reconcile(responder: &Responder, arguments: Map<String, Value>) {
             );
         }
     };
+    if let Err(error) = actions::release_abandoned_staging(&journal, unsafe { libc::geteuid() }) {
+        return fail(
+            responder,
+            "journal-write-failed",
+            &format!("What interrupted actions staged could not be resolved: {error}"),
+        );
+    }
     let page = match journal.page(arguments.cursor.as_deref(), limit) {
         Ok(page) => page,
         Err(error) => {
@@ -1609,10 +1995,20 @@ pub fn journal_record(record: &journal::ActionRecord) -> Value {
     object.insert("completed".to_owned(), record.completed.to_string().into());
     object.insert("skipped".to_owned(), record.skipped.to_string().into());
     object.insert("failed".to_owned(), record.failed.to_string().into());
-    object.insert(
-        "selectedBytes".to_owned(),
-        record.selected_bytes.to_string().into(),
-    );
+    match &record.manager {
+        None => {
+            object.insert(
+                "selectedBytes".to_owned(),
+                record.selected_bytes.to_string().into(),
+            );
+        }
+        Some(manager) => {
+            if let Some(estimated) = manager.estimated_bytes {
+                object.insert("selectedBytes".to_owned(), estimated.to_string().into());
+            }
+            object.insert("manager".to_owned(), manager_record(manager));
+        }
+    }
     object.insert(
         "bytesMovedToTrash".to_owned(),
         record.trashed_bytes.to_string().into(),
@@ -1988,6 +2384,7 @@ mod tests {
                 "scan",
                 "query-index",
                 "hash-candidates",
+                "inspect",
                 "trash",
                 "erase",
                 "empty-trash",
@@ -1995,6 +2392,9 @@ mod tests {
                 "dedup-hardlink",
                 "copy-move",
                 "compress",
+                "manager-begin",
+                "manager-append",
+                "manager-finish",
                 "journal-reconcile"
             ])
         );
@@ -2068,16 +2468,14 @@ mod tests {
         assert_eq!(output[0]["result"]["records"], json!([]));
     }
 
-    /// An operation this build does not implement is refused by name, so a
-    /// client can tell "not here yet" from "never".
     #[test]
-    fn a_planned_operation_is_explicitly_unsupported() {
+    fn an_operation_no_build_has_is_refused_by_name() {
         let output = responses(
-            "{\"protocolVersion\":1,\"requestId\":\"inspect-1\",\"operation\":\"inspect\",\"arguments\":{}}\n",
+            "{\"protocolVersion\":1,\"requestId\":\"nope-1\",\"operation\":\"system-prune\",\"arguments\":{}}\n",
         );
         assert_eq!(output[0]["event"], "error");
-        assert_eq!(output[0]["requestId"], "inspect-1");
-        assert_eq!(output[0]["error"]["code"], "unsupported-operation");
+        assert_eq!(output[0]["requestId"], "nope-1");
+        assert_eq!(output[0]["error"]["code"], "unknown-operation");
     }
 
     #[test]
@@ -2338,11 +2736,31 @@ mod tests {
         )
     }
 
+    fn subtree_of(path: &[u8]) -> Option<String> {
+        let parent = crate::guard::resolve_parent(path).expect("the path resolves");
+        let live = crate::sys::metadata_at(parent.descriptor(), &parent.name).expect("it is there");
+        if live.kind != crate::sys::EntryKind::Directory {
+            return None;
+        }
+        let subtree = crate::subtree::digest(
+            parent.descriptor(),
+            &parent.name,
+            &std::sync::atomic::AtomicBool::new(false),
+        )
+        .expect("the reviewed directory reads");
+        Some(format!(
+            ",\"subtree\":{{\"entries\":\"{}\",\"digest\":\"{}\"}}",
+            subtree.entries,
+            subtree.hex()
+        ))
+    }
+
     fn target(path: &[u8], reviewed_bytes: u64) -> String {
         format!(
-            "{{\"path\":\"{}\",\"expected\":{},\"reviewedBytes\":\"{reviewed_bytes}\"}}",
+            "{{\"path\":\"{}\",\"expected\":{},\"reviewedBytes\":\"{reviewed_bytes}\"{}}}",
             crate::base64::encode(path),
             fingerprint(path),
+            subtree_of(path).unwrap_or_default(),
         )
     }
 
@@ -2555,6 +2973,331 @@ mod tests {
         assert!(record["items"][0]["destination"].is_string());
     }
 
+    #[test]
+    fn as_root_the_helper_changes_no_user_file_itself() {
+        assert!(generic_mutation_refusal(0).is_some());
+        assert!(generic_mutation_refusal(1000).is_none());
+    }
+
+    // --- Manager actions ---------------------------------------------------------
+
+    #[test]
+    fn a_manager_action_is_journalled_from_intent_to_outcome_in_one_session() {
+        let sandbox = Sandbox::new("manager-protocol");
+        let mut state = sandbox.bytes();
+        state.extend_from_slice(b"/state");
+        let journal = crate::base64::encode(&state);
+        let begin = format!(
+            "{{\"protocolVersion\":1,\"requestId\":\"mb-1\",\"operation\":\"manager-begin\",\
+               \"arguments\":{{\"planId\":\"plan-0123456789abcd\",\"journalDirectory\":\"{journal}\",\
+               \"adapter\":\"apt\",\"action\":\"apt.clean\",\"privilege\":\"root\",\
+               \"commands\":[{{\"tool\":\"apt-get\",\"arguments\":[\"clean\"]}}],\
+               \"items\":[{{\"id\":\"curl_8.5.0-2_amd64.deb\",\"bytes\":\"400000\"}}],\
+               \"estimatedBytes\":\"400000\",\"freeBytesBefore\":\"1000\"}}}}\n"
+        );
+        let events = session(&[begin], |events| terminal(events, "mb-1"));
+        let action_id = completion(&events, "mb-1")["result"]["actionId"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+
+        let append = |id: &str, phase: &str, extra: &str| {
+            format!(
+                "{{\"protocolVersion\":1,\"requestId\":\"{id}\",\"operation\":\"manager-append\",\
+                   \"arguments\":{{\"journalDirectory\":\"{journal}\",\"actionId\":\"{action_id}\",\
+                   \"command\":\"0\",\"phase\":\"{phase}\"{extra}}}}}\n"
+            )
+        };
+        let finish = format!(
+            "{{\"protocolVersion\":1,\"requestId\":\"mf-1\",\"operation\":\"manager-finish\",\
+               \"arguments\":{{\"journalDirectory\":\"{journal}\",\"actionId\":\"{action_id}\",\
+               \"items\":[{{\"position\":\"0\",\"outcome\":\"completed\"}}],\"freeBytesAfter\":\"401000\"}}}}\n"
+        );
+        let _ = action_id;
+        let events = session(
+            &[
+                append("ma-1", "started", ""),
+                append(
+                    "ma-2",
+                    "finished",
+                    ",\"exitCode\":\"0\",\"output\":\"Done\"",
+                ),
+                finish,
+            ],
+            |events| terminal(events, "mf-1"),
+        );
+        assert_eq!(completion(&events, "ma-1")["result"]["recorded"], true);
+        let result = &completion(&events, "mf-1")["result"];
+        assert_eq!(result["state"], "complete");
+        assert_eq!(result["selectedBytes"], "400000");
+        assert_eq!(result["bytesMovedToTrash"], "0");
+        assert_eq!(result["undoAvailable"], false);
+    }
+
+    #[test]
+    fn a_manager_action_another_helper_began_cannot_be_appended_to() {
+        let sandbox = Sandbox::new("manager-protocol-owner");
+        let mut state = sandbox.bytes();
+        state.extend_from_slice(b"/state");
+        let journal = crate::base64::encode(&state);
+        let begin = format!(
+            "{{\"protocolVersion\":1,\"requestId\":\"mb-2\",\"operation\":\"manager-begin\",\
+               \"arguments\":{{\"planId\":\"plan-0123456789abcd\",\"journalDirectory\":\"{journal}\",\
+               \"adapter\":\"docker\",\"action\":\"docker.prune-build-cache\",\"privilege\":\"user\",\
+               \"commands\":[{{\"tool\":\"docker\",\"arguments\":[\"builder\",\"prune\",\"--force\"]}}],\
+               \"items\":[]}}}}\n"
+        );
+        let events = session(&[begin], |events| terminal(events, "mb-2"));
+        let action_id = completion(&events, "mb-2")["result"]["actionId"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        crate::journal::Journal::open(std::path::Path::new(std::ffi::OsStr::from_bytes(&state)))
+            .unwrap()
+            .connection_for_tests()
+            .execute(
+                "UPDATE action SET owner_pid = 1 WHERE id = ?1",
+                [&action_id],
+            )
+            .unwrap();
+        let append = format!(
+            "{{\"protocolVersion\":1,\"requestId\":\"ma-3\",\"operation\":\"manager-append\",\
+               \"arguments\":{{\"journalDirectory\":\"{journal}\",\"actionId\":\"{action_id}\",\
+               \"command\":\"0\",\"phase\":\"started\"}}}}\n"
+        );
+        let events = session(&[append], |events| terminal(events, "ma-3"));
+        assert_eq!(events.last().unwrap()["error"]["code"], "unknown-request");
+    }
+
+    #[test]
+    fn a_manager_begin_naming_a_shell_is_refused() {
+        let sandbox = Sandbox::new("manager-protocol-shell");
+        let mut state = sandbox.bytes();
+        state.extend_from_slice(b"/state");
+        let begin = format!(
+            "{{\"protocolVersion\":1,\"requestId\":\"mb-3\",\"operation\":\"manager-begin\",\
+               \"arguments\":{{\"planId\":\"plan-0123456789abcd\",\"journalDirectory\":\"{}\",\
+               \"adapter\":\"apt\",\"action\":\"apt.clean\",\"privilege\":\"root\",\
+               \"commands\":[{{\"tool\":\"sh\",\"arguments\":[\"-c\",\"true\"]}}],\"items\":[]}}}}\n",
+            crate::base64::encode(&state)
+        );
+        let events = session(&[begin], |events| terminal(events, "mb-3"));
+        assert_eq!(events.last().unwrap()["error"]["code"], "invalid-arguments");
+    }
+
+    // --- A reviewed directory's contents --------------------------------------
+
+    #[test]
+    fn a_directory_whose_contents_changed_since_review_is_not_trashed() {
+        let sandbox = Sandbox::new("subtree-trash");
+        sandbox.directory(b"state");
+        sandbox.directory(b"cache/inner");
+        sandbox.file(b"cache/inner/a.bin", 64);
+        let mut cache = sandbox.bytes();
+        cache.extend_from_slice(b"/cache");
+        let reviewed = target(&cache, 64);
+        sandbox.file(b"cache/inner/new.bin", 1);
+
+        let events = run_trash("subtree-1", &sandbox, &[reviewed]);
+        let item = item_results(&events, "subtree-1")[0];
+        assert_eq!(item["itemResult"]["outcome"], "skipped");
+        assert_eq!(item["itemResult"]["reason"], "changed-target");
+        assert!(sandbox.path().join("cache/inner/new.bin").exists());
+    }
+
+    #[test]
+    fn a_directory_target_without_its_reviewed_subtree_is_refused() {
+        let sandbox = Sandbox::new("subtree-missing");
+        sandbox.directory(b"state");
+        sandbox.directory(b"cache");
+        let mut cache = sandbox.bytes();
+        cache.extend_from_slice(b"/cache");
+        let bare = format!(
+            "{{\"path\":\"{}\",\"expected\":{},\"reviewedBytes\":\"0\"}}",
+            crate::base64::encode(&cache),
+            fingerprint(&cache),
+        );
+        let events = run_trash("subtree-2", &sandbox, &[bare]);
+        let last = events.last().unwrap();
+        assert_eq!(last["event"], "error");
+        assert_eq!(last["error"]["code"], "invalid-arguments");
+        assert!(sandbox.path().join("cache").exists());
+    }
+
+    #[test]
+    fn inspect_answers_with_a_digest_for_a_directory_and_a_refusal_for_a_file() {
+        let sandbox = Sandbox::new("inspect");
+        sandbox.directory(b"tree");
+        sandbox.file(b"tree/a.bin", 8);
+        sandbox.file(b"plain.bin", 8);
+        let mut tree = sandbox.bytes();
+        tree.extend_from_slice(b"/tree");
+        let mut plain = sandbox.bytes();
+        plain.extend_from_slice(b"/plain.bin");
+        let request = format!(
+            "{{\"protocolVersion\":1,\"requestId\":\"inspect-1\",\"operation\":\"inspect\",\
+               \"arguments\":{{\"paths\":[\"{}\",\"{}\"]}}}}\n",
+            crate::base64::encode(&tree),
+            crate::base64::encode(&plain),
+        );
+        let events = session(&[request], |events| terminal(events, "inspect-1"));
+        let result = &completion(&events, "inspect-1")["result"]["paths"];
+        assert_eq!(result[0]["subtree"]["entries"], "1");
+        assert_eq!(result[0]["subtree"]["digest"].as_str().unwrap().len(), 64);
+        assert_eq!(result[1]["refusal"]["code"], "invalid-arguments");
+    }
+
+    // --- What a crash left staged ------------------------------------------
+
+    fn staged_leftover(
+        sandbox: &Sandbox,
+        name: &[u8],
+    ) -> (crate::journal::Journal, String, Vec<u8>) {
+        use std::os::unix::fs::MetadataExt;
+        let mut state = sandbox.path().to_path_buf();
+        state.push("state");
+        let journal = crate::journal::Journal::open(&state).unwrap();
+        let mut staged = sandbox.bytes();
+        staged.push(b'/');
+        staged.extend_from_slice(name);
+        let id = journal
+            .begin("plan-0123456789ab", "copy-move", None)
+            .unwrap();
+        journal
+            .record_intent(&id, 0, b"/somewhere/else", Some(&staged))
+            .unwrap();
+        let metadata = std::fs::symlink_metadata(std::ffi::OsStr::from_bytes(&staged)).unwrap();
+        journal
+            .record_staging(
+                &id,
+                0,
+                &staged,
+                &crate::journal::Identity {
+                    device: metadata.dev(),
+                    inode: metadata.ino(),
+                },
+            )
+            .unwrap();
+        crate::journal::tests_support::abandon(&journal, &id);
+        journal.reconcile().unwrap();
+        (journal, id, staged)
+    }
+
+    #[test]
+    fn a_staged_copy_a_crash_left_behind_is_released_when_it_is_still_what_was_staged() {
+        let sandbox = Sandbox::new("staging-released");
+        sandbox.file(b"big.bin.disktop-partial-999999-0", 4096);
+        let (journal, id, staged) = staged_leftover(&sandbox, b"big.bin.disktop-partial-999999-0");
+
+        assert_eq!(
+            crate::actions::release_abandoned_staging(&journal, 1000).unwrap(),
+            1
+        );
+        assert!(!std::path::Path::new(std::ffi::OsStr::from_bytes(&staged)).exists());
+        let record = journal.get(&id).unwrap().unwrap();
+        assert!(
+            record.items[0]
+                .reason
+                .as_deref()
+                .unwrap()
+                .contains("removed")
+        );
+        assert_eq!(
+            crate::actions::release_abandoned_staging(&journal, 1000).unwrap(),
+            0,
+            "a second pass changes nothing"
+        );
+    }
+
+    #[test]
+    fn as_root_reconciliation_releases_nothing_and_leaves_the_record_for_later() {
+        let sandbox = Sandbox::new("staging-root");
+        sandbox.file(b"big.bin.disktop-partial-999999-0", 4096);
+        let (journal, _id, staged) = staged_leftover(&sandbox, b"big.bin.disktop-partial-999999-0");
+
+        assert_eq!(
+            crate::actions::release_abandoned_staging(&journal, 0).unwrap(),
+            0
+        );
+        assert!(std::path::Path::new(std::ffi::OsStr::from_bytes(&staged)).exists());
+        assert_eq!(
+            journal.abandoned_staging().unwrap().len(),
+            1,
+            "a later reconcile as the user can still release it"
+        );
+        assert_eq!(
+            crate::actions::release_abandoned_staging(&journal, 1000).unwrap(),
+            1
+        );
+    }
+
+    #[test]
+    fn a_staged_name_that_now_holds_something_else_is_left_alone() {
+        let sandbox = Sandbox::new("staging-kept");
+        sandbox.directory(b"tree.disktop-partial-999999-0");
+        let (journal, id, staged) = staged_leftover(&sandbox, b"tree.disktop-partial-999999-0");
+        std::fs::remove_dir(std::ffi::OsStr::from_bytes(&staged)).unwrap();
+        std::fs::write(std::ffi::OsStr::from_bytes(&staged), b"somebody else's").unwrap();
+
+        crate::actions::release_abandoned_staging(&journal, 1000).unwrap();
+        assert_eq!(
+            std::fs::read(std::ffi::OsStr::from_bytes(&staged)).unwrap(),
+            b"somebody else's"
+        );
+        let record = journal.get(&id).unwrap().unwrap();
+        assert!(
+            record.items[0]
+                .reason
+                .as_deref()
+                .unwrap()
+                .contains("left in place")
+        );
+    }
+
+    #[test]
+    fn a_move_forgets_what_it_staged_once_published() {
+        let sandbox = Sandbox::new("staging-recorded");
+        sandbox.directory(b"state");
+        sandbox.directory(b"from");
+        sandbox.directory(b"to");
+        sandbox.file(b"from/data.bin", 8192);
+        let mut source = sandbox.bytes();
+        source.extend_from_slice(b"/from/data.bin");
+        let mut destination = sandbox.bytes();
+        destination.extend_from_slice(b"/to");
+        let mut state = sandbox.bytes();
+        state.extend_from_slice(b"/state");
+        let request = format!(
+            "{{\"protocolVersion\":1,\"requestId\":\"move-staging\",\"operation\":\"copy-move\",\
+               \"arguments\":{{\"planId\":\"plan-0123456789abcd\",\"journalDirectory\":\"{}\",\
+               \"homeTrashDirectory\":\"{}\",\"destinationDirectory\":\"{}\",\
+               \"sourceDisposition\":\"permanent\",\"targets\":[{}]}}}}\n",
+            crate::base64::encode(&state),
+            crate::base64::encode(b"/nonexistent-trash"),
+            crate::base64::encode(&destination),
+            target(&source, 8192),
+        );
+        let events = session(&[request], |events| terminal(events, "move-staging"));
+        assert_eq!(
+            completion(&events, "move-staging")["result"]["completed"],
+            "1"
+        );
+
+        let journal = crate::journal::Journal::open(std::path::Path::new(
+            std::ffi::OsStr::from_bytes(&state),
+        ))
+        .unwrap();
+        let staged: i64 = journal
+            .connection_for_tests()
+            .query_row(
+                "SELECT count(*) FROM action_item WHERE staging IS NOT NULL",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(staged, 0, "a published item holds no staging name");
+    }
+
     // --- Replacing a duplicate with a hardlink ------------------------------
 
     fn hardlink_request(id: &str, sandbox: &Sandbox, keep: &[u8], targets: &[String]) -> String {
@@ -2587,6 +3330,40 @@ mod tests {
     fn link_count(path: &std::path::Path) -> u64 {
         use std::os::unix::fs::MetadataExt;
         std::fs::metadata(path).expect("the file exists").nlink()
+    }
+
+    #[test]
+    fn a_hardlink_group_on_two_filesystems_is_refused_before_any_item() {
+        let sandbox = Sandbox::new("hardlink-devices");
+        sandbox.directory(b"state");
+        let content = vec![4u8; 4096];
+        std::fs::write(sandbox.path().join("keep.bin"), &content).unwrap();
+        std::fs::write(sandbox.path().join("copy.bin"), &content).unwrap();
+        let mut keep = sandbox.bytes();
+        keep.extend_from_slice(b"/keep.bin");
+        let mut copy = sandbox.bytes();
+        copy.extend_from_slice(b"/copy.bin");
+
+        let device = {
+            use std::os::unix::fs::MetadataExt;
+            std::fs::metadata(sandbox.path().join("copy.bin"))
+                .unwrap()
+                .dev()
+        };
+        let elsewhere = target(&copy, 4096).replace(
+            &format!("\"device\":\"{device}\""),
+            &format!("\"device\":\"{}\"", device + 1),
+        );
+
+        let events = run_hardlink("link-devices", &sandbox, &keep, &[elsewhere]);
+        let last = events.last().expect("a terminal event");
+        assert_eq!(last["event"], "error");
+        assert_eq!(last["error"]["code"], "different-filesystem");
+        assert!(item_results(&events, "link-devices").is_empty());
+        assert!(!same_inode(
+            &sandbox.path().join("keep.bin"),
+            &sandbox.path().join("copy.bin")
+        ));
     }
 
     #[test]
@@ -3810,8 +4587,10 @@ mod tests {
 
         let protected = format!(
             "{{\"path\":\"{}\",\"expected\":{{\"device\":\"1\",\"inode\":\"2\",\"mountId\":\"3\",\
-               \"kind\":\"directory\",\"apparentBytes\":\"4\",\"modifiedNanoseconds\":\"5\"}}}}",
+               \"kind\":\"directory\",\"apparentBytes\":\"4\",\"modifiedNanoseconds\":\"5\"}},\
+               \"subtree\":{{\"entries\":\"0\",\"digest\":\"{}\"}}}}",
             crate::base64::encode(b"/usr/lib"),
+            "0".repeat(64),
         );
 
         let events = run_erase("erase-3", &sandbox, &[reviewed, protected]);
@@ -3850,7 +4629,22 @@ mod tests {
         state.extend_from_slice(b"/state");
         let encoded: Vec<String> = directories
             .iter()
-            .map(|directory| format!("\"{}\"", crate::base64::encode(directory)))
+            .map(|directory| {
+                let parent = crate::guard::resolve_parent(directory).expect("the Trash resolves");
+                let subtree = crate::subtree::digest(
+                    parent.descriptor(),
+                    &parent.name,
+                    &std::sync::atomic::AtomicBool::new(false),
+                )
+                .map(|subtree| (subtree.entries, subtree.hex()))
+                .unwrap_or((0, "0".repeat(64)));
+                format!(
+                    "{{\"path\":\"{}\",\"subtree\":{{\"entries\":\"{}\",\"digest\":\"{}\"}}}}",
+                    crate::base64::encode(directory),
+                    subtree.0,
+                    subtree.1
+                )
+            })
             .collect();
         let mut home_trash = sandbox.bytes();
         home_trash.extend_from_slice(b"/trash-home");
@@ -3896,6 +4690,30 @@ mod tests {
             sandbox.path().join("trash-home/files").exists(),
             "the Trash itself stays; only its contents go"
         );
+    }
+
+    #[test]
+    fn something_trashed_after_the_review_is_not_released_by_emptying_trash() {
+        let sandbox = Sandbox::new("empty-trash-addition");
+        sandbox.directory(b"work");
+        sandbox.file(b"work/one.bin", 1024);
+        sandbox.file(b"work/two.bin", 1024);
+        let mut one = sandbox.bytes();
+        one.extend_from_slice(b"/work/one.bin");
+        let mut two = sandbox.bytes();
+        two.extend_from_slice(b"/work/two.bin");
+        run_trash("trash-21", &sandbox, &[target(&one, 1024)]);
+
+        let mut trash = sandbox.bytes();
+        trash.extend_from_slice(b"/trash-home");
+        let reviewed = empty_trash_request("empty-late", &sandbox, &[trash]);
+        run_trash("trash-22", &sandbox, &[target(&two, 1024)]);
+
+        let events = session(&[reviewed], |events| terminal(events, "empty-late"));
+        let result = &completion(&events, "empty-late")["result"];
+        assert_eq!(result["skipped"], "1");
+        assert!(sandbox.path().join("trash-home/files/one.bin").exists());
+        assert!(sandbox.path().join("trash-home/files/two.bin").exists());
     }
 
     #[test]

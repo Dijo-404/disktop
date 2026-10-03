@@ -1,0 +1,35 @@
+{
+  "schemaVersion": "1",
+  "command": "timer",
+  "generatedAt": "2026-10-03T09:00:00.000Z",
+  "status": "complete",
+  "exitCode": 0,
+  "data": {
+    "action": "install",
+    "capability": {
+      "status": "available",
+      "explanation": "A systemd user instance answered."
+    },
+    "units": [
+      {
+        "name": "cron.service",
+        "path": {
+          "bytesBase64": "L2hvbWUvZXhhbXBsZS8uY29uZmlnL3N5c3RlbWQvdXNlci9kaXNrdG9wLWFsZXJ0cy5zZXJ2aWNl",
+          "display": "/home/example/.config/systemd/user/disktop-alerts.service",
+          "utf8": "/home/example/.config/systemd/user/disktop-alerts.service"
+        },
+        "state": "written"
+      },
+      {
+        "name": "disktop-alerts.timer",
+        "path": {
+          "bytesBase64": "L2hvbWUvZXhhbXBsZS8uY29uZmlnL3N5c3RlbWQvdXNlci9kaXNrdG9wLWFsZXJ0cy50aW1lcg==",
+          "display": "/home/example/.config/systemd/user/disktop-alerts.timer",
+          "utf8": "/home/example/.config/systemd/user/disktop-alerts.timer"
+        },
+        "state": "written"
+      }
+    ],
+    "enabled": true
+  }
+}

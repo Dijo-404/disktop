@@ -66,8 +66,8 @@ export interface FindOptions {
   readonly olderThan?: string;
 }
 
-/** The operations `clean plan` can fix today. Manager cleanup is Phase 6. */
 const PLANNABLE: readonly ActionOperation[] = [
+  "manager",
   "trash",
   "permanent",
   "empty-trash",
@@ -86,7 +86,8 @@ export async function runPlan(context: CliContext, options: PlanOptions): Promis
   // a plan file; this is the single place they are translated.
   const operation = (options.operation === "hardlink"
     ? "dedup-hardlink"
-    : (options.operation ?? "trash")) as ActionOperation;
+    : (options.operation ??
+      (options.findingId?.startsWith("managers:") === true ? "manager" : "trash"))) as ActionOperation;
   // Emptying Trash needs no subject: Disktop already knows where Trash is.
   if (operation !== "empty-trash" && options.findingId === undefined && options.path === undefined) {
     return refuse(context, "clean plan", options.asJson, {
@@ -186,6 +187,7 @@ export async function runApply(context: CliContext, options: ApplyOptions): Prom
         planId: options.planId,
         confirmed: options.confirmed,
         acknowledgePermanent: options.acknowledgePermanent,
+        interactive: context.interactive && !options.asJson,
       },
       controller.signal,
     );
@@ -199,7 +201,7 @@ export async function runApply(context: CliContext, options: ApplyOptions): Prom
   if (outcome.kind === "unavailable") {
     return refuse(context, "clean apply", options.asJson, {
       code: "unsupported",
-      message: `Disktop cannot change files on this machine: ${outcome.capability.explanation}`,
+      message: `Disktop cannot carry this out on this machine: ${outcome.capability.explanation}`,
     });
   }
 
@@ -253,8 +255,36 @@ export async function runApply(context: CliContext, options: ApplyOptions): Prom
 }
 
 /** The durable record of what was done, reconciled as it is read. */
-export async function runHistory(context: CliContext, asJson: boolean): Promise<number> {
-  const page = await context.actions.history();
+export interface HistoryOptions {
+  readonly asJson: boolean;
+  readonly cursor?: string;
+  readonly limit?: string;
+}
+
+export async function runHistory(context: CliContext, options: HistoryOptions): Promise<number> {
+  const asJson = options.asJson;
+  if (
+    options.limit !== undefined &&
+    (!/^[1-9][0-9]{0,2}$/.test(options.limit) || Number(options.limit) > 200)
+  ) {
+    return refuse(context, "history", asJson, {
+      code: "invalid-input",
+      message: "'--limit' accepts a whole number of records from 1 to 200.",
+    });
+  }
+  let page;
+  try {
+    page = await context.actions.history(
+      options.cursor,
+      options.limit === undefined ? undefined : Number(options.limit),
+    );
+  } catch (error) {
+    const failure = (error as { failure?: OperationFailure }).failure;
+    if (failure === undefined || options.cursor === undefined) {
+      throw error;
+    }
+    return refuse(context, "history", asJson, { code: "invalid-input", message: failure.message });
+  }
 
   if (asJson) {
     writeEnvelope(
@@ -277,6 +307,9 @@ export async function runHistory(context: CliContext, asJson: boolean): Promise<
 
   for (const line of historyLines(page.records, context.settings.units)) {
     context.output.stdout(`${line}\n`);
+  }
+  if (page.nextCursor !== undefined) {
+    context.output.stdout(`More: disktop history --cursor ${page.nextCursor}\n`);
   }
   if (page.reconciled > 0n) {
     context.output.stderr(
@@ -410,18 +443,29 @@ export async function runFind(context: CliContext, options: FindOptions): Promis
     staleBeforeNanoseconds = staleBeforeNanoseconds_(context.now(), Number(days));
   }
 
-  const outcome = await context.actions.find({
-    kind: options.kind as FindKind,
-    scanId: scan.scanId,
-    path: wanted,
-    ...(options.limit === undefined ? {} : { limit: Number(options.limit) }),
-    rule: rule as KeepRule,
-    ...(options.keepUnder === undefined
-      ? {}
-      : { keepUnder: rawPathFromUtf8(context.resolvePath(options.keepUnder)) }),
-    ...(minimumBytes === undefined ? {} : { minimumBytes }),
-    ...(staleBeforeNanoseconds === undefined ? {} : { staleBeforeNanoseconds }),
-  });
+  const controller = new AbortController();
+  const interrupt = (): void => controller.abort();
+  context.signals.listen(interrupt);
+  let outcome;
+  try {
+    outcome = await context.actions.find(
+      {
+        kind: options.kind as FindKind,
+        scanId: scan.scanId,
+        path: wanted,
+        ...(options.limit === undefined ? {} : { limit: Number(options.limit) }),
+        rule: rule as KeepRule,
+        ...(options.keepUnder === undefined
+          ? {}
+          : { keepUnder: rawPathFromUtf8(context.resolvePath(options.keepUnder)) }),
+        ...(minimumBytes === undefined ? {} : { minimumBytes }),
+        ...(staleBeforeNanoseconds === undefined ? {} : { staleBeforeNanoseconds }),
+      },
+      controller.signal,
+    );
+  } finally {
+    context.signals.stop(interrupt);
+  }
 
   if (outcome.kind === "refused") {
     return refuse(context, "find", options.asJson, outcome.failure);

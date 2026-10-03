@@ -90,10 +90,10 @@ test("the journal is reported through journalctl, not as a directory to delete",
   );
 
   const journal = result.findings.find((finding) => finding.id.endsWith(":systemd-journal"));
-  assert.equal(journal.size.bytes, 1_200_000_000n);
+  assert.equal(journal.size.bytes, 1_288_490_189n);
   assert.equal(journal.size.basis, "manager-reported");
-  assert.deepEqual(journal.availableActionIds, ["manager"]);
-  assert.equal(journal.managerScope, "journalctl --vacuum-size");
+  assert.deepEqual(journal.availableActionIds, [], "the vacuum is offered by the managers provider, once");
+  assert.ok(journal.evidence.some((line) => /managers:journald\.vacuum/.test(line)));
 });
 
 test("a denied lsof is a capability state with no findings, never an empty answer", async () => {

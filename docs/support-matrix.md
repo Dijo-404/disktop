@@ -46,6 +46,24 @@ Node 24 remains the [LTS baseline](https://nodejs.org/en/about/previous-releases
 
 Containers cannot prove hardware health, real mount behavior, privilege prompts, or terminal behavior for every host. Those cases need a host or VM check before a support claim is made. Linux distribution names above describe the CI targets, not a complete compatibility list.
 
+## Manager adapters and what was checked
+
+| Adapter | Distribution | Checked here |
+| --- | --- | --- |
+| apt (`apt-get clean`), old kernels (`dpkg --purge`, simulated with `apt-get -s purge`) | Debian, Ubuntu | Fixture output; not run on a host. |
+| dnf (`dnf clean packages`), old kernels (`rpm -e`, tested with `rpm -e --test`) | Fedora | Fixture output; not run on a host. |
+| pacman (`pacman -Sc`) | Arch | Cache read on an Arch host (read-only); kernels reported as nothing to remove, since pacman keeps one version. |
+| journald (`journalctl --vacuum-size`) | systemd hosts | Disk usage read on an Arch host (read-only). |
+| Snap (`snap remove --revision`) | Ubuntu and others | Fixture output; not run on a host. |
+| Flatpak (`flatpak uninstall --unused`) | any | Installations listed on an Arch host (read-only). |
+| Docker, Podman | any | Docker read on an Arch host (read-only), including the named-versus-anonymous volume split; Podman from fixture output. |
+| systemd-tmpfiles (`--clean`, crash prefixes) | systemd hosts | Dry runs on an Arch host. |
+| `sudo -n` refusal | any | Observed on an Arch host where sudo needs a password. |
+| systemd user timer | systemd hosts | Units written and removed under a throwaway configuration directory; the host's own user manager was not changed. |
+
+No test suite runs a real manager command that changes anything. Apply is exercised
+against the real helper journal with a fake command runner.
+
 ## Optional dependency behavior
 
 | Dependency | Feature area | If absent or denied |

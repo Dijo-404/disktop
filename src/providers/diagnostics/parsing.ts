@@ -174,26 +174,7 @@ export function parseSmartHealth(text: string): SmartHealth | undefined {
   return Object.keys(health).length === 0 ? undefined : health;
 }
 
-/**
- * `journalctl --disk-usage`: one sentence with a size in it.
- *
- * The trailing `B` is optional because journalctl prints `1.2G`, while other
- * builds and locales print `1.2GB` or `4.0GiB`.
- */
-export function parseJournalUsage(text: string): bigint | undefined {
-  const match = /([0-9]+(?:[.,][0-9]+)?)\s*([KMGTP]?)(i?)B?\b/i.exec(text);
-  if (match === null) {
-    return undefined;
-  }
-  const amount = Number((match[1] as string).replace(",", "."));
-  if (!Number.isFinite(amount)) {
-    return undefined;
-  }
-  const prefix = (match[2] as string).toUpperCase();
-  const base = (match[3] as string).toLowerCase() === "i" ? 1024 : 1000;
-  const exponent = prefix === "" ? 0 : "KMGTP".indexOf(prefix) + 1;
-  return BigInt(Math.round(amount * base ** exponent));
-}
+export { parseJournalUsage } from "../../domain/tool-output.js";
 
 function wholeNumber(value: unknown): bigint | undefined {
   if (typeof value === "number" && Number.isSafeInteger(value) && value >= 0) {

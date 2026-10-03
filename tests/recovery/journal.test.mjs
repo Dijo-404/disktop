@@ -402,3 +402,62 @@ test("a killed move leaves no half-written file under a published name", async (
     );
   }
 });
+
+/** Begin a manager action, mark its command started, and kill the helper before it finishes. */
+function killAfterStarted(root) {
+  return new Promise((done, fail) => {
+    const child = spawn(binary, [], { stdio: ["pipe", "pipe", "pipe"] });
+    const journalDirectory = encode(join(root, "state"));
+    let buffer = "";
+    let actionId;
+    child.stdout.setEncoding("utf8").on("data", (chunk) => {
+      buffer += chunk;
+      let newline = buffer.indexOf("\n");
+      while (newline >= 0) {
+        const event = JSON.parse(buffer.slice(0, newline));
+        buffer = buffer.slice(newline + 1);
+        if (event.requestId === "begin-1" && event.event === "complete") {
+          actionId = event.result.actionId;
+          child.stdin.write(
+            `${JSON.stringify(request("manager-append", "append-1", { journalDirectory, actionId, command: "0", phase: "started" }))}\n`,
+          );
+        } else if (event.requestId === "append-1" && event.event === "complete") {
+          child.kill("SIGKILL");
+        } else if (event.event === "error") {
+          fail(new Error(JSON.stringify(event)));
+        }
+        newline = buffer.indexOf("\n");
+      }
+    });
+    child.on("error", fail);
+    child.on("close", () => done(actionId));
+    child.stdin.write(
+      `${JSON.stringify(
+        request("manager-begin", "begin-1", {
+          planId: "plan-recovery-manager",
+          journalDirectory,
+          adapter: "journald",
+          action: "journald.vacuum",
+          privilege: "root",
+          commands: [{ tool: "journalctl", arguments: ["--vacuum-size=536870912"] }],
+          items: [],
+        }),
+      )}\n`,
+    );
+  });
+}
+
+test("a manager command that started and never reported back is uncertain, and so is its action", async () => {
+  const { root } = await sandbox(0);
+  const actionId = await killAfterStarted(root);
+  assert.ok(actionId, "the action was begun before the helper died");
+
+  const page = await journal(root);
+  const record = page.records.find((entry) => entry.id === actionId);
+  assert.equal(record.state, "uncertain");
+  assert.equal(record.manager.commands[0].state, "uncertain");
+  assert.equal(record.selectedBytes, undefined, "nobody said how much a vacuum would remove");
+
+  const again = await journal(root);
+  assert.equal(again.reconciled, "0", "reconciling twice changes nothing");
+});

@@ -205,3 +205,10 @@ test("each package manager is asked once per run, not once per probe and once pe
   const dpkg = calls.filter((name) => name === "dpkg-query").length;
   assert.equal(dpkg, 1, `dpkg-query ran ${dpkg} times for one clean`);
 });
+
+test("a package is reported, not offered: removing one is its manager's own command", async () => {
+  const result = await discover(providerFor({ "dpkg-query": { stdout: DPKG } }), discoveryEnvironment(home));
+  for (const finding of result.findings.filter((entry) => entry.managerScope?.includes(" "))) {
+    assert.deepEqual(finding.availableActionIds, [], `${finding.id} offers an action Disktop has no command for`);
+  }
+});

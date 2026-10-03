@@ -1,0 +1,24 @@
+{
+  "protocolVersion": 1,
+  "requestId": "inspect-1",
+  "eventId": "2",
+  "event": "complete",
+  "result": {
+    "paths": [
+      {
+        "path": "L2hvbWUvZXhhbXBsZS8uY2FjaGUvcGlw",
+        "subtree": {
+          "entries": "1284",
+          "digest": "5f2c00000000000000000000000000000000000000000000000000000000a1b9"
+        }
+      },
+      {
+        "path": "L2hvbWUvZXhhbXBsZS9tbnQ=",
+        "refusal": {
+          "code": "protected-path",
+          "message": "Another filesystem is mounted inside this directory."
+        }
+      }
+    ]
+  }
+}

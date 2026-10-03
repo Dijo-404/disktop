@@ -1,0 +1,17 @@
+{
+  "protocolVersion": 1,
+  "requestId": "inspect-1",
+  "eventId": "2",
+  "event": "complete",
+  "result": {
+    "paths": [
+      {
+        "path": "L2hvbWUvZXhhbXBsZS8uY2FjaGUvcGlw",
+        "subtree": {
+          "entries": "1284",
+          "digest": "5F2C"
+        }
+      }
+    ]
+  }
+}

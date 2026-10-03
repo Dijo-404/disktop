@@ -1,0 +1,75 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/Dijo-404/disktop/schemas/cli/v1/timer.json",
+  "title": "disktop timer install|uninstall --json",
+  "description": "The opt-in systemd user timer that runs 'disktop alerts check --notify'. It never schedules cleanup. Install writes only Disktop's own user units; uninstall removes only units carrying Disktop's marker.",
+  "type": "object",
+  "allOf": [
+    {
+      "$ref": "envelope.json"
+    }
+  ],
+  "properties": {
+    "command": {
+      "const": "timer"
+    },
+    "data": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "action",
+        "capability",
+        "units",
+        "enabled"
+      ],
+      "properties": {
+        "action": {
+          "type": "string",
+          "enum": [
+            "install",
+            "uninstall"
+          ]
+        },
+        "capability": {
+          "$ref": "common.json#/$defs/capability"
+        },
+        "units": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "name",
+              "path",
+              "state"
+            ],
+            "properties": {
+              "name": {
+                "type": "string",
+                "enum": [
+                  "disktop-alerts.service",
+                  "disktop-alerts.timer"
+                ]
+              },
+              "path": {
+                "$ref": "common.json#/$defs/rawPath"
+              },
+              "state": {
+                "type": "string",
+                "enum": [
+                  "written",
+                  "removed",
+                  "absent",
+                  "kept-foreign"
+                ]
+              }
+            }
+          }
+        },
+        "enabled": {
+          "type": "boolean"
+        }
+      }
+    }
+  }
+}

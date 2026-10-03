@@ -256,3 +256,153 @@ test("reading the journal reconciles first and decodes every number losslessly",
   assert.equal(record.items[0].path.display, "/home/example/.cache/pip");
   assert.equal(record.items[0].destination.display, "/home/example/.local/share/Trash/files/pip");
 });
+
+test("a journal item's message reaches Disktop with its control characters made visible", async () => {
+  const helper = fakeHelper([
+    {
+      protocolVersion: 1,
+      requestId: "journal-reconcile-1",
+      eventId: "1",
+      event: "complete",
+      result: {
+        reconciled: "0",
+        records: [
+          {
+            id: "act-1759305679004-9f2c1ab07d4e5610",
+            planId: "plan-01HQ8Z3M4K5N6P7Q",
+            operation: "trash",
+            startedAtMilliseconds: "1759305679004",
+            state: "partial",
+            completed: "0",
+            skipped: "1",
+            failed: "0",
+            selectedBytes: "1",
+            bytesMovedToTrash: "0",
+            items: [
+              {
+                position: "0",
+                path: rawPathFromUtf8("/home/example/a").bytesBase64,
+                outcome: "skipped",
+                message: "changed\u001b[2J\nsecond line",
+                bytes: "1",
+              },
+            ],
+          },
+        ],
+      },
+    },
+  ]);
+  const actions = createNativeActions({
+    journalDirectory: JOURNAL_DIRECTORY,
+    homeTrashDirectory: HOME_TRASH_DIRECTORY,
+    start: helper.start,
+  });
+  const page = await actions.list();
+  assert.doesNotMatch(page.records[0].items[0].message, /[\u001b\n]/);
+});
+
+test("a directory target carries its reviewed subtree to the helper", async () => {
+  const helper = fakeHelper([COMPLETED]);
+  const actions = createNativeActions({ journalDirectory: JOURNAL_DIRECTORY, homeTrashDirectory: HOME_TRASH_DIRECTORY, start: helper.start });
+  const reviewed = plan();
+  const withSubtree = { ...reviewed, entries: [{ ...reviewed.entries[0], subtree: { entries: 9n, digest: "b".repeat(64) } }] };
+  await actions.apply(withSubtree, new AbortController().signal);
+  assert.deepEqual(helper.sent[0].arguments.targets[0].subtree, { entries: "9", digest: "b".repeat(64) });
+});
+
+test("inspect asks the helper once and answers per path", async () => {
+  const pip = rawPathFromUtf8("/home/example/.cache/pip");
+  const etc = rawPathFromUtf8("/home/example/mnt");
+  const helper = fakeHelper([
+    {
+      protocolVersion: 1,
+      requestId: "inspect-1",
+      eventId: "2",
+      event: "complete",
+      result: {
+        paths: [
+          { path: pip.bytesBase64, subtree: { entries: "4", digest: "c".repeat(64) } },
+          { path: etc.bytesBase64, refusal: { code: "protected-path", message: "Another filesystem is mounted inside this directory." } },
+        ],
+      },
+    },
+  ]);
+  const actions = createNativeActions({ journalDirectory: JOURNAL_DIRECTORY, homeTrashDirectory: HOME_TRASH_DIRECTORY, start: helper.start });
+  const answers = await actions.inspect([pip, etc], new AbortController().signal);
+  assert.equal(helper.sent[0].operation, "inspect");
+  assert.deepEqual(answers.get(pip.bytesBase64), { kind: "inspected", subtree: { entries: 4n, digest: "c".repeat(64) } });
+  assert.equal(answers.get(etc.bytesBase64).kind, "refused");
+  assert.equal(answers.get(etc.bytesBase64).code, "protected-path");
+});
+
+test("emptying Trash names each Trash directory with what it held at review", async () => {
+  const helper = fakeHelper([COMPLETED]);
+  const actions = createNativeActions({ journalDirectory: JOURNAL_DIRECTORY, homeTrashDirectory: HOME_TRASH_DIRECTORY, start: helper.start });
+  const trash = rawPathFromUtf8(HOME_TRASH_DIRECTORY);
+  const emptying = plan({
+    operation: "empty-trash",
+    entries: [
+      {
+        path: trash,
+        expected: { device: 1n, inode: 2n, mountId: "1", kind: "directory", apparentBytes: 4096n, modifiedNanoseconds: 1n },
+        reviewedBytes: 0n,
+        subtree: { entries: 2n, digest: "d".repeat(64) },
+      },
+    ],
+  });
+  await actions.apply(emptying, new AbortController().signal);
+  assert.deepEqual(helper.sent[0].arguments.trashDirectories, [
+    { path: trash.bytesBase64, subtree: { entries: "2", digest: "d".repeat(64) } },
+  ]);
+});
+
+test("a manager record decodes with its commands, and an unknown estimate stays absent", async () => {
+  const helper = fakeHelper([
+    {
+      protocolVersion: 1,
+      requestId: "journal-reconcile-1",
+      eventId: "1",
+      event: "complete",
+      result: {
+        reconciled: "1",
+        records: [
+          {
+            id: "act-1790957024565-9f2c1ab07d4e5610",
+            planId: "plan-20261002090000000-7c1d2e3f",
+            operation: "manager",
+            startedAtMilliseconds: "1790957024565",
+            state: "uncertain",
+            completed: "0",
+            skipped: "0",
+            failed: "0",
+            bytesMovedToTrash: "0",
+            manager: {
+              adapter: "journald",
+              action: "journald.vacuum",
+              privilege: "root",
+              commands: [
+                { position: "0", tool: "journalctl", arguments: ["--vacuum-size=536870912"], state: "uncertain", output: "bad\u001b[2J" },
+              ],
+            },
+            items: [],
+          },
+        ],
+      },
+    },
+  ]);
+  const actions = createNativeActions({ journalDirectory: JOURNAL_DIRECTORY, homeTrashDirectory: HOME_TRASH_DIRECTORY, start: helper.start });
+  const [record] = (await actions.list()).records;
+  assert.equal(record.selectedBytes, undefined);
+  assert.equal(record.manager.action, "journald.vacuum");
+  assert.equal(record.manager.commands[0].state, "uncertain");
+  assert.doesNotMatch(record.manager.commands[0].output, /\u001b/);
+});
+
+test("a manager result without an estimate keeps its selected bytes absent", async () => {
+  const { parseActionResult } = await import("../../dist/native/protocol.js");
+  const result = parseActionResult({
+    journalId: "act-1", state: "complete", completed: "0", skipped: "0", failed: "0",
+    bytesMovedToTrash: "0", undoAvailable: false,
+  });
+  assert.equal(result.selectedBytes, undefined);
+});

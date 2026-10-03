@@ -41,6 +41,7 @@ function finding(overrides = {}) {
 
 function service(overrides = {}) {
   const saved = [];
+  const inspected = [];
   const built = {
     service: createPlanService({
       footprint: {
@@ -100,6 +101,17 @@ function service(overrides = {}) {
           };
         },
       },
+      inspect: {
+        async inspect(paths) {
+          inspected.push(...paths);
+          return new Map(
+            paths.map((path) => [
+              path.bytesBase64,
+              overrides.inspect?.(path) ?? { kind: "inspected", subtree: { entries: 3n, digest: "a".repeat(64) } },
+            ]),
+          );
+        },
+      },
       store: { async save(plan) { saved.push(plan); } },
       settings: {
         home: HOME,
@@ -107,6 +119,7 @@ function service(overrides = {}) {
         excludedRoots: [rawPathFromUtf8("/home/example/.local/state/disktop")],
         trashDirectory: rawPathFromUtf8("/home/example/.local/share/Trash"),
         expiryMinutes: 60,
+        ...(overrides.effectiveUserId === undefined ? {} : { effectiveUserId: overrides.effectiveUserId }),
       },
       now: () => NOW,
       ...(overrides.ruleHashes === undefined
@@ -114,6 +127,7 @@ function service(overrides = {}) {
         : { ruleHashFor: (findingId) => overrides.ruleHashes[findingId] }),
     }),
     saved,
+    inspected,
   };
   return built;
 }
@@ -617,4 +631,136 @@ test("a finding that did not come from a rule carries no rule hash", async () =>
 
   assert.equal(outcome.kind, "planned");
   assert.equal(outcome.plan.ruleHash, undefined);
+});
+
+test("a hardlink pair on two filesystems is refused before anything is stored", async () => {
+  const { service: planner, saved } = service({
+    facts: (path) => facts({ kind: "file", device: path.display.endsWith("a.bin") ? 1n : 2n }),
+  });
+
+  const outcome = await planner.plan(
+    {
+      operation: "dedup-hardlink",
+      path: rawPathFromUtf8("/home/example/a.bin"),
+      replacePath: rawPathFromUtf8("/home/example/b.bin"),
+    },
+    SIGNAL,
+  );
+
+  assert.equal(outcome.kind, "refused");
+  assert.equal(outcome.failure.code, "invalid-plan");
+  assert.match(outcome.failure.message, /same filesystem/);
+  assert.equal(saved.length, 0);
+});
+
+test("a reviewed directory carries what was inside it at review time", async () => {
+  const { service: planner, inspected } = service();
+  const outcome = await planner.plan({ operation: "trash", findingId: "cache.language:pip" }, SIGNAL);
+  assert.equal(outcome.kind, "planned");
+  assert.deepEqual(outcome.plan.entries[0].subtree, { entries: 3n, digest: "a".repeat(64) });
+  assert.equal(inspected.length, 1);
+});
+
+test("a file is planned without a subtree and without asking the helper", async () => {
+  const { service: planner, inspected } = service({ facts: facts({ kind: "file" }) });
+  const outcome = await planner.plan({ operation: "trash", path: rawPathFromUtf8("/home/example/a.bin") }, SIGNAL);
+  assert.equal(outcome.kind, "planned");
+  assert.equal(outcome.plan.entries[0].subtree, undefined);
+  assert.equal(inspected.length, 0);
+});
+
+test("a directory the helper could not read all the way down is not planned", async () => {
+  const { service: planner, saved } = service({
+    inspect: () => ({ kind: "refused", code: "protected-path", message: "Another filesystem is mounted inside this directory." }),
+  });
+  const outcome = await planner.plan({ operation: "trash", findingId: "cache.language:pip" }, SIGNAL);
+  assert.equal(outcome.kind, "refused");
+  assert.equal(outcome.failure.code, "protected-path");
+  assert.match(outcome.failure.message, /mounted inside/);
+  assert.equal(saved.length, 0);
+});
+
+test("emptying Trash records what was in it, so something trashed later is not released", async () => {
+  const { service: planner, inspected } = service();
+  const outcome = await planner.plan({ operation: "empty-trash" }, SIGNAL);
+  assert.equal(outcome.kind, "planned");
+  assert.equal(inspected[0].display, "/home/example/.local/share/Trash");
+  assert.ok(outcome.plan.entries[0].subtree);
+});
+
+function managerService(previewOutcome) {
+  const saved = [];
+  const planner = createPlanService({
+    footprint: { async discover() { throw new Error("a manager plan does not rediscover every detector"); } },
+    inventory: { async list() { return { devices: [], filesystems: [{ id: "fs-1", type: "ext4", source: "/dev/sda1", mounts: [rawPathFromUtf8("/")], totalBytes: 1n, freeBytes: 1n, availableBytes: 1n, network: false, removable: false }], warnings: [], capability: { status: "available", explanation: "read" } }; } },
+    paths: { async facts() { return undefined; } },
+    footprints: { async measure() { return { measurements: [], warnings: [] }; } },
+    inspect: { async inspect() { return new Map(); } },
+    managers: { async discover() { return []; }, async preview() { return previewOutcome; } },
+    store: { async save(plan) { saved.push(plan); } },
+    settings: {
+      home: HOME,
+      allowedRoots: [HOME],
+      excludedRoots: [rawPathFromUtf8("/home/example/.local/state/disktop")],
+      trashDirectory: rawPathFromUtf8("/home/example/.local/share/Trash"),
+      expiryMinutes: 60,
+    },
+    now: () => NOW,
+  });
+  return { planner, saved };
+}
+
+const CONTAINER_PROPOSAL = {
+  action: "docker.remove-stopped-containers",
+  title: "Stopped Docker containers",
+  evidence: ["2 container(s) have exited."],
+  items: [{ id: "a".repeat(64) }, { id: "b".repeat(64) }],
+  count: { kind: "exact", value: 2n },
+  bytesBasis: "unknown",
+  preview: "listed",
+  offered: true,
+  parameters: {},
+};
+
+test("a manager finding is planned from a live preview, with its derived commands", async () => {
+  const { planner, saved } = managerService({ kind: "proposal", proposal: CONTAINER_PROPOSAL });
+  const outcome = await planner.plan({ operation: "manager", findingId: "managers:docker.remove-stopped-containers" }, SIGNAL);
+  assert.equal(outcome.kind, "planned");
+  assert.equal(outcome.plan.operation, "manager");
+  assert.equal(outcome.plan.manager.commands.length, 2);
+  assert.equal(outcome.plan.exactItemCount, 2n);
+  assert.equal(outcome.plan.reversibility, "irreversible");
+  assert.equal(saved.length, 1);
+});
+
+test("a finding reported for information cannot be planned", async () => {
+  const { planner, saved } = managerService({ kind: "proposal", proposal: { ...CONTAINER_PROPOSAL, offered: false } });
+  const outcome = await planner.plan({ operation: "manager", findingId: "managers:docker.remove-stopped-containers" }, SIGNAL);
+  assert.equal(outcome.kind, "refused");
+  assert.equal(saved.length, 0);
+  const named = await planner.plan({ operation: "manager", findingId: "managers:docker.named-volumes" }, SIGNAL);
+  assert.equal(named.kind, "refused");
+});
+
+test("a manager plan takes a finding, not a path", async () => {
+  const { planner } = managerService({ kind: "proposal", proposal: CONTAINER_PROPOSAL });
+  const outcome = await planner.plan({ operation: "manager", path: rawPathFromUtf8("/var/cache/apt") }, SIGNAL);
+  assert.equal(outcome.kind, "refused");
+  assert.equal(outcome.failure.code, "invalid-input");
+});
+
+test("a manager the preview cannot reach now is refused with its reason", async () => {
+  const { planner } = managerService({ kind: "refused", message: "docker is not installed.", capability: { status: "missing-tool", explanation: "docker is not installed." } });
+  const outcome = await planner.plan({ operation: "manager", findingId: "managers:docker.remove-stopped-containers" }, SIGNAL);
+  assert.equal(outcome.kind, "refused");
+  assert.match(outcome.failure.message, /not installed/);
+});
+
+test("as root, a generic action is refused before anything is reviewed", async () => {
+  const { service: planner, saved } = service({ effectiveUserId: 0 });
+  const outcome = await planner.plan({ operation: "trash", findingId: "cache.language:pip" }, SIGNAL);
+  assert.equal(outcome.kind, "refused");
+  assert.equal(outcome.failure.code, "permission-denied");
+  assert.match(outcome.failure.message, /root/);
+  assert.equal(saved.length, 0);
 });

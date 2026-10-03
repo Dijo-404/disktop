@@ -114,7 +114,7 @@ function journalFinding(bytes: bigint | undefined): Finding {
     title: "systemd journal",
     evidence: [
       "journalctl --disk-usage reports what archived and active journals occupy.",
-      "`journalctl --vacuum-size` is how this shrinks: it knows which files are sealed and which one is still being written.",
+      "`journalctl --vacuum-size` is how this shrinks: it knows which files are sealed and which one is still being written. Disktop offers that as managers:journald.vacuum.",
     ],
     managerScope: "journalctl --vacuum-size",
     size:
@@ -123,7 +123,7 @@ function journalFinding(bytes: bigint | undefined): Finding {
         : findingSize(bytes, "manager-reported", "The figure journalctl --disk-usage printed."),
     confidence: "likely",
     active: true,
-    actions: ["manager"],
+    actions: [],
   });
 }
 

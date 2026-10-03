@@ -91,6 +91,56 @@
         "reviewedBytes": {
           "description": "What the reviewed plan measured for this entry. The helper renames a subtree in one syscall rather than re-measuring it, so it reports this number back partitioned by what actually happened; it is the plan's figure, not a fresh reading.",
           "$ref": "#/$defs/decimalInteger"
+        },
+        "subtree": {
+          "$ref": "#/$defs/subtree"
+        }
+      },
+      "if": {
+        "type": "object",
+        "properties": {
+          "expected": {
+            "type": "object",
+            "properties": {
+              "kind": {
+                "const": "directory"
+              }
+            },
+            "required": [
+              "kind"
+            ]
+          }
+        },
+        "required": [
+          "expected"
+        ]
+      },
+      "then": {
+        "properties": {
+          "subtree": {
+            "type": "object"
+          }
+        },
+        "required": [
+          "subtree"
+        ]
+      }
+    },
+    "subtree": {
+      "description": "Every entry below a reviewed directory, digested: relative path bytes, kind, inode, size and modification time, children in byte order. A directory target must carry the one it was reviewed with; the helper digests it again before the directory is moved or removed.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "entries",
+        "digest"
+      ],
+      "properties": {
+        "entries": {
+          "$ref": "#/$defs/decimalInteger"
+        },
+        "digest": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
         }
       }
     },
@@ -644,7 +694,6 @@
         "completed",
         "skipped",
         "failed",
-        "selectedBytes",
         "bytesMovedToTrash",
         "items"
       ],
@@ -694,6 +743,9 @@
           "items": {
             "$ref": "#/$defs/journalItem"
           }
+        },
+        "manager": {
+          "$ref": "#/$defs/managerRecord"
         }
       },
       "allOf": [
@@ -730,6 +782,41 @@
                 }
               }
             }
+          }
+        },
+        {
+          "description": "Only a manager action's record may leave its selected bytes unknown.",
+          "if": {
+            "type": "object",
+            "properties": {
+              "operation": {
+                "const": "manager"
+              }
+            },
+            "required": [
+              "operation"
+            ]
+          },
+          "then": {
+            "properties": {
+              "manager": {
+                "type": "object"
+              }
+            },
+            "required": [
+              "manager"
+            ]
+          },
+          "else": {
+            "properties": {
+              "manager": false,
+              "selectedBytes": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "selectedBytes"
+            ]
           }
         }
       ]
@@ -769,7 +856,6 @@
         "completed",
         "skipped",
         "failed",
-        "selectedBytes",
         "bytesMovedToTrash",
         "undoAvailable"
       ],
@@ -791,7 +877,7 @@
           "$ref": "#/$defs/decimalInteger"
         },
         "selectedBytes": {
-          "description": "What the plan reviewed, over every target it named, whatever became of them.",
+          "description": "What the plan reviewed, or a manager's own estimate. Absent only for a manager action whose manager could not say beforehand.",
           "$ref": "#/$defs/decimalInteger"
         },
         "bytesMovedToTrash": {
@@ -966,6 +1052,168 @@
           }
         }
       ]
+    },
+    "inspectResult": {
+      "description": "What is inside each directory asked about, or why it could not be read all the way down. A nested mount or an unreadable directory is a refusal, never a smaller digest.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "paths"
+      ],
+      "properties": {
+        "paths": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 1000,
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "path"
+            ],
+            "properties": {
+              "path": {
+                "$ref": "#/$defs/pathBytes"
+              },
+              "subtree": {
+                "$ref": "#/$defs/subtree"
+              },
+              "refusal": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": [
+                  "code",
+                  "message"
+                ],
+                "properties": {
+                  "code": {
+                    "type": "string",
+                    "minLength": 1
+                  },
+                  "message": {
+                    "type": "string",
+                    "minLength": 1
+                  }
+                }
+              }
+            },
+            "oneOf": [
+              {
+                "properties": {
+                  "subtree": {
+                    "type": "object"
+                  }
+                },
+                "required": [
+                  "subtree"
+                ]
+              },
+              {
+                "properties": {
+                  "refusal": {
+                    "type": "object"
+                  }
+                },
+                "required": [
+                  "refusal"
+                ]
+              }
+            ]
+          }
+        }
+      }
+    },
+    "managerTool": {
+      "type": "string",
+      "enum": [
+        "apt-get",
+        "dpkg",
+        "dnf",
+        "rpm",
+        "pacman",
+        "journalctl",
+        "snap",
+        "flatpak",
+        "docker",
+        "podman",
+        "systemd-tmpfiles"
+      ]
+    },
+    "managerRecord": {
+      "description": "What a manager was asked to run, and what became of each command. A command that started and never finished reads 'uncertain' once reconciliation has looked at it.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "adapter",
+        "action",
+        "privilege",
+        "commands"
+      ],
+      "properties": {
+        "adapter": {
+          "type": "string",
+          "minLength": 1
+        },
+        "action": {
+          "type": "string",
+          "minLength": 1
+        },
+        "privilege": {
+          "type": "string",
+          "enum": [
+            "user",
+            "root"
+          ]
+        },
+        "estimatedBytes": {
+          "$ref": "#/$defs/decimalInteger"
+        },
+        "commands": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "position",
+              "tool",
+              "arguments",
+              "state"
+            ],
+            "properties": {
+              "position": {
+                "$ref": "#/$defs/decimalInteger"
+              },
+              "tool": {
+                "$ref": "#/$defs/managerTool"
+              },
+              "arguments": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                }
+              },
+              "state": {
+                "type": "string",
+                "enum": [
+                  "pending",
+                  "started",
+                  "finished",
+                  "uncertain"
+                ]
+              },
+              "exitCode": {
+                "type": "string",
+                "pattern": "^-?(0|[1-9][0-9]{0,18})$"
+              },
+              "output": {
+                "type": "string",
+                "maxLength": 16384
+              }
+            }
+          }
+        }
+      }
     }
   }
 }

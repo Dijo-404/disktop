@@ -17,7 +17,10 @@ import {
 } from "../domain/protected-paths.js";
 import type { InventoryPort } from "../ports/inventory.js";
 import type { FootprintPort, PathFacts, PathProbe } from "../ports/providers.js";
-import type { PlanStore } from "../ports/actions.js";
+import type { InspectOutcome, InspectPort, PlanStore } from "../ports/actions.js";
+import type { ManagerInventoryPort } from "../ports/managers.js";
+import { MANAGER_ACTIONS, isManagerAction, managerScope } from "../domain/managers.js";
+import { CapabilityUnavailable } from "../domain/errors.js";
 import type { FootprintService } from "./footprint.js";
 
 export interface PlanRequest {
@@ -51,6 +54,8 @@ export interface PlanSettings {
   /** This user's own Trash, which only `empty-trash` may name as a target. */
   readonly trashDirectory: RawPath;
   readonly expiryMinutes: number;
+  /** 0 means Disktop runs as root, where it changes no file itself. */
+  readonly effectiveUserId?: number;
 }
 
 export type PlanOutcome =
@@ -68,6 +73,9 @@ export interface PlanDependencies {
   /** Measures a directory's whole subtree, which one stat cannot. */
   readonly footprints: FootprintPort;
   readonly store: Pick<PlanStore, "save">;
+  readonly inspect: InspectPort;
+  /** Absent where no manager adapter was built; a manager plan is then refused. */
+  readonly managers?: ManagerInventoryPort;
   readonly settings: PlanSettings;
   readonly now: () => Date;
   /**
@@ -102,6 +110,9 @@ const GENERIC_OPERATIONS: readonly ActionOperation[] = [
 export function createPlanService(dependencies: PlanDependencies): PlanService {
   return {
     async plan(request, signal) {
+      if (request.operation === "manager") {
+        return planManager(dependencies, request);
+      }
       if (!GENERIC_OPERATIONS.includes(request.operation)) {
         return refuse("not-implemented", `Disktop cannot plan a '${request.operation}' action yet.`);
       }
@@ -138,6 +149,10 @@ export function createPlanService(dependencies: PlanDependencies): PlanService {
             return refuse(verdict.code, `${path.display} cannot be cleaned up: ${verdict.reason}.`);
           }
         }
+      }
+
+      if (dependencies.settings.effectiveUserId === 0) {
+        return refuse("permission-denied", ROOT_REFUSAL);
       }
 
       // Where the output goes is decided here and nowhere else. A move has to
@@ -255,6 +270,22 @@ export function createPlanService(dependencies: PlanDependencies): PlanService {
         entries.push(toEntry(path, facts, measured.get(path.bytesBase64)));
       }
 
+      const reviewed = await withSubtrees(dependencies, entries, signal);
+      if ("failure" in reviewed) {
+        return { kind: "refused", failure: reviewed.failure };
+      }
+      entries.splice(0, entries.length, ...reviewed.entries);
+
+      if (
+        request.operation === "dedup-hardlink" &&
+        new Set(entries.map((entry) => entry.expected.device)).size > 1
+      ) {
+        return refuse(
+          "invalid-plan",
+          "These files are not on the same filesystem, so a hardlink cannot join them.",
+        );
+      }
+
       const ruleHash =
         subject.findingId === undefined || dependencies.ruleHashFor === undefined
           ? undefined
@@ -291,6 +322,70 @@ export function createPlanService(dependencies: PlanDependencies): PlanService {
       return { kind: "planned", plan };
     },
   };
+}
+
+const MANAGER_PREFIX = "managers:";
+
+export const ROOT_REFUSAL =
+  "Disktop is running as root, where it reads everything and changes no file itself. Run it as the user who owns these files; only a reviewed manager action runs as root.";
+
+async function planManager(dependencies: PlanDependencies, request: PlanRequest): Promise<PlanOutcome> {
+  if (
+    request.path !== undefined ||
+    request.destination !== undefined ||
+    request.sourceDisposition !== undefined ||
+    request.keepPath !== undefined ||
+    request.replacePath !== undefined
+  ) {
+    return refuse("invalid-input", "A manager plan names a manager finding, not a path, destination, or kept copy.");
+  }
+  const findingId = request.findingId;
+  if (findingId === undefined || !findingId.startsWith(MANAGER_PREFIX)) {
+    return refuse("invalid-input", "A manager plan needs a finding from 'disktop clean' whose id starts with 'managers:'.");
+  }
+  const action = findingId.slice(MANAGER_PREFIX.length);
+  if (!isManagerAction(action)) {
+    return refuse("invalid-plan", `${findingId} is reported for information; Disktop offers no action on it.`);
+  }
+  if (dependencies.managers === undefined) {
+    return refuse("not-implemented", "No manager adapter is available in this build.");
+  }
+  const preview = await dependencies.managers.preview(action, {});
+  if (preview.kind === "refused") {
+    return refuse(preview.capability === undefined ? "invalid-plan" : "unsupported", preview.message);
+  }
+  const proposal = preview.proposal;
+  if (!proposal.offered) {
+    return refuse("invalid-plan", `${proposal.title}: there is nothing here Disktop will offer to remove right now.`);
+  }
+  let scope;
+  try {
+    scope = managerScope({
+      action,
+      items: proposal.items,
+      parameters: proposal.parameters,
+      count: proposal.count,
+      ...(proposal.estimatedBytes === undefined ? {} : { estimatedBytes: proposal.estimatedBytes }),
+      preview: proposal.preview,
+    });
+  } catch (error) {
+    return refuse("invalid-plan", `The manager's selection could not be reviewed: ${String((error as Error).message)}`);
+  }
+  const spec = MANAGER_ACTIONS[action];
+  const plan = buildPlan({
+    operation: "manager",
+    providerId: "managers",
+    findingId,
+    scopeSummary: proposal.title,
+    createdAt: dependencies.now(),
+    expiryMinutes: dependencies.settings.expiryMinutes,
+    entries: [],
+    manager: scope,
+    ...(spec.regenerationCost === undefined ? {} : { regenerationCost: spec.regenerationCost }),
+    warnings: [...spec.warnings, ...proposal.evidence],
+  });
+  await dependencies.store.save(plan);
+  return { kind: "planned", plan };
 }
 
 /**
@@ -512,6 +607,58 @@ function toEntry(path: RawPath, facts: PathFacts, measuredBytes: bigint | undefi
     // subtree; one stat would only describe its own inode.
     reviewedBytes: measuredBytes ?? facts.allocatedBytes,
   };
+}
+
+const INSPECT_FAILURES: Readonly<Record<string, OperationFailure["code"]>> = {
+  "protected-path": "protected-path",
+  "permission-denied": "permission-denied",
+  "changed-target": "changed-target",
+  cancelled: "cancelled",
+};
+
+async function withSubtrees(
+  dependencies: PlanDependencies,
+  entries: readonly PlannedEntry[],
+  signal: AbortSignal,
+): Promise<{ readonly entries: readonly PlannedEntry[] } | { readonly failure: OperationFailure }> {
+  const directories = entries.filter((entry) => entry.expected.kind === "directory");
+  if (directories.length === 0) {
+    return { entries };
+  }
+  let answers: ReadonlyMap<string, InspectOutcome>;
+  try {
+    answers = await dependencies.inspect.inspect(
+      directories.map((entry) => entry.path),
+      signal,
+    );
+  } catch (error) {
+    const explanation =
+      error instanceof CapabilityUnavailable ? error.capability.explanation : String(error);
+    return {
+      failure: failure(
+        "unsupported",
+        `What is inside a directory could not be recorded, so it was not planned: ${explanation}`,
+      ),
+    };
+  }
+  const reviewed: PlannedEntry[] = [];
+  for (const entry of entries) {
+    if (entry.expected.kind !== "directory") {
+      reviewed.push(entry);
+      continue;
+    }
+    const answer = answers.get(entry.path.bytesBase64);
+    if (answer === undefined || answer.kind === "refused") {
+      return {
+        failure: failure(
+          answer === undefined ? "internal-error" : (INSPECT_FAILURES[answer.code] ?? "invalid-plan"),
+          `${entry.path.display} cannot be reviewed: ${answer === undefined ? "the helper did not answer for it" : answer.message}`,
+        ),
+      };
+    }
+    reviewed.push({ ...entry, subtree: answer.subtree });
+  }
+  return { entries: reviewed };
 }
 
 function scopeSummary(entries: readonly PlannedEntry[]): string {

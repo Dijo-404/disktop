@@ -34,7 +34,8 @@ publishes it. Every finding has:
 | `size` | `{ bytes?, basis, explanation }`. |
 | `confidence` | `observed`, `likely`, or `uncertain`. |
 | `capability` | Why a reading is absent, when it is. |
-| `availableActionIds` | What a later phase could offer. Phase 3 applies nothing. |
+| `availableActionIds` | The operations a reviewed plan could fix for it. A finding only ever suggests; nothing here applies anything. |
+| `managerAction` | For a `managers:` finding, the manager action a plan would fix. |
 | `regenerationCost` | What getting the data back would cost, when it is reproducible. |
 | `active` | True when the data is in use: a browser profile, a model store, a disk image. |
 
@@ -94,7 +95,8 @@ set a release discovers is readable in one place.
 | `diagnostic.open-deleted` | Files deleted while a process still holds them open, which is why `du` and `df` disagree. |
 | `diagnostic.smart` | Each disk's own health report. |
 | `diagnostic.windows-subsystem` | Under WSL, what the default excludes leave out. |
-| `diagnostic.per-user` | Owner totals from the stored scan index. |
+| `diagnostic.per-user` | Owner totals from the stored scan index. `disktop explore PATH --owners` answers the same question for any scanned path. |
+| `managers` | What package and container managers can clean, from the adapters in `src/platform/linux/managers/`: one finding per proposal, carrying the exact command a plan would run. Spans the `package-cache`, `log`, `installed-app`, `container-data`, `old-kernel`, `temporary`, and `crash-dump` categories. A denied manager makes the result incomplete; an absent one does not. |
 
 ### What a detector may not do
 
@@ -102,8 +104,10 @@ No provider traverses a tree, runs a command directly, or deletes anything;
 `npm run lint` refuses all three. A provider names paths and the application
 service measures them through the `FootprintPort`. Commands go through the
 `ToolPort`, whose allowlist in `src/platform/linux/tools.ts` is the whole set
-of programs Disktop can run; a name outside it is refused before anything is
-spawned.
+of questions a detector can ask: each entry is a complete argument vector, so a
+tool on the list asked to do anything else — `journalctl --vacuum-size`, a
+`flatpak uninstall` — is refused before anything is spawned, exactly as a name
+outside the list is.
 
 ### Incomplete is not empty
 
@@ -164,8 +168,9 @@ detector to remember, so a new detector gets them for free:
   behind somebody's back. Mark such a finding `active` and every path-based operation
   is dropped from it.
 - A finding that names no path offers nothing generic, because there is nothing for a
-  generic action to act on. Only `manager` can reach a manager's own state, and the
-  manager adapters are Phase 6.
+  generic action to act on. Only `manager` can reach a manager's own state, and only
+  the `managers` provider offers it: a finding elsewhere that merely describes manager
+  state, such as an installed package or the journal's size, offers nothing.
 
 `clean plan` re-checks the path against the protected-path policy afterwards, and the
 helper checks it again from the other side of the process boundary. The rules here are

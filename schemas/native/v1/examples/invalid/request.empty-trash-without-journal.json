@@ -5,7 +5,13 @@
   "arguments": {
     "planId": "plan-01HQ8Z3M4K5N6P7Q",
     "trashDirectories": [
-      "L2hvbWUvZXhhbXBsZS8ubG9jYWwvc2hhcmUvVHJhc2g="
+      {
+        "path": "L2hvbWUvZXhhbXBsZS8ubG9jYWwvc2hhcmUvVHJhc2g=",
+        "subtree": {
+          "entries": "7",
+          "digest": "9c4e0000000000000000000000000000000000000000000000000000000077d1"
+        }
+      }
     ]
   }
 }

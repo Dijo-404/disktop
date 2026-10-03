@@ -33,15 +33,13 @@ function exchange(requests) {
 test("native hello reports only the implemented operations", async () => {
   const [response] = await exchange([handshakeRequest("hello-1")]);
   const result = parseHandshakeResponse(JSON.stringify(response), "hello-1");
-  assert.deepEqual(result.supportedOperations, ["hello", "probe", "cancel", "scan", "query-index", "hash-candidates", "trash", "erase", "empty-trash", "restore", "dedup-hardlink", "copy-move", "compress", "journal-reconcile"]);
+  assert.deepEqual(result.supportedOperations, ["hello", "probe", "cancel", "scan", "query-index", "hash-candidates", "inspect", "trash", "erase", "empty-trash", "restore", "dedup-hardlink", "copy-move", "compress", "manager-begin", "manager-append", "manager-finish", "journal-reconcile"]);
   // Trash is implemented; the operations whose phase has not arrived are not
   // listed, so a client cannot discover one by name and assume it works.
   for (const implemented of ["trash", "erase", "empty-trash", "restore", "dedup-hardlink", "copy-move", "compress"]) {
     assert.equal(result.supportedOperations.includes(implemented), true);
   }
-  for (const mutation of ["inspect", "manager-begin"]) {
-    assert.equal(result.supportedOperations.includes(mutation), false);
-  }
+  assert.equal(result.supportedOperations.includes("system-prune"), false);
   assert.equal(typeof result.kernelCapabilities.openat2.available, "boolean");
 });
 
@@ -52,12 +50,12 @@ test("native helper rejects an operation this build does not implement, without 
     await writeFile(target, "data stays here\n");
     const [response] = await exchange([{
       protocolVersion: 1,
-      requestId: "inspect-1",
-      operation: "inspect",
+      requestId: "nope-1",
+      operation: "system-prune",
       arguments: { path: target },
     }]);
     assert.equal(response.event, "error");
-    assert.equal(response.error.code, "unsupported-operation");
+    assert.equal(response.error.code, "unknown-operation");
     assert.equal(await readFile(target, "utf8"), "data stays here\n");
   } finally {
     await rm(sandbox, { recursive: true, force: true });

@@ -17,7 +17,11 @@
           "apparentBytes": "4096",
           "modifiedNanoseconds": "1758000000123456789"
         },
-        "reviewedBytes": "7314112512"
+        "reviewedBytes": "7314112512",
+        "subtree": {
+          "entries": "1284",
+          "digest": "5f2c00000000000000000000000000000000000000000000000000000000a1b9"
+        }
       }
     ]
   }

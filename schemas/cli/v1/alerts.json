@@ -4,15 +4,29 @@
   "title": "disktop alerts check --json",
   "description": "Reaching a threshold is an expected monitoring outcome and exits 1. An inventory that could not be completed exits 3 instead, because an alert drawn from partial readings is not the whole picture.",
   "type": "object",
-  "allOf": [{ "$ref": "envelope.json" }],
+  "allOf": [
+    {
+      "$ref": "envelope.json"
+    }
+  ],
   "properties": {
-    "command": { "const": "alerts check" },
+    "command": {
+      "const": "alerts check"
+    },
     "data": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["capability", "thresholdPercent", "inodeThresholdPercent", "alerts", "filesystems"],
+      "required": [
+        "capability",
+        "thresholdPercent",
+        "inodeThresholdPercent",
+        "alerts",
+        "filesystems"
+      ],
       "properties": {
-        "capability": { "$ref": "common.json#/$defs/capability" },
+        "capability": {
+          "$ref": "common.json#/$defs/capability"
+        },
         "thresholdPercent": {
           "description": "Used-space percentage that raises an alert, from configuration or --threshold.",
           "$ref": "common.json#/$defs/percent"
@@ -24,12 +38,38 @@
         "alerts": {
           "description": "Empty when no threshold was reached. Network filesystems are not alerted on; their capacity is not this machine's to reclaim.",
           "type": "array",
-          "items": { "$ref": "common.json#/$defs/alert" }
+          "items": {
+            "$ref": "common.json#/$defs/alert"
+          }
         },
         "filesystems": {
           "description": "Every filesystem considered, so a caller can see what was and was not checked.",
           "type": "array",
-          "items": { "$ref": "common.json#/$defs/filesystem" }
+          "items": {
+            "$ref": "common.json#/$defs/filesystem"
+          }
+        },
+        "notification": {
+          "description": "Present when a desktop notification was asked for, by --notify or alerts.notify. Whether one was sent never changes the exit status.",
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "requested",
+            "sent",
+            "explanation"
+          ],
+          "properties": {
+            "requested": {
+              "const": true
+            },
+            "sent": {
+              "type": "boolean"
+            },
+            "explanation": {
+              "type": "string",
+              "minLength": 1
+            }
+          }
         }
       }
     }
