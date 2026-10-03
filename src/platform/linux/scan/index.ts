@@ -229,6 +229,7 @@ function encodeFilter(query: EntryQuery): Record<string, unknown> {
   const filter = query.filter;
   return {
     ...(filter.underPath === undefined ? {} : { underPath: filter.underPath.bytesBase64 }),
+    ...(filter.atPath === undefined ? {} : { atPath: filter.atPath.bytesBase64 }),
     ...(filter.parentId === undefined ? {} : { parentId: filter.parentId }),
     ...(filter.nameContains === undefined ? {} : { nameContains: filter.nameContains }),
     ...(filter.extension === undefined ? {} : { extension: filter.extension }),

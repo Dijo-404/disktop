@@ -383,6 +383,10 @@
           "description": "Restrict the page to this path and everything below it. A path the scan never saw is refused rather than answered with an empty page.",
           "$ref": "#/$defs/pathBytes"
         },
+        "atPath": {
+          "description": "Restrict the page to the one row at exactly this path, whatever the sort. A sorted subtree cannot be trusted to list the path's own row first, because a directory whose own inode holds no blocks ties with the files below it. A path the scan never saw is refused the same way `underPath` refuses one.",
+          "$ref": "#/$defs/pathBytes"
+        },
         "maxChildEntries": {
           "description": "Keep only rows with at most this many direct children. A row with no count is left out, so an unreadable directory never answers a search for empty ones.",
           "$ref": "#/$defs/decimalInteger"

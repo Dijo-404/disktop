@@ -1,0 +1,15 @@
+{
+  "protocolVersion": 1,
+  "requestId": "query-index-5",
+  "operation": "query-index",
+  "arguments": {
+    "scanId": "scan-20260930-8f2ac1d4",
+    "indexDirectory": "L2hvbWUvZXhhbXBsZS8uY2FjaGUvZGlza3RvcA==",
+    "filter": {
+      "atPath": "/home/example/projects"
+    },
+    "sort": "allocated",
+    "order": "descending",
+    "limit": "1"
+  }
+}
