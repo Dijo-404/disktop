@@ -1946,7 +1946,7 @@ fn journal_reconcile(responder: &Responder, arguments: Map<String, Value>) {
             );
         }
     };
-    if let Err(error) = actions::release_abandoned_staging(&journal) {
+    if let Err(error) = actions::release_abandoned_staging(&journal, unsafe { libc::geteuid() }) {
         return fail(
             responder,
             "journal-write-failed",
@@ -3190,7 +3190,7 @@ mod tests {
         let (journal, id, staged) = staged_leftover(&sandbox, b"big.bin.disktop-partial-999999-0");
 
         assert_eq!(
-            crate::actions::release_abandoned_staging(&journal).unwrap(),
+            crate::actions::release_abandoned_staging(&journal, 1000).unwrap(),
             1
         );
         assert!(!std::path::Path::new(std::ffi::OsStr::from_bytes(&staged)).exists());
@@ -3203,9 +3203,31 @@ mod tests {
                 .contains("removed")
         );
         assert_eq!(
-            crate::actions::release_abandoned_staging(&journal).unwrap(),
+            crate::actions::release_abandoned_staging(&journal, 1000).unwrap(),
             0,
             "a second pass changes nothing"
+        );
+    }
+
+    #[test]
+    fn as_root_reconciliation_releases_nothing_and_leaves_the_record_for_later() {
+        let sandbox = Sandbox::new("staging-root");
+        sandbox.file(b"big.bin.disktop-partial-999999-0", 4096);
+        let (journal, _id, staged) = staged_leftover(&sandbox, b"big.bin.disktop-partial-999999-0");
+
+        assert_eq!(
+            crate::actions::release_abandoned_staging(&journal, 0).unwrap(),
+            0
+        );
+        assert!(std::path::Path::new(std::ffi::OsStr::from_bytes(&staged)).exists());
+        assert_eq!(
+            journal.abandoned_staging().unwrap().len(),
+            1,
+            "a later reconcile as the user can still release it"
+        );
+        assert_eq!(
+            crate::actions::release_abandoned_staging(&journal, 1000).unwrap(),
+            1
         );
     }
 
@@ -3217,7 +3239,7 @@ mod tests {
         std::fs::remove_dir(std::ffi::OsStr::from_bytes(&staged)).unwrap();
         std::fs::write(std::ffi::OsStr::from_bytes(&staged), b"somebody else's").unwrap();
 
-        crate::actions::release_abandoned_staging(&journal).unwrap();
+        crate::actions::release_abandoned_staging(&journal, 1000).unwrap();
         assert_eq!(
             std::fs::read(std::ffi::OsStr::from_bytes(&staged)).unwrap(),
             b"somebody else's"

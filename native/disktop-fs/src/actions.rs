@@ -2221,7 +2221,10 @@ fn empty_one(
 ///
 /// Only a name still holding the exact inode the helper journalled when it
 /// created it is removed; anything else is left where it is and named.
-pub fn release_abandoned_staging(journal: &Journal) -> rusqlite::Result<u64> {
+pub fn release_abandoned_staging(journal: &Journal, euid: u32) -> rusqlite::Result<u64> {
+    if euid == 0 {
+        return Ok(0);
+    }
     let mut released = 0;
     for left in journal.abandoned_staging()? {
         let display = String::from_utf8_lossy(&left.path).into_owned();
