@@ -1,7 +1,7 @@
 import { formatBytes } from "../../domain/sizes.js";
 import type { JournalRecord } from "../../ports/actions.js";
 import { LineBuilder, type HitRegion, type ScreenLine } from "../frame.js";
-import { groupDigits, padEnd, padStart, relativeAge, truncateMiddle } from "../text.js";
+import { groupDigits, localDateTime, padEnd, padStart, relativeAge, truncateMiddle } from "../text.js";
 import type { StyleName, Theme } from "../themes.js";
 import { ruleLine, type Hint } from "../widgets/chrome.js";
 import { emptyState, fit, listWindow, type ViewContext, type ViewOutput } from "./common.js";
@@ -133,7 +133,7 @@ export function renderHistory(context: ViewContext, home: string | undefined): V
 
 function detailLines(record: JournalRecord, height: number, context: ViewContext, home: string | undefined): ScreenLine[] {
   const { state, theme, width } = context;
-  const lines: ScreenLine[] = [ruleLine(`${record.id}  ${new Date(Date.parse(record.startedAt)).toISOString().slice(0, 19).replace("T", " ")}`, width, theme)];
+  const lines: ScreenLine[] = [ruleLine(`${localDateTime(Date.parse(record.startedAt))}  ${record.id}`, width, theme)];
   const summary = new LineBuilder(width).add("  ");
   summary
     .add(`${groupDigits(record.completed)} done`, "ok")

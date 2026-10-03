@@ -50,163 +50,169 @@ export async function createTerminalRenderer(options: RendererOptions): Promise<
 
 const ESC = "\u001b[";
 
-/** SGR parameters for each style at each colour depth. Empty means "no attributes". */
-function sgrFor(style: StyleName, theme: Theme): string {
-  if (theme.color === "none") {
-    switch (style) {
-      case "title":
-      case "strong":
-      case "heading":
-      case "brand":
-      case "key":
-      case "danger":
-      case "badgeDanger":
-        return "1";
-      case "tabActive":
-      case "badgeInfo":
-      case "badgeWarn":
-      case "badgeOk":
-        return "7";
-      case "input":
-        return "4";
-      default:
-        return "";
-    }
-  }
-  if (theme.color === "16") {
-    switch (style) {
-      case "normal":
-        return "";
-      case "dim":
-        return "37";
-      case "muted":
-      case "border":
-      case "barEmpty":
-      case "barReserved":
-        return "90";
-      case "strong":
-        return "1";
-      case "accent":
-      case "barUsed":
-      case "series1":
-      case "directory":
-        return "36";
-      case "title":
-      case "brand":
-        return "1;36";
-      case "heading":
-        return "1;37";
-      case "tab":
-        return "37";
-      case "tabActive":
-        return "1;30;46";
-      case "symlink":
-      case "series2":
-        return "35";
-      case "series3":
-        return "34";
-      case "series4":
-        return "33";
-      case "series5":
-        return "32";
-      case "series6":
-        return "37";
-      case "ok":
-        return "32";
-      case "warn":
-      case "barWarn":
-        return "33";
-      case "danger":
-      case "barDanger":
-        return "1;31";
-      case "info":
-        return "36";
-      case "key":
-        return "1;36";
-      case "band":
-        return "";
-      case "input":
-        return "1;4";
-      case "badgeOk":
-        return "1;30;42";
-      case "badgeWarn":
-        return "1;30;43";
-      case "badgeDanger":
-        return "1;37;41";
-      case "badgeInfo":
-        return "1;30;46";
-    }
-  }
-  switch (style) {
-    case "normal":
-      return "38;5;252";
-    case "dim":
-      return "38;5;248";
-    case "muted":
-      return "38;5;242";
-    case "strong":
-      return "1;38;5;255";
-    case "accent":
-    case "barUsed":
-    case "series1":
-      return "38;5;75";
-    case "directory":
-      return "38;5;117";
-    case "title":
-      return "1;38;5;255";
-    case "brand":
-      return "1;38;5;75";
-    case "heading":
-      return "1;38;5;246";
-    case "tab":
-      return "38;5;246";
-    case "tabActive":
-      return "1;38;5;16;48;5;75";
-    case "symlink":
-    case "series2":
-      return "38;5;176";
-    case "series3":
-      return "38;5;114";
-    case "series4":
-      return "38;5;221";
-    case "series5":
-      return "38;5;209";
-    case "series6":
-      return "38;5;245";
-    case "ok":
-      return "38;5;114";
-    case "warn":
-    case "barWarn":
-      return "38;5;214";
-    case "danger":
-    case "barDanger":
-      return "1;38;5;203";
-    case "info":
-      return "38;5;111";
-    case "barReserved":
-      return "38;5;240";
-    case "barEmpty":
-      return "38;5;237";
-    case "key":
-      return "1;38;5;75";
-    case "border":
-      return "38;5;239";
-    case "band":
-      return "48;5;235";
-    case "input":
-      return "1;4;38;5;255";
-    case "badgeOk":
-      return "1;38;5;16;48;5;114";
-    case "badgeWarn":
-      return "1;38;5;16;48;5;214";
-    case "badgeDanger":
-      return "1;38;5;255;48;5;160";
-    case "badgeInfo":
-      return "1;38;5;16;48;5;110";
+/**
+ * SGR parameters for each style at each colour depth. Empty means "no
+ * attributes".
+ *
+ * The terminal's own background may be dark or light, and Disktop cannot ask
+ * which. So plain text keeps the terminal's default foreground, emphasis is
+ * bold rather than a brighter grey, and colours are mid-tones that read on
+ * either. Where Disktop sets a background itself — the header band, the
+ * selected row — it sets the foreground too, from the `onDark` table, so the
+ * pair is legible whatever the terminal's own colours are.
+ */
+const PALETTE_16: Readonly<Record<StyleName, string>> = {
+  normal: "",
+  dim: "2",
+  muted: "90",
+  strong: "1",
+  accent: "36",
+  title: "1",
+  brand: "1;36",
+  tab: "",
+  tabActive: "1;30;46",
+  heading: "1",
+  directory: "1;36",
+  symlink: "35",
+  ok: "32",
+  warn: "33",
+  danger: "1;31",
+  info: "36",
+  barUsed: "36",
+  barWarn: "33",
+  barDanger: "31",
+  barReserved: "90",
+  barEmpty: "90",
+  series1: "36",
+  series2: "35",
+  series3: "34",
+  series4: "33",
+  series5: "32",
+  series6: "90",
+  key: "1;36",
+  border: "90",
+  band: "",
+  input: "1;4",
+  badgeOk: "1;30;42",
+  badgeWarn: "1;30;43",
+  badgeDanger: "1;97;41",
+  badgeInfo: "1;30;46",
+};
+
+const PALETTE_256: Readonly<Record<StyleName, string>> = {
+  normal: "",
+  dim: "38;5;245",
+  muted: "38;5;243",
+  strong: "1",
+  accent: "38;5;33",
+  title: "1",
+  brand: "1;38;5;33",
+  tab: "38;5;244",
+  tabActive: "1;38;5;16;48;5;75",
+  heading: "1;38;5;244",
+  directory: "1;38;5;33",
+  symlink: "38;5;133",
+  ok: "38;5;35",
+  warn: "38;5;172",
+  danger: "1;38;5;160",
+  info: "38;5;32",
+  barUsed: "38;5;33",
+  barWarn: "38;5;172",
+  barDanger: "38;5;160",
+  barReserved: "38;5;244",
+  barEmpty: "38;5;246",
+  series1: "38;5;33",
+  series2: "38;5;133",
+  series3: "38;5;35",
+  series4: "38;5;172",
+  series5: "38;5;166",
+  series6: "38;5;244",
+  key: "1;38;5;33",
+  border: "38;5;246",
+  band: "",
+  input: "1;4",
+  badgeOk: "1;38;5;16;48;5;78",
+  badgeWarn: "1;38;5;16;48;5;214",
+  badgeDanger: "1;38;5;231;48;5;160",
+  badgeInfo: "1;38;5;16;48;5;110",
+};
+
+/** Foregrounds for text on a background Disktop set: always light on dark. */
+const ON_DARK_16: Partial<Record<StyleName, string>> = {
+  normal: "97",
+  dim: "37",
+  muted: "37",
+  strong: "1;97",
+  title: "1;97",
+  heading: "1;97",
+  tab: "97",
+  accent: "96",
+  brand: "1;96",
+  directory: "1;96",
+  key: "1;96",
+  barEmpty: "37",
+  border: "37",
+};
+
+const ON_DARK_256: Partial<Record<StyleName, string>> = {
+  normal: "38;5;255",
+  dim: "38;5;250",
+  muted: "38;5;247",
+  strong: "1;38;5;231",
+  title: "1;38;5;231",
+  heading: "1;38;5;250",
+  tab: "38;5;250",
+  accent: "38;5;75",
+  brand: "1;38;5;75",
+  directory: "1;38;5;117",
+  key: "1;38;5;75",
+  ok: "38;5;114",
+  warn: "38;5;214",
+  danger: "1;38;5;203",
+  info: "38;5;111",
+  barUsed: "38;5;75",
+  barWarn: "38;5;214",
+  barDanger: "38;5;203",
+  barEmpty: "38;5;242",
+  barReserved: "38;5;245",
+  series1: "38;5;75",
+  series2: "38;5;176",
+  series3: "38;5;114",
+  series4: "38;5;221",
+  series5: "38;5;209",
+  series6: "38;5;250",
+  symlink: "38;5;176",
+  border: "38;5;242",
+};
+
+const NO_COLOR_ATTRIBUTES: Partial<Record<StyleName, string>> = {
+  title: "1",
+  strong: "1",
+  heading: "1",
+  brand: "1",
+  key: "1",
+  danger: "1",
+  directory: "1",
+  badgeDanger: "1;7",
+  tabActive: "7",
+  badgeInfo: "7",
+  badgeWarn: "7",
+  badgeOk: "7",
+  input: "4",
+};
+
+function sgrFor(style: StyleName, theme: Theme, onDark: boolean): string {
+  switch (theme.color) {
+    case "none":
+      return NO_COLOR_ATTRIBUTES[style] ?? "";
+    case "16":
+      return (onDark ? ON_DARK_16[style] : undefined) ?? PALETTE_16[style];
+    case "256":
+      return (onDark ? ON_DARK_256[style] : undefined) ?? PALETTE_256[style];
   }
 }
 
-/** The selection background, laid under every span of a selected row. */
+/** The background laid under every span of a selected row. */
 function selectionSgr(theme: Theme): string {
   switch (theme.color) {
     case "none":
@@ -214,13 +220,13 @@ function selectionSgr(theme: Theme): string {
     case "16":
       return "44";
     case "256":
-      return "48;5;237";
+      return "48;5;24";
   }
 }
 
-/** The header band background, laid under every span of a banded row. */
+/** The background laid under every span of the header band. */
 function bandSgr(theme: Theme): string {
-  return theme.color === "256" ? "48;5;235" : theme.color === "16" ? "" : "";
+  return theme.color === "256" ? "48;5;236" : theme.color === "16" ? "40" : "";
 }
 
 /**
@@ -230,6 +236,7 @@ function bandSgr(theme: Theme): string {
  */
 export function serializeLine(line: ScreenLine, columns: number, theme: Theme): string {
   const under = line.selected === true ? selectionSgr(theme) : line.fill === "band" ? bandSgr(theme) : "";
+  const onDark = under !== "" && theme.color !== "none";
   let out = "";
   let used = 0;
   for (const span of line.spans) {
@@ -241,12 +248,12 @@ export function serializeLine(line: ScreenLine, columns: number, theme: Theme): 
     if (text === "") {
       continue;
     }
-    const sgr = [under, sgrFor(span.style, theme)].filter((part) => part !== "").join(";");
+    const sgr = [under, sgrFor(span.style, theme, onDark)].filter((part) => part !== "").join(";");
     out += sgr === "" ? `${ESC}0m${text}` : `${ESC}0;${sgr}m${text}`;
     used += cellWidth(text);
   }
   if (used < columns) {
-    const fill = line.fill !== undefined && line.fill !== "band" ? sgrFor(line.fill, theme) : "";
+    const fill = line.fill !== undefined && line.fill !== "band" ? sgrFor(line.fill, theme, onDark) : "";
     const sgr = [under, fill].filter((part) => part !== "").join(";");
     out += `${sgr === "" ? `${ESC}0m` : `${ESC}0;${sgr}m`}${" ".repeat(columns - used)}`;
   }
