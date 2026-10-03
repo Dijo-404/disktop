@@ -122,3 +122,28 @@ test("a path built from bytes is resolved from those bytes, not from its display
     await restoreAndRemove(root);
   }
 });
+
+test("reading text from a pipe or a device answers nothing at once instead of waiting or reading forever", async () => {
+  // A Steam library or a logrotate rule names files anyone with write access
+  // there can replace; a named pipe would hang discovery and /dev/zero would
+  // be read until memory ran out, since only the first bytes are kept.
+  const { spawnSync } = await import("node:child_process");
+  const root = await sandbox();
+  try {
+    const pipe = join(root, "appmanifest_1.acf");
+    assert.equal(spawnSync("mkfifo", [pipe]).status, 0);
+    const endless = join(root, "libraryfolders.vdf");
+    await symlink("/dev/zero", endless);
+
+    const begun = Date.now();
+    assert.equal(await probe.readText(rawPathFromUtf8(pipe), 4096), undefined);
+    assert.equal(await probe.readText(rawPathFromUtf8(endless), 4096), undefined);
+    assert.ok(Date.now() - begun < 2_000, `reading took ${Date.now() - begun} ms`);
+
+    // A procfs file reports no size and is still read, up to the limit.
+    const version = await probe.readText(rawPathFromUtf8("/proc/version"), 8);
+    assert.equal(version?.length, 8);
+  } finally {
+    await restoreAndRemove(root);
+  }
+});
