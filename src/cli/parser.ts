@@ -392,8 +392,9 @@ export function renderHelp(command: CommandSpec = COMMANDS[0] as CommandSpec): s
     }
     lines.push(
       "",
-      "With no command Disktop opens the dashboard; with --json it prints the",
-      "dashboard instead.",
+      "With no command, on a terminal, Disktop opens its terminal UI (press ? in",
+      "it for keys). With --json, or through a pipe, it prints the dashboard.",
+      "Nothing on disk changes without a reviewed plan you confirm.",
     );
   } else {
     lines.push(command.summary, "");
