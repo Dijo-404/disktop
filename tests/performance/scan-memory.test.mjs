@@ -12,7 +12,7 @@
  */
 import assert from "node:assert/strict";
 import { spawn, spawnSync } from "node:child_process";
-import { existsSync, readFileSync } from "node:fs";
+import { existsSync, readFileSync, statSync } from "node:fs";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -30,7 +30,15 @@ const SMALL = Math.max(2_000, Math.round(LARGE / 10));
 
 const RELEASE_HELPER = "native/disktop-fs/target/release/disktop-fs";
 const DEBUG_HELPER = "native/disktop-fs/target/debug/disktop-fs";
-const helperPath = existsSync(RELEASE_HELPER) ? RELEASE_HELPER : DEBUG_HELPER;
+/**
+ * The release build when it is at least as new as the debug build. A release
+ * binary left over from an older checkout would otherwise be measured instead
+ * of the code under test.
+ */
+const helperPath =
+  existsSync(RELEASE_HELPER) && (!existsSync(DEBUG_HELPER) || statSync(RELEASE_HELPER).mtimeMs >= statSync(DEBUG_HELPER).mtimeMs)
+    ? RELEASE_HELPER
+    : DEBUG_HELPER;
 /** A debug build is several times slower; its timings are reported, not enforced. */
 const timingsAreBinding = helperPath === RELEASE_HELPER;
 
