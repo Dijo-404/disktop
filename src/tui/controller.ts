@@ -37,7 +37,7 @@ import {
   type ExploreRow,
   type TabName,
 } from "./state.js";
-import { needsTypedConfirmation } from "./views/dialogs.js";
+import { needsTypedConfirmation, reviewFits } from "./views/dialogs.js";
 import { defaultOperation } from "./views/findings.js";
 import { canUndo } from "./views/history.js";
 import type { MouseEvent } from "./render.js";
@@ -68,6 +68,8 @@ export interface ControllerHooks {
    * when absent.
    */
   readonly confirmDelayMilliseconds?: number;
+  /** The terminal's size, so a plan is never confirmed where it cannot be shown. */
+  readonly size?: () => { readonly columns: number; readonly rows: number };
 }
 
 type TaskKind = "inventory" | "explore" | "trend" | "scan" | "findings" | "history" | "plan" | "apply" | "undo" | "duplicates";
@@ -457,6 +459,9 @@ export class TuiController {
       (dialog.kind === "review" && intent.kind === "submit") ||
       (dialog.kind === "confirm-scan" && intent.kind === "open");
     if (confirming && !this.#dialogSettled()) {
+      return;
+    }
+    if (confirming && dialog.kind === "review" && this.#hooks.size !== undefined && !reviewFits(this.#hooks.size())) {
       return;
     }
     if (intent.kind === "quit" && dialog.kind !== "review") {

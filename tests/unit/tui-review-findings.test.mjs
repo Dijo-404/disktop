@@ -403,3 +403,37 @@ test("a duplicate copy is offered Trash or a byte-compared hardlink, never a pla
   assert.equal(plans[1].replacePath.display, "/home/example/b.iso");
   assert.equal(plans[1].keepPath.display, "/home/example/a.iso");
 });
+
+test("a manager review says how many more commands will run than it lists", () => {
+  const commands = Array.from({ length: 7 }, (_, index) => ({ tool: "snap", arguments: ["remove", `app${index}`, "--revision", String(index)] }));
+  const plan = {
+    ...PLAN,
+    operation: "manager",
+    permission: "manager-privilege",
+    reversibility: "irreversible",
+    entries: [],
+    manager: { action: "snap.remove-disabled", adapter: "snap", privilege: "root", parameters: {}, items: [], commands, perItem: true, count: { kind: "exact", value: 7n }, preview: "listed" },
+  };
+  const state = { ...initialState(FIXTURE_VIEW, "iec"), tab: "Clean", dialog: { kind: "review", plan, alternatives: ["manager"], typed: "", origin: "finding", findingId: "x" } };
+  const lines = renderScreen(state, { columns: 100, rows: 40 }, { theme: ASCII_THEME, now: NOW, threshold: 90, home: HOME }).lines.map(lineText);
+  assert.ok(lines.some((line) => /and 4 more/.test(line)), lines.join("\n"));
+});
+
+test("below the size a review needs, it says so and cannot be applied", async () => {
+  const state = { ...initialState(FIXTURE_VIEW, "iec"), tab: "Clean", dialog: { kind: "review", plan: { ...PLAN, operation: "permanent", reversibility: "irreversible" }, alternatives: ["permanent"], typed: "", origin: "finding", findingId: "x" } };
+  const lines = renderScreen(state, { columns: 40, rows: 10 }, { theme: ASCII_THEME, now: NOW, threshold: 90, home: HOME }).lines.map(lineText);
+  assert.ok(lines.some((line) => /larger/i.test(line)), lines.join("\n"));
+  assert.ok(!lines.some((line) => /Type yes/.test(line)), "no confirmation is offered for a plan that cannot be shown");
+
+  const services = fakeServices();
+  const hooks = { ...fakeHooks(), size: () => ({ columns: 40, rows: 10 }) };
+  const { controller } = setup(services, hooks);
+  await controller.idle();
+  for (const key of ["3", "c"]) {
+    controller.handleKey(key);
+    await controller.idle();
+  }
+  controller.handleKey("y");
+  await controller.idle();
+  assert.deepEqual(applies(services), []);
+});

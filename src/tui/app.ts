@@ -74,6 +74,7 @@ export async function runTui(options: TuiOptions): Promise<number> {
   const controller: TuiController = new TuiController(services, initialState(view, options.units, services.defaults.staleAfterDays), {
     changed: schedule,
     pageRows: () => Math.max(1, renderer.size().rows - 8),
+    size: () => renderer.size(),
     suspend: (message) => {
       suspended = true;
       renderer.suspend(message);

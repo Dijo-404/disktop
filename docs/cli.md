@@ -573,5 +573,7 @@ exits `130`. A normal quit exits `0`, or `3` when the inventory was incomplete.
 Environment: `NO_COLOR` (non-empty) removes colour and keeps bold and inverse; a locale
 that is not UTF-8, `TERM=linux`, or `DISKTOP_ASCII=1` draw ASCII glyphs;
 `DISKTOP_NO_MOUSE=1` leaves mouse reporting off. The layout is designed for 80×24 and
-stays usable down to 40×10, below which it says so. Terminal state is restored on exit,
+stays usable down to 40×10, below which it says so. A plan is reviewed and confirmed
+only at 60×20 or larger, so its target, operation, and confirmation are all on screen;
+smaller, the review says so and offers no confirmation. Terminal state is restored on exit,
 on `SIGINT`, `SIGTERM`, `SIGHUP`, and after an uncaught exception.

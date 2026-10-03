@@ -36,13 +36,14 @@ export function renderScreen(state: AppState, size: ScreenSize, options: ScreenO
   setClipMark(theme.glyphs.ellipsis);
 
   if (columns < SMALLEST_SIZE.columns || rows < SMALLEST_SIZE.rows) {
+    const times = theme.unicode ? "×" : "x";
     const lines: ScreenLine[] = [];
     const middle = Math.floor(rows / 2) - 1;
     for (let index = 0; index < rows; index += 1) {
       if (index === middle) {
         lines.push(new LineBuilder(columns).add(center("Disktop needs at least", columns), "strong").build());
       } else if (index === middle + 1) {
-        lines.push(new LineBuilder(columns).add(center(`${SMALLEST_SIZE.columns}×${SMALLEST_SIZE.rows}; this is ${columns}×${rows}`, columns), "dim").build());
+        lines.push(new LineBuilder(columns).add(center(`${SMALLEST_SIZE.columns}${times}${SMALLEST_SIZE.rows}; this is ${columns}${times}${rows}`, columns), "dim").build());
       } else if (index === middle + 2) {
         lines.push(new LineBuilder(columns).add(center("q quits", columns), "muted").build());
       } else {
