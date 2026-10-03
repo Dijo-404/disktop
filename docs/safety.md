@@ -46,6 +46,12 @@ resolution, compares the live entry against the reviewed fingerprint, writes the
 item's intent to the journal, performs one constrained syscall, and writes the
 outcome. A Trash move reserves its `.trashinfo` with an exclusive create and renames
 with `RENAME_NOREPLACE`, so the kernel refuses rather than overwriting. The
+name a file gets in Trash, and the name anything is staged under before it is
+published, start with the file's own name and are shortened — never through
+the middle of a character — when that name is near the 255-byte limit, so a
+long name can still be trashed, moved, and compressed; the original path is in
+the `.trashinfo` and the journal either way. An archive whose name would not fit
+is refused before anything is written. The
 rename takes whatever is under the name at that instant, so the helper then
 checks that what arrived in Trash is the inode it revalidated: a file saved
 over the reviewed one in between is renamed straight back and the item skipped
