@@ -55,22 +55,29 @@ pub fn copy_file(
     // The umask masked the mode the create asked for, so the bits are set
     // again here; otherwise a copy of a 0o666 file arrives as 0o644.
     let outcome = sys::fchmod(staged, permissions)
-        .and_then(|()| stream_and_verify(source, staged))
-        .and_then(|bytes| {
-            // The modification time comes across last, after the write that
+        .and_then(|()| stream(source, staged))
+        .and_then(|(bytes, written)| {
+            // The modification time comes across after the last write, which
             // would otherwise have set it to now. A copy of a file is the same
             // file, and one dated today is a different answer to the question
-            // "when did this last change?".
+            // "when did this last change?". It is set before the `fsync` so it
+            // is as durable as the bytes are.
             if let Some(nanoseconds) = modified_nanoseconds {
                 sys::set_modified(staged, nanoseconds)?;
             }
+            // The bytes have to be on the device before they are read back, or
+            // the verification reads the page cache and proves nothing about
+            // the disk.
+            sys::fsync(staged)?;
+            verify(staged, &written)?;
             Ok(bytes)
         });
     sys::close(staged);
     outcome
 }
 
-fn stream_and_verify(source: RawFd, staged: RawFd) -> io::Result<u64> {
+/// Copy every byte, returning how many there were and their digest.
+fn stream(source: RawFd, staged: RawFd) -> io::Result<(u64, [u8; 32])> {
     let mut buffer = vec![0u8; COPY_BYTES];
     let mut hasher = Sha256::new();
     let mut offset = 0u64;
@@ -84,20 +91,18 @@ fn stream_and_verify(source: RawFd, staged: RawFd) -> io::Result<u64> {
         hasher.update(&buffer[..read]);
         offset += read as u64;
     }
+    Ok((offset, hasher.finalize().into()))
+}
 
-    // The bytes have to be on the device before they are read back, or the
-    // verification reads the page cache and proves nothing about the disk.
-    sys::fsync(staged)?;
-
-    let written: [u8; 32] = hasher.finalize().into();
-    let readback = content::full_digest(staged)?;
-    if written != readback {
+/// Read the staged copy back and compare it with what was read from the source.
+fn verify(staged: RawFd, written: &[u8; 32]) -> io::Result<()> {
+    if content::full_digest(staged)? != *written {
         return Err(io::Error::new(
             io::ErrorKind::InvalidData,
             "the copy does not match what was read, so it was not published",
         ));
     }
-    Ok(offset)
+    Ok(())
 }
 
 /// The mode a directory is written with while its contents are copied into it.
@@ -182,8 +187,9 @@ fn copy_children(
             sys::fchmod(finished.destination.as_raw_fd(), finished.permissions)?;
             // The directory's own entries have to be durable too, or a crash
             // could leave a published name pointing at a directory missing
-            // half of what was copied into it.
-            let _ = sys::fsync(finished.destination.as_raw_fd());
+            // half of what was copied into it. A directory that cannot be made
+            // durable stops the copy: it is not published on a hope.
+            sys::fsync(finished.destination.as_raw_fd())?;
             continue;
         };
         let source = frame.source.as_raw_fd();
