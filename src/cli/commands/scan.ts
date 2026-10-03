@@ -36,7 +36,9 @@ export async function runScan(context: CliContext, options: ScanOptions): Promis
     return refuse(context, options.asJson, "'--max-depth' accepts a whole number of levels.");
   }
 
-  const drawProgress = !options.asJson && context.interactive;
+  // Progress is a carriage-return line, so it is drawn only where a person is
+  // watching it: on a terminal, and never beside a JSON answer.
+  const drawProgress = !options.asJson && context.progress;
   let interrupted: boolean;
   let outcome;
   try {

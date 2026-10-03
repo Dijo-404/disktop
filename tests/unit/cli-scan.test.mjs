@@ -261,6 +261,24 @@ test("explore narrows the listing to the path it was given", async () => {
   assert.equal(asked[0].filter.underPath.display, "/home/example/projects/api");
 });
 
+test("progress is drawn on stderr only when stderr is a terminal, and never beside JSON", async () => {
+  // stdout at a terminal says nothing about where stderr goes: `scan 2>log`
+  // must not fill the log with carriage-return progress lines.
+  const redirected = fakeContext({ interactive: true, progress: false });
+  await runCli(["scan"], redirected);
+  assert.doesNotMatch(redirected.captured.stderr, /\r|Scanned \d+ entries/);
+
+  const watched = fakeContext({ interactive: false, progress: true });
+  await runCli(["scan"], watched);
+  assert.match(watched.captured.stderr, /\rScanned 1000 entries/);
+  assert.doesNotMatch(watched.captured.stdout, /\r/, "progress never reaches stdout");
+
+  const json = fakeContext({ interactive: true, progress: true });
+  await runCli(["scan", "--json"], json);
+  assert.equal(json.captured.stderr, "");
+  envelopeOf(json, "scan");
+});
+
 test("a mangled cursor or limit is refused in the envelope, not as a stack trace", async () => {
   const cursor = fakeContext();
   assert.equal(await runCli(["explore", "--cursor", "not a cursor!", "--json"], cursor), 2);

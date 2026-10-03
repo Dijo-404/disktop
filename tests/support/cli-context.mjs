@@ -214,6 +214,7 @@ export function fakeContext(overrides = {}) {
     resolvePath: (path) => (path === "." ? "/home/example/projects" : path),
     now: () => new Date("2026-09-29T08:15:04.117Z"),
     interactive: overrides.interactive ?? false,
+    progress: overrides.progress ?? false,
     async launchTui(settings) {
       context.launched += 1;
       context.launchedWithUnits = settings.units;
