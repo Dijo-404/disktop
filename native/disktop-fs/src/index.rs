@@ -724,53 +724,69 @@ pub struct SizeCandidate {
     pub name: Vec<u8>,
 }
 
-/// Every regular file in one scan whose apparent size is shared with at least
-/// one other regular file, grouped by that size, largest first.
+/// Up to `limit` apparent sizes, largest first and below `below` when it is
+/// given, that at least two regular files in the range share.
 ///
 /// The grouping happens in SQL because the index already has the sizes and the
 /// alternative is carrying one row per file through Rust to discover that most
 /// of them are alone. Only sizes with two or more members come back, so the
-/// caller never opens a file that had no possible twin.
-pub fn size_candidates(
+/// caller never opens a file that had no possible twin; and they come back a
+/// batch at a time, so the caller never holds every candidate in the scan at
+/// once — only one size class's.
+pub fn duplicate_sizes(
     connection: &Connection,
     under: Option<(i64, i64)>,
     minimum_bytes: u64,
-) -> rusqlite::Result<Vec<(u64, Vec<SizeCandidate>)>> {
+    below: Option<u64>,
+    limit: u32,
+) -> rusqlite::Result<Vec<u64>> {
     // The range is always bound, covering every row when no path narrows it,
     // so one statement serves both shapes and neither can bind the wrong count.
     let (first, last) = under.unwrap_or((i64::MIN, i64::MAX));
-    let sql = "SELECT apparent_bytes, id, parent_id, name FROM entry
-         WHERE kind = ?1 AND shared = 0 AND apparent_bytes >= ?2
-           AND id BETWEEN ?3 AND ?4
-           AND apparent_bytes IN (
-             SELECT apparent_bytes FROM entry
-             WHERE kind = ?1 AND shared = 0 AND apparent_bytes >= ?2
-               AND id BETWEEN ?3 AND ?4
-             GROUP BY apparent_bytes HAVING count(*) > 1
-           )
-         ORDER BY apparent_bytes DESC, id ASC";
+    let mut statement = connection.prepare_cached(
+        "SELECT apparent_bytes FROM entry INDEXED BY entry_apparent
+         WHERE kind = ?1 AND shared = 0 AND apparent_bytes >= ?2 AND apparent_bytes < ?3
+           AND id BETWEEN ?4 AND ?5
+         GROUP BY apparent_bytes HAVING count(*) > 1
+         ORDER BY apparent_bytes DESC LIMIT ?6",
+    )?;
+    let sizes = statement.query_map(
+        params![
+            EntryKind::File.code(),
+            clamp(minimum_bytes),
+            below.map_or(i64::MAX, clamp),
+            first,
+            last,
+            i64::from(limit),
+        ],
+        |row| row.get::<_, i64>(0).map(unclamp),
+    )?;
+    sizes.collect()
+}
 
-    let mut statement = connection.prepare(sql)?;
-    let mut rows = statement.query(params![
-        EntryKind::File.code(),
-        clamp(minimum_bytes),
-        first,
-        last
-    ])?;
-
-    let mut grouped: Vec<(u64, Vec<SizeCandidate>)> = Vec::new();
-    while let Some(row) = rows.next()? {
-        let apparent_bytes = unclamp(row.get::<_, i64>(0)?);
-        let candidate = SizeCandidate {
-            parent_id: row.get(2)?,
-            name: row.get(3)?,
-        };
-        match grouped.last_mut() {
-            Some((size, members)) if *size == apparent_bytes => members.push(candidate),
-            _ => grouped.push((apparent_bytes, vec![candidate])),
-        }
-    }
-    Ok(grouped)
+/// Every regular file in the range of exactly this apparent size, in the
+/// order the walk found them.
+pub fn files_of_size(
+    connection: &Connection,
+    under: Option<(i64, i64)>,
+    apparent_bytes: u64,
+) -> rusqlite::Result<Vec<SizeCandidate>> {
+    let (first, last) = under.unwrap_or((i64::MIN, i64::MAX));
+    let mut statement = connection.prepare_cached(
+        "SELECT parent_id, name FROM entry INDEXED BY entry_apparent
+         WHERE apparent_bytes = ?1 AND kind = ?2 AND shared = 0 AND id BETWEEN ?3 AND ?4
+         ORDER BY id",
+    )?;
+    let members = statement.query_map(
+        params![clamp(apparent_bytes), EntryKind::File.code(), first, last],
+        |row| {
+            Ok(SizeCandidate {
+                parent_id: row.get(0)?,
+                name: row.get(1)?,
+            })
+        },
+    )?;
+    members.collect()
 }
 
 fn unclamp(value: i64) -> u64 {
