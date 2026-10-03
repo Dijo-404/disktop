@@ -31,7 +31,7 @@ function debian({ running = "6.8.0-45-generic", simulation = fixture("apt-get-s-
   const harness = tools((key) => (key === DPKG ? fixture("dpkg-packages.txt") : key.startsWith("apt-get -s purge") ? simulation : undefined));
   return {
     ...harness,
-    adapter: createKernelAdapter({ tools: harness.port, runningRelease: () => running, installed: async (tool) => ["dpkg-query", "dpkg", "apt-get"].includes(tool) }),
+    adapter: createKernelAdapter({ tools: harness.port, runningRelease: () => running, installed: async (tool) => ["dpkg-query", "dpkg", "apt-get"].includes(tool), kernelReleases: async () => new Set(["6.8.0-40-generic", "6.8.0-45-generic", "6.8.0-47-generic"]) }),
   };
 }
 
@@ -71,7 +71,7 @@ test("a removed package that only left its configuration behind is not proposed"
 
 test("one kernel installed is nothing to propose", async () => {
   const harness = tools({ [DPKG]: "linux-image-6.8.0-45-generic\tinstall ok installed\t14660\n" });
-  const adapter = createKernelAdapter({ tools: harness.port, runningRelease: () => "6.8.0-45-generic", installed: async (tool) => ["dpkg-query", "dpkg", "apt-get"].includes(tool) });
+  const adapter = createKernelAdapter({ tools: harness.port, runningRelease: () => "6.8.0-45-generic", installed: async (tool) => ["dpkg-query", "dpkg", "apt-get"].includes(tool), kernelReleases: async () => new Set(["6.8.0-45-generic"]) });
   assert.deepEqual((await adapter.discover()).proposals, []);
 });
 
@@ -93,7 +93,7 @@ test("preflight refuses when what purging would remove has changed since review"
 
 test("Fedora keeps the running and the newest kernel and proposes rpm names for the rest", async () => {
   const harness = tools((key) => (key === RPM ? fixture("rpm-packages.txt") : key.startsWith("rpm -e --test") ? "" : undefined));
-  const adapter = createKernelAdapter({ tools: harness.port, runningRelease: () => "6.10.9-200.fc40.x86_64", installed: async (tool) => tool === "rpm" });
+  const adapter = createKernelAdapter({ tools: harness.port, runningRelease: () => "6.10.9-200.fc40.x86_64", installed: async (tool) => tool === "rpm", kernelReleases: async () => new Set(["6.10.6-200.fc40.x86_64", "6.10.9-200.fc40.x86_64", "6.10.12-200.fc40.x86_64"]) });
   const [proposal] = (await adapter.discover()).proposals;
   assert.equal(proposal.action, "kernels.rpm-erase");
   assert.deepEqual(proposal.items.map((item) => item.id), [
@@ -113,13 +113,13 @@ test("an rpm erase that would break a dependency is not offered", async () => {
         ? { capability: { status: "missing-tool", explanation: "failed" }, stdout: "", stderr: "error: Failed dependencies:\n\tkernel-modules-core is needed by foo\n", exitCode: 1 }
         : undefined,
   );
-  const adapter = createKernelAdapter({ tools: harness.port, runningRelease: () => "6.10.12-200.fc40.x86_64", installed: async (tool) => tool === "rpm" });
+  const adapter = createKernelAdapter({ tools: harness.port, runningRelease: () => "6.10.12-200.fc40.x86_64", installed: async (tool) => tool === "rpm", kernelReleases: async () => new Set(["6.10.6-200.fc40.x86_64", "6.10.9-200.fc40.x86_64", "6.10.12-200.fc40.x86_64"]) });
   const [proposal] = (await adapter.discover()).proposals;
   assert.equal(proposal.offered, false);
 });
 
 test("on a pacman system there is nothing to propose, and the reason is said", async () => {
-  const adapter = createKernelAdapter({ tools: tools({}).port, runningRelease: () => "6.18.54-1-lts", installed: async (tool) => tool === "pacman" });
+  const adapter = createKernelAdapter({ tools: tools({}).port, runningRelease: () => "6.18.54-1-lts", installed: async (tool) => tool === "pacman", kernelReleases: async () => new Set() });
   const discovery = await adapter.discover();
   assert.equal(discovery.capability.status, "missing-tool");
   assert.match(discovery.capability.explanation, /pacman keeps one version/);
@@ -128,7 +128,46 @@ test("on a pacman system there is nothing to propose, and the reason is said", a
 test("a package that is no longer installed after the purge is verified gone", async () => {
   const after = fixture("dpkg-packages.txt").split("\n").filter((line) => !line.includes("6.8.0-40")).join("\n");
   const harness = tools({ [DPKG]: after });
-  const adapter = createKernelAdapter({ tools: harness.port, runningRelease: () => "6.8.0-45-generic", installed: async () => true });
+  const adapter = createKernelAdapter({ tools: harness.port, runningRelease: () => "6.8.0-45-generic", installed: async () => true, kernelReleases: async () => new Set(["6.8.0-45-generic", "6.8.0-47-generic"]) });
   const verification = await adapter.verify(purge(), new Set([0, 1, 2, 3]), []);
   assert.ok([...verification.verdicts.values()].every((verdict) => verdict.outcome === "completed"));
+});
+
+function debianWith(packages, { running, releases, simulation = "" }) {
+  const harness = tools((key) => (key === DPKG ? packages : key.startsWith("apt-get -s purge") ? simulation : undefined));
+  return createKernelAdapter({
+    tools: harness.port,
+    runningRelease: () => running,
+    installed: async (tool) => ["dpkg-query", "dpkg", "apt-get"].includes(tool),
+    kernelReleases: async () => new Set(releases),
+  });
+}
+
+const row = (name) => `${name}\tinstall ok installed\t1000\n`;
+
+test("a running kernel installed from an -unsigned package is never proposed", async () => {
+  const packages = ["linux-image-6.1.0-15-amd64", "linux-image-6.1.0-18-amd64-unsigned", "linux-image-6.1.0-20-amd64"].map(row).join("");
+  const adapter = debianWith(packages, { running: "6.1.0-18-amd64", releases: ["6.1.0-15-amd64", "6.1.0-18-amd64", "6.1.0-20-amd64"], simulation: "Purg linux-image-6.1.0-15-amd64 [1]\n" });
+  const [proposal] = (await adapter.discover()).proposals;
+  assert.deepEqual(proposal.items.map((item) => item.id), ["linux-image-6.1.0-15-amd64"]);
+});
+
+test("a debug-symbols package does not make its release look newer than the real newest", async () => {
+  const packages = ["linux-image-6.1.0-18-amd64", "linux-image-6.1.0-20-amd64", "linux-image-6.1.0-20-amd64-dbg"].map(row).join("");
+  const adapter = debianWith(packages, { running: "6.1.0-18-amd64", releases: ["6.1.0-18-amd64", "6.1.0-20-amd64"] });
+  assert.deepEqual((await adapter.discover()).proposals, [], "the running kernel and the newest are all there is");
+});
+
+test("a kernel package with no modules installed on disk is not treated as a kernel", async () => {
+  const packages = ["linux-image-6.1.0-10-amd64", "linux-image-6.1.0-18-amd64", "linux-image-6.1.0-20-amd64"].map(row).join("");
+  const adapter = debianWith(packages, { running: "6.1.0-18-amd64", releases: ["6.1.0-18-amd64", "6.1.0-20-amd64"] });
+  assert.deepEqual((await adapter.discover()).proposals, []);
+});
+
+test("preflight refuses a reviewed package that is no longer an old kernel", async () => {
+  const packages = ["linux-image-6.8.0-40-generic", "linux-image-6.8.0-45-generic"].map(row).join("");
+  const adapter = debianWith(packages, { running: "6.8.0-40-generic", releases: ["6.8.0-40-generic", "6.8.0-45-generic"], simulation: "Purg linux-image-6.8.0-45-generic [1]\n" });
+  const stale = managerScope({ action: "kernels.dpkg-purge", items: [{ id: "linux-image-6.8.0-45-generic" }], parameters: {}, count: { kind: "exact", value: 1n }, preview: "simulated" });
+  const preflight = await adapter.preflight(stale);
+  assert.match(preflight.refusal, /no longer|newest|running/);
 });

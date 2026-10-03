@@ -183,7 +183,17 @@ export async function createServices(options: CompositionOptions = {}): Promise<
     createFlatpakAdapter({ tools, home: options.homeDirectory ?? homedir() }),
     createContainerAdapter("docker", { tools }),
     createContainerAdapter("podman", { tools }),
-    createKernelAdapter({ tools, runningRelease: release, installed }),
+    createKernelAdapter({
+      tools,
+      runningRelease: release,
+      installed,
+      kernelReleases: async () =>
+        new Set(
+          (await discovery.paths.list(rawPathFromUtf8("/lib/modules")))
+            .map((entry) => entry.utf8?.slice(entry.utf8.lastIndexOf("/") + 1))
+            .filter((name): name is string => name !== undefined),
+        ),
+    }),
     createTmpfilesAdapter({ tools, installed }),
   ];
   const managers = createManagerInventory(managerAdapters);

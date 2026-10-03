@@ -102,7 +102,15 @@ test("this host's kernels are judged by its own package manager, and the running
   const { createKernelAdapter } = await import("../../dist/platform/linux/managers/kernels.js");
   const { release } = await import("node:os");
   const ports = await hostPorts();
-  const discovery = await createKernelAdapter({ tools: ports.tools, runningRelease: release, installed: ports.installed }).discover();
+  const { readdirSync } = await import("node:fs");
+  const kernelReleases = async () => {
+    try {
+      return new Set(readdirSync("/lib/modules"));
+    } catch {
+      return new Set();
+    }
+  };
+  const discovery = await createKernelAdapter({ tools: ports.tools, runningRelease: release, installed: ports.installed, kernelReleases }).discover();
   for (const proposal of discovery.proposals) {
     for (const item of proposal.items) {
       assert.equal(item.id.endsWith(release()), false, `${item.id} belongs to the running kernel`);
