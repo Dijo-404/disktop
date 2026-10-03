@@ -109,12 +109,16 @@ use, and only volumes the engine marked anonymous are ever offered: a named volu
 container uses can still hold the only copy of a database. An old-kernel purge keeps the
 running and the newest kernel, is offered only when a simulated removal takes exactly
 the reviewed packages, and runs as `dpkg --purge` or `rpm -e`, which never remove
-anything else. Crash and temporary files go only where systemd-tmpfiles' own age rules
-send them.
+anything else. A release counts as a kernel only when its modules are installed under
+`/lib/modules`, and `-unsigned`, `-dbg`, and `-dbgsym` packages count as the release
+they name. Crash and temporary files go only where systemd-tmpfiles' own age rules send
+them.
 
 Apply preflights live: an item that is gone or in use again is skipped, and the whole
-action is refused when the running kernel has joined the set or a simulation no longer
-matches. The executor journals through one helper session — the action and its items
+action is refused when a reviewed package is no longer an old kernel — it may be the
+running or the newest one now — or a simulation no longer matches. A command stopped
+while it ran is verified like one that finished, and a per-item command that exited
+non-zero fails its item whatever a listing says. The executor journals through one helper session — the action and its items
 before anything runs, each command's start before it is spawned and its exit after —
 and asks the manager again afterwards what really went. A command that started and never
 reported back is `uncertain` after reconciliation, and so is its action.
@@ -126,8 +130,14 @@ is never a reason to try another way.
 
 ## Running as root
 
-Under EUID 0, Disktop plans and applies no change to a file itself, and the helper
-refuses every user-file mutation from its side as well. Scans and listings work, which is
+Under EUID 0, Disktop starts only from a root-owned install: every entry of the
+package, and every directory above it, must be owned by root and closed to other
+accounts, or it refuses with `permission-denied`, because root running code an ordinary
+account can change is that account running as root. Inside an unprivileged user
+namespace, where EUID 0 has only its creator's power, this is not required. Running as
+root, Disktop plans and applies no change to a file itself, the helper refuses every
+user-file mutation from its side as well, and reconciliation releases nothing a crash
+staged. Scans and listings work, which is
 what an administrator's read-only per-user scan needs, and a reviewed manager action
 still runs.
 
@@ -139,6 +149,10 @@ is created. When reconciliation finds an item a crash left uncertain, it removes
 staged name only if it still holds exactly that inode, the same thing a failed copy does
 to its own output at runtime; anything else at that name is left in place and named in
 the item's record.
+
+Every recursive removal — erasing a tree, emptying Trash, discarding a staged copy —
+opens each directory it descends into without crossing a mount, so a filesystem mounted
+inside a reviewed tree after review is refused rather than deleted through.
 
 ## What an action checked afterwards
 
