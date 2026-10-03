@@ -1,0 +1,470 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/Dijo-404/disktop/schemas/cli/v1/report-document.json",
+  "title": "disktop report --format json",
+  "description": "The standalone document `disktop report --format json` writes. It is not a CLI envelope: it is a file somebody keeps, so it names its own schema version, when it was made, and by which Disktop. Each section carries its own completeness and warnings; a section that was not asked for says why it is absent instead of being empty. Integers that can exceed 2^53 are decimal strings and every path carries its raw bytes in base64.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schemaVersion",
+    "document",
+    "generatedAt",
+    "generator",
+    "status",
+    "sections",
+    "capacity",
+    "scan",
+    "findings"
+  ],
+  "properties": {
+    "schemaVersion": {
+      "const": "1"
+    },
+    "document": {
+      "const": "disktop-report"
+    },
+    "generatedAt": {
+      "$ref": "common.json#/$defs/timestamp"
+    },
+    "generator": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "name",
+        "version"
+      ],
+      "properties": {
+        "name": {
+          "const": "disktop"
+        },
+        "version": {
+          "type": "string",
+          "pattern": "^(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)(-[0-9A-Za-z.-]+)?(\\+[0-9A-Za-z.-]+)?$"
+        }
+      }
+    },
+    "status": {
+      "description": "`incomplete` when any included section is; that section's own warnings say what it missed.",
+      "type": "string",
+      "enum": [
+        "complete",
+        "incomplete"
+      ]
+    },
+    "sections": {
+      "description": "The sections this report includes, in order. Capacity is always one of them.",
+      "type": "array",
+      "minItems": 1,
+      "uniqueItems": true,
+      "items": {
+        "$ref": "#/$defs/sectionName"
+      }
+    },
+    "capacity": {
+      "$ref": "#/$defs/capacity"
+    },
+    "scan": {
+      "oneOf": [
+        {
+          "$ref": "#/$defs/omitted"
+        },
+        {
+          "$ref": "#/$defs/scan"
+        }
+      ]
+    },
+    "findings": {
+      "oneOf": [
+        {
+          "$ref": "#/$defs/omitted"
+        },
+        {
+          "$ref": "#/$defs/findings"
+        }
+      ]
+    }
+  },
+  "allOf": [
+    {
+      "if": {
+        "type": "object",
+        "properties": {
+          "status": {
+            "const": "complete"
+          }
+        },
+        "required": [
+          "status"
+        ]
+      },
+      "then": {
+        "type": "object",
+        "description": "A complete report has no incomplete section.",
+        "properties": {
+          "capacity": {
+            "type": "object",
+            "properties": {
+              "complete": {
+                "const": true
+              }
+            }
+          },
+          "scan": {
+            "type": "object",
+            "properties": {
+              "complete": {
+                "const": true
+              }
+            }
+          },
+          "findings": {
+            "type": "object",
+            "properties": {
+              "complete": {
+                "const": true
+              }
+            }
+          }
+        }
+      },
+      "else": {
+        "description": "An incomplete report names at least one section that is.",
+        "anyOf": [
+          {
+            "type": "object",
+            "properties": {
+              "capacity": {
+                "type": "object",
+                "properties": {
+                  "complete": {
+                    "const": false
+                  }
+                },
+                "required": [
+                  "complete"
+                ]
+              }
+            }
+          },
+          {
+            "type": "object",
+            "properties": {
+              "scan": {
+                "type": "object",
+                "properties": {
+                  "complete": {
+                    "const": false
+                  }
+                },
+                "required": [
+                  "complete"
+                ]
+              }
+            }
+          },
+          {
+            "type": "object",
+            "properties": {
+              "findings": {
+                "type": "object",
+                "properties": {
+                  "complete": {
+                    "const": false
+                  }
+                },
+                "required": [
+                  "complete"
+                ]
+              }
+            }
+          }
+        ]
+      }
+    }
+  ],
+  "$defs": {
+    "sectionName": {
+      "type": "string",
+      "enum": [
+        "capacity",
+        "scan",
+        "findings"
+      ]
+    },
+    "warnings": {
+      "type": "array",
+      "items": {
+        "$ref": "common.json#/$defs/warning"
+      }
+    },
+    "incompleteNeedsWarning": {
+      "if": {
+        "type": "object",
+        "properties": {
+          "complete": {
+            "const": false
+          }
+        },
+        "required": [
+          "complete"
+        ]
+      },
+      "then": {
+        "type": "object",
+        "description": "A section that is short of what it covers says what it missed.",
+        "properties": {
+          "warnings": {
+            "type": "array",
+            "minItems": 1
+          }
+        }
+      }
+    },
+    "omitted": {
+      "description": "A section that was not asked for. It is absent on purpose, so it does not make the report incomplete.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "included",
+        "reason"
+      ],
+      "properties": {
+        "included": {
+          "const": false
+        },
+        "reason": {
+          "type": "string",
+          "minLength": 1
+        }
+      }
+    },
+    "filesystemUsage": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "filesystem",
+        "usedPercent"
+      ],
+      "properties": {
+        "filesystem": {
+          "$ref": "common.json#/$defs/filesystem"
+        },
+        "usedPercent": {
+          "description": "The share `df` reports: blocks reserved for root are left out of the denominator.",
+          "$ref": "common.json#/$defs/percent"
+        },
+        "inodesUsedPercent": {
+          "description": "Absent when the filesystem reports no inode counts, never zero in their place.",
+          "$ref": "common.json#/$defs/percent"
+        }
+      }
+    },
+    "capacity": {
+      "description": "The joined capacity view the dashboard and `devices` show.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "complete",
+        "warnings",
+        "capability",
+        "devices",
+        "filesystems",
+        "alerts"
+      ],
+      "properties": {
+        "complete": {
+          "type": "boolean"
+        },
+        "warnings": {
+          "$ref": "#/$defs/warnings"
+        },
+        "capability": {
+          "$ref": "common.json#/$defs/capability"
+        },
+        "devices": {
+          "type": "array",
+          "items": {
+            "$ref": "common.json#/$defs/device"
+          }
+        },
+        "filesystems": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/filesystemUsage"
+          }
+        },
+        "alerts": {
+          "type": "array",
+          "items": {
+            "$ref": "common.json#/$defs/alert"
+          }
+        }
+      },
+      "allOf": [
+        {
+          "$ref": "#/$defs/incompleteNeedsWarning"
+        }
+      ]
+    },
+    "scan": {
+      "description": "The newest stored scan covering `subject`. Totals and completeness are the whole scan's; `entries` and `typeTotals` cover `subject` and everything below it. When the index cannot answer they are absent and a warning says why.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "included",
+        "complete",
+        "warnings",
+        "subject",
+        "snapshot"
+      ],
+      "properties": {
+        "included": {
+          "const": true
+        },
+        "complete": {
+          "type": "boolean"
+        },
+        "warnings": {
+          "$ref": "#/$defs/warnings"
+        },
+        "subject": {
+          "$ref": "common.json#/$defs/rawPath"
+        },
+        "snapshot": {
+          "$ref": "common.json#/$defs/snapshot"
+        },
+        "entries": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "sort",
+            "order",
+            "limit",
+            "more",
+            "items"
+          ],
+          "properties": {
+            "sort": {
+              "const": "allocated"
+            },
+            "order": {
+              "const": "descending"
+            },
+            "limit": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 1000
+            },
+            "more": {
+              "description": "True when more entries exist under the subject than the listing shows. A ranking cut at its limit is still complete.",
+              "type": "boolean"
+            },
+            "items": {
+              "type": "array",
+              "maxItems": 1000,
+              "items": {
+                "$ref": "common.json#/$defs/indexedEntry"
+              }
+            }
+          }
+        },
+        "typeTotals": {
+          "type": "array",
+          "items": {
+            "$ref": "common.json#/$defs/typeTotal"
+          }
+        }
+      },
+      "allOf": [
+        {
+          "$ref": "#/$defs/incompleteNeedsWarning"
+        },
+        {
+          "if": {
+            "type": "object",
+            "properties": {
+              "complete": {
+                "const": true
+              }
+            },
+            "required": [
+              "complete"
+            ]
+          },
+          "then": {
+            "type": "object",
+            "description": "A complete scan section was answered by the index.",
+            "properties": {
+              "entries": {
+                "type": "object"
+              },
+              "typeTotals": {
+                "type": "array"
+              }
+            },
+            "required": [
+              "entries",
+              "typeTotals"
+            ]
+          }
+        }
+      ]
+    },
+    "findings": {
+      "description": "What the detectors found, as `disktop clean` lists it. Nothing was applied.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "included",
+        "complete",
+        "warnings",
+        "capability",
+        "measured",
+        "findings",
+        "providers",
+        "categoryTotals"
+      ],
+      "properties": {
+        "included": {
+          "const": true
+        },
+        "complete": {
+          "type": "boolean"
+        },
+        "warnings": {
+          "$ref": "#/$defs/warnings"
+        },
+        "capability": {
+          "$ref": "common.json#/$defs/capability"
+        },
+        "measured": {
+          "type": "boolean"
+        },
+        "findings": {
+          "type": "array",
+          "maxItems": 10000,
+          "items": {
+            "$ref": "common.json#/$defs/finding"
+          }
+        },
+        "providers": {
+          "type": "array",
+          "items": {
+            "$ref": "common.json#/$defs/providerReport"
+          }
+        },
+        "categoryTotals": {
+          "type": "array",
+          "items": {
+            "$ref": "common.json#/$defs/categoryTotal"
+          }
+        }
+      },
+      "allOf": [
+        {
+          "$ref": "#/$defs/incompleteNeedsWarning"
+        }
+      ]
+    }
+  }
+}

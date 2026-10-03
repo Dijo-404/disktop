@@ -1,4 +1,5 @@
 /** A CLI context backed by fixed readings, so a test never depends on the host's disks. */
+import { createReportService } from "../../dist/application/report.js";
 
 export function rawPath(display) {
   return { bytesBase64: Buffer.from(display, "utf8").toString("base64"), display, utf8: display };
@@ -190,6 +191,11 @@ export function fakeContext(overrides = {}) {
       },
     },
     recorded,
+    // The real report service over these same fake readings; only the file it
+    // would write is kept in memory, in `written`, unless a test hands it a
+    // port of its own.
+    report: undefined,
+    written: [],
     startupWarnings: overrides.startupWarnings ?? [],
     signals: { listen() {}, stop() {} },
     resolvePath: (path) => (path === "." ? "/home/example/projects" : path),
@@ -204,5 +210,37 @@ export function fakeContext(overrides = {}) {
     launched: 0,
     launchedWithUnits: undefined,
   };
+  context.report =
+    overrides.report ??
+    createReportService({
+      dashboard: context.dashboard,
+      snapshots: context.storage.snapshots,
+      explore: context.storage.explore,
+      // Read late, so a test that sets `context.footprint` afterwards is heard.
+      footprint: { discover: (request, signal) => context.footprint.discover(request, signal) },
+      files: overrides.reportFiles ?? memoryReportFiles(context.written),
+      effectiveUserId: overrides.effectiveUserId ?? 1000,
+    });
   return context;
+}
+
+/** A report file port that keeps what it was given and refuses a name twice. */
+export function memoryReportFiles(written = []) {
+  const taken = (target) => written.some((file) => file.target.bytesBase64 === target.bytesBase64);
+  const exists = (target) => ({
+    kind: "refused",
+    failure: { code: "invalid-input", message: `${target.display} already exists.` },
+  });
+  return {
+    async check(target) {
+      return taken(target) ? exists(target) : { kind: "clear" };
+    },
+    async createExclusive(target, content) {
+      if (taken(target)) {
+        return exists(target);
+      }
+      written.push({ target, text: Buffer.from(content).toString("utf8") });
+      return { kind: "written", bytesWritten: BigInt(content.byteLength), warnings: [] };
+    },
+  };
 }

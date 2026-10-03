@@ -1,0 +1,16 @@
+{
+  "schemaVersion": "1",
+  "command": "report",
+  "generatedAt": "2026-09-29T08:15:04.117Z",
+  "status": "complete",
+  "exitCode": 0,
+  "data": {
+    "format": "pdf",
+    "output": {
+      "bytesBase64": "L2hvbWUvZXhhbXBsZS9yZXBvcnQuanNvbg==",
+      "display": "/home/example/report.json"
+    },
+    "bytesWritten": "48213",
+    "sections": ["capacity", "everything"]
+  }
+}

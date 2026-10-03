@@ -1,0 +1,11 @@
+{
+  "schemaVersion": "1",
+  "command": "report",
+  "generatedAt": "2026-09-29T08:15:04.117Z",
+  "status": "error",
+  "exitCode": 2,
+  "error": {
+    "code": "invalid-input",
+    "message": "/home/example/report.html already exists. Disktop never replaces a file with a report: name a new file, or move the old one away first."
+  }
+}

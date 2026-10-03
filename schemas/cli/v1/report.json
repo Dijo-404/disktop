@@ -1,0 +1,58 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/Dijo-404/disktop/schemas/cli/v1/report.json",
+  "title": "disktop report --output FILE --json",
+  "description": "What `report` wrote. With --json the envelope is stdout's whole content, so the report itself always goes to --output; the document's own shape is report-document.json for JSON, and docs/cli.md describes the CSV and HTML forms. The file is created new and never replaces anything; an interrupted report writes nothing and exits 130.",
+  "type": "object",
+  "allOf": [
+    {
+      "$ref": "envelope.json"
+    }
+  ],
+  "properties": {
+    "command": {
+      "const": "report"
+    },
+    "data": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "format",
+        "output",
+        "bytesWritten",
+        "sections"
+      ],
+      "properties": {
+        "format": {
+          "type": "string",
+          "enum": [
+            "json",
+            "csv",
+            "html"
+          ]
+        },
+        "output": {
+          "description": "The file the report was published as.",
+          "$ref": "common.json#/$defs/rawPath"
+        },
+        "bytesWritten": {
+          "$ref": "common.json#/$defs/decimalInteger"
+        },
+        "sections": {
+          "description": "The sections the report includes. Capacity is always one of them.",
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": {
+            "type": "string",
+            "enum": [
+              "capacity",
+              "scan",
+              "findings"
+            ]
+          }
+        }
+      }
+    }
+  }
+}
