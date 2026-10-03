@@ -115,7 +115,7 @@ export function createCommandRunner(options: RunnerOptions = {}): CommandRunner 
       // Ctrl+C can land while the journal records that this command is about
       // to start. A command asked to stop before it began is not begun.
       if (runOptions.signal.aborted) {
-        return outcome("cancelled", null, "", "Stopped before this command started; it was never run.");
+        return outcome("not-started", null, "", "Stopped before this command started; it was never run.");
       }
 
       const [program, ...prefix] = escalation.kind === "none" ? [executable] : escalation.argv;

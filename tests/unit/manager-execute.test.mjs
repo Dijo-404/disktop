@@ -237,3 +237,19 @@ test("what a command did is journalled even after Ctrl+C, because a journal writ
     assert.equal(call.aborted, false, `${call.operation} ${call.arguments.phase ?? ""} was sent with an aborted signal`);
   }
 });
+
+test("a command that was stopped before it started is skipped as never run, not failed as unconfirmed", async () => {
+  // The runner saw the stop request before it spawned anything, so there is
+  // nothing to verify: the items were never attempted.
+  const { calls, executor } = harness({
+    runs: [{ status: "not-started", exitCode: null, output: "", explanation: "Stopped before this command started; it was never run." }],
+    gone: [],
+  });
+  await executor.apply(containersPlan(2), new AbortController().signal);
+  const finish = calls.find((call) => call.operation === "manager-finish").arguments;
+  for (const item of finish.items) {
+    assert.equal(item.outcome, "skipped", JSON.stringify(item));
+    assert.match(item.message, /never run/);
+  }
+  assert.equal(calls.filter((call) => call.operation === "run").length, 1, "nothing after it is run either");
+});
