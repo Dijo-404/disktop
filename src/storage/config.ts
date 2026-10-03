@@ -1,8 +1,11 @@
-import { readFile } from "node:fs/promises";
 import { posix } from "node:path";
 import { isRefusedAsAllowedRoot } from "../domain/protected-paths.js";
 import { validateRules, type CleanupRule } from "../domain/rules.js";
+import { readOwnFile } from "./files.js";
 import { parseToml, type TomlTable, type TomlValue } from "./toml.js";
+
+/** A hand-written configuration is a few kilobytes; this is generous and still bounded. */
+const MAX_CONFIG_BYTES = 1024 * 1024;
 
 export interface DisktopConfig {
   readonly units: "iec" | "si";
@@ -345,7 +348,9 @@ export interface LoadedConfig {
 export async function loadConfigFile(configFile: string): Promise<LoadedConfig> {
   let source: string;
   try {
-    source = await readFile(configFile, "utf8");
+    // A configuration linked in from a dotfiles repository is ordinary, so a
+    // link is followed; a pipe or a device behind it is refused, not read.
+    source = await readOwnFile(configFile, MAX_CONFIG_BYTES, { followSymlinks: true });
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code === "ENOENT") {
       return { config: DEFAULT_CONFIG, source: "defaults" };
