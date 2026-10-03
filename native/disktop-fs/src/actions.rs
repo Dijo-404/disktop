@@ -932,6 +932,13 @@ fn compress_one(
             Outcome::Failed,
         );
     }
+    // A source that cannot be removed completely is found out now, before an
+    // archive of it is written and published for nothing.
+    if disposition == SourceDisposition::Permanent
+        && let Err((code, message)) = removable_completely(&parent)
+    {
+        return refuse(code, message, Outcome::Failed);
+    }
 
     // Beside the source unless somebody named somewhere else. The parent's own
     // descriptor is already open and already resolved without symlinks.
@@ -1292,6 +1299,13 @@ fn move_one(
             "Only a file or a directory can be moved to another disk.".to_owned(),
             Outcome::Failed,
         );
+    }
+    // A source that cannot be removed completely is found out now, before it
+    // is copied and published for nothing.
+    if context.disposition == SourceDisposition::Permanent
+        && let Err((code, message)) = removable_completely(&parent)
+    {
+        return refuse(code, message, Outcome::Failed);
     }
 
     // The published name is checked before a byte is copied, so a collision
@@ -1729,6 +1743,9 @@ fn dispose_of_source(
             // be put back, and a permanent removal has nowhere. Clearing it is
             // what makes `undo` refuse this record rather than try to rename
             // the published output back over the original's path.
+            if let Err((_, message)) = removable_completely(&parent) {
+                return kept(still_there(&message));
+            }
             if let Err(error) = journal.record_intent(journal_id, position, &target.path, None) {
                 return kept(still_there(&error.to_string()));
             }
@@ -2166,6 +2183,9 @@ fn erase_one(
     };
     if let Err((code, message)) = subtree_unchanged(&parent, target, cancelled) {
         return refuse(code, message, outcome_for(code));
+    }
+    if let Err((code, message)) = removable_completely(&parent) {
+        return refuse(code, message, Outcome::Failed);
     }
 
     if let Err(error) = journal.record_intent(journal_id, position, &target.path, None) {
@@ -2637,6 +2657,18 @@ fn empty_one(
         );
     }
 
+    // Emptying Trash is irreversible too, and a read-only directory somebody
+    // trashed would stop it halfway.
+    for half in [&b"files"[..], b"info"] {
+        let found = match unremovable_inside(directory, half) {
+            Ok(None) => continue,
+            Ok(Some(found)) => cannot_remove_completely(&found),
+            Err(error) => describe_removal(&error),
+        };
+        sys::close(directory);
+        return refuse(found.0, found.1);
+    }
+
     if let Err(error) = journal.record_intent(journal_id, position, &target.path, None) {
         sys::close(directory);
         return refuse(
@@ -2738,6 +2770,147 @@ fn empty_directory(parent: libc::c_int, name: &[u8]) -> std::io::Result<()> {
 /// Open a directory being removed: never through a symlink, never into another mount.
 fn open_for_removal(parent: libc::c_int, name: &[u8]) -> std::io::Result<libc::c_int> {
     sys::open_child_directory(parent, name, false)
+}
+
+/// The first place in a tree this user could not remove an entry from, as a
+/// path relative to `name`, or `None` when the whole tree can go.
+///
+/// Asked before an irreversible removal starts, because the removal itself
+/// only finds out partway: unlinking needs write and search permission on the
+/// directory holding each entry, and Disktop does not change permissions on a
+/// user's files to get a removal through. Without this, a tree holding one
+/// read-only directory (a Go module cache is full of them) would be removed
+/// up to that directory and no further, irreversibly and incompletely.
+///
+/// The answer comes from each directory's owner, group, and mode against this
+/// process's credentials. An ACL can grant what the mode does not, which only
+/// makes this refuse something that could have gone; it never lets through
+/// something that cannot.
+fn unremovable_inside(parent: libc::c_int, name: &[u8]) -> std::io::Result<Option<Vec<u8>>> {
+    let credentials = Credentials::current();
+    // The directory holding the target has to let its name go too.
+    if !credentials.may_empty(&sys::metadata_of(parent)?) {
+        return Ok(Some(Vec::new()));
+    }
+    let top = sys::metadata_at(parent, name)?;
+    if top.kind != EntryKind::Directory {
+        return Ok(None);
+    }
+
+    struct Frame {
+        directory: sys::Directory,
+        names: Vec<Vec<u8>>,
+        path: Vec<u8>,
+    }
+    fn enter(descriptor: libc::c_int, path: Vec<u8>) -> std::io::Result<Frame> {
+        let mut directory = sys::Directory::from_descriptor(descriptor)?;
+        let mut names = Vec::new();
+        while let Some(name) = directory.next_name()? {
+            names.push(name);
+        }
+        Ok(Frame {
+            directory,
+            names,
+            path,
+        })
+    }
+
+    if !credentials.may_empty(&top) {
+        return Ok(Some(name.to_vec()));
+    }
+    let mut stack = vec![enter(open_for_removal(parent, name)?, name.to_vec())?];
+    while let Some(frame) = stack.last_mut() {
+        let Some(child) = frame.names.pop() else {
+            stack.pop();
+            continue;
+        };
+        let descriptor = frame.directory.descriptor();
+        let metadata = match sys::metadata_at(descriptor, &child) {
+            Ok(metadata) => metadata,
+            Err(error) if error.raw_os_error() == Some(libc::ENOENT) => continue,
+            Err(error) => return Err(error),
+        };
+        if metadata.kind != EntryKind::Directory {
+            continue;
+        }
+        let mut path = frame.path.clone();
+        path.push(b'/');
+        path.extend_from_slice(&child);
+        if !credentials.may_empty(&metadata) {
+            return Ok(Some(path));
+        }
+        if stack.len() > crate::subtree::MAX_DEPTH {
+            return Err(crate::subtree::too_deep());
+        }
+        let opened = open_for_removal(descriptor, &child)?;
+        stack.push(enter(opened, path)?);
+    }
+    Ok(None)
+}
+
+/// Who this process is, for the question "may it remove entries from here?".
+struct Credentials {
+    user: u32,
+    groups: Vec<u32>,
+}
+
+impl Credentials {
+    fn current() -> Credentials {
+        let user = unsafe { libc::geteuid() };
+        let mut groups = vec![unsafe { libc::getegid() }];
+        let count = unsafe { libc::getgroups(0, std::ptr::null_mut()) };
+        if count > 0 {
+            let mut supplementary = vec![0 as libc::gid_t; count as usize];
+            let filled = unsafe { libc::getgroups(count, supplementary.as_mut_ptr()) };
+            if filled > 0 {
+                supplementary.truncate(filled as usize);
+                groups.extend(supplementary);
+            }
+        }
+        Credentials { user, groups }
+    }
+
+    /// Write and search permission on a directory: what unlinking anything
+    /// in it takes.
+    fn may_empty(&self, directory: &sys::Metadata) -> bool {
+        if self.user == 0 {
+            return true;
+        }
+        let bits = if directory.owner_id == self.user {
+            directory.permissions >> 6
+        } else if self.groups.contains(&directory.group_id) {
+            directory.permissions >> 3
+        } else {
+            directory.permissions
+        };
+        bits & 0o3 == 0o3
+    }
+}
+
+/// The refusal for a tree `unremovable_inside` found something in.
+fn cannot_remove_completely(found: &[u8]) -> (&'static str, String) {
+    let place = if found.is_empty() {
+        "The directory holding it".to_owned()
+    } else {
+        format!("'{}'", String::from_utf8_lossy(found))
+    };
+    (
+        "permission-denied",
+        format!(
+            "{place} does not let this user remove what is in it, so this could only be removed \
+             partly. Disktop does not change permissions to force a removal, and nothing was \
+             removed."
+        ),
+    )
+}
+
+/// Whether a target can be removed completely, as an item's refusal if not.
+fn removable_completely(parent: &guard::ResolvedParent) -> Result<(), (&'static str, String)> {
+    match unremovable_inside(parent.descriptor(), &parent.name) {
+        Ok(None) => Ok(()),
+        Ok(Some(found)) => Err(cannot_remove_completely(&found)),
+        Err(error) => Err(describe_removal(&error)),
+    }
 }
 
 /// Whose tree a removal is taking down, which decides what it may do to the
@@ -4287,6 +4460,49 @@ mod tests {
                 .unwrap()
                 .unwrap();
             assert_eq!(record.items[0].outcome, Outcome::Skipped, "{operation}");
+        }
+    }
+
+    /// Disktop never changes permissions on somebody's files to force a
+    /// removal through, so a tree holding a directory this user may not write
+    /// cannot be removed completely. Finding that out halfway through would
+    /// leave part of the tree gone for good; it is found out before anything
+    /// is removed.
+    #[test]
+    fn a_tree_that_cannot_be_removed_completely_is_not_removed_at_all() {
+        if unsafe { libc::geteuid() } == 0 {
+            return;
+        }
+        let sandbox = Sandbox::new("erase-read-only-inside");
+        sandbox.directory(b"state");
+        sandbox.directory(b"work/tree/a-first");
+        sandbox.directory(b"work/tree/z-locked");
+        sandbox.file(b"work/tree/a-first/file", 100);
+        sandbox.file(b"work/tree/top-file", 100);
+        sandbox.file(b"work/tree/z-locked/file", 100);
+        sandbox.chmod(b"work/tree/z-locked", 0o555);
+        let request = EraseRequest {
+            plan_id: "plan-0123456789abcd".to_owned(),
+            journal_directory: sandbox.path().join("state"),
+            targets: vec![reviewed(&joined(&sandbox, b"work/tree"), 300)],
+        };
+
+        let (summary, items) =
+            collect(|report| run_erase(&request, report, &AtomicBool::new(false)));
+        summary.ok().expect("the action ran");
+
+        assert_eq!(items[0].outcome, Outcome::Failed, "{:?}", items[0].message);
+        assert_eq!(items[0].reason, Some("permission-denied"));
+        assert!(
+            items[0].message.as_deref().unwrap().contains("z-locked"),
+            "{:?}",
+            items[0].message
+        );
+        for file in ["a-first/file", "top-file", "z-locked/file"] {
+            assert!(
+                sandbox.path().join("work/tree").join(file).exists(),
+                "{file} was removed although the tree could not be"
+            );
         }
     }
 
