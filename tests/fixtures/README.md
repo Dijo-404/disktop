@@ -8,7 +8,10 @@ or the maximum 255 bytes.
 Every tree is created with `mkdtemp` under the system temporary directory, and `cleanup`
 refuses any root it did not create, so a destructive test cannot be aimed at real data.
 `createStandardFixture` returns a manifest naming each entry, and `createLargeFixture`
-builds a wide tree of a chosen size for the scan budget.
+builds a wide tree of a chosen size for the scan budget. `createHostileNameFixture`
+builds a tree whose names are built to break an export — a spreadsheet formula, a script
+tag, quotes and commas, line breaks, terminal escapes, a direction override, invalid
+UTF-8, an emoji, a 255-byte name — with each one's exact bytes in its manifest.
 
 `node scripts/generate-fixtures.mjs standard` (or `large 1000000`) builds one outside the
 test runner and prints its path; removing it is then your job.

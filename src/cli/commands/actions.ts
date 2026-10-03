@@ -2,7 +2,7 @@ import type { ActionOperation } from "../../domain/actions.js";
 import { KEEP_RULES, type KeepRule } from "../../domain/duplicates.js";
 import type { OperationFailure } from "../../domain/errors.js";
 import type { IndexedEntry, ScanCompleteness, Warning } from "../../domain/models.js";
-import { rawPathFromUtf8 } from "../../domain/paths.js";
+import { rawPathFromUtf8, sanitizeText } from "../../domain/paths.js";
 import type { DuplicateOutcome } from "../../application/duplicates.js";
 import { parseSize } from "../../application/explore.js";
 import {
@@ -11,6 +11,7 @@ import {
 } from "../../domain/staleness.js";
 import { FIND_KINDS, type FindKind } from "../../application/find.js";
 import type { CliContext } from "../context.js";
+import { exitAfter, interruptible, refusalAfter } from "../interrupt.js";
 import {
   EXIT,
   buildEnvelope,
@@ -109,19 +110,16 @@ export async function runPlan(context: CliContext, options: PlanOptions): Promis
     });
   }
 
-  if (options.source !== undefined && options.source !== "trash" && options.source !== "permanent") {
+  const source = options.source;
+  if (source !== undefined && source !== "trash" && source !== "permanent") {
     return refuse(context, "clean plan", options.asJson, {
       code: "invalid-input",
-      message: `'--source' takes 'trash' or 'permanent', not '${options.source}'.`,
+      message: `'--source' takes 'trash' or 'permanent', not '${source}'.`,
     });
   }
 
-  const controller = new AbortController();
-  const interrupt = (): void => controller.abort();
-  context.signals.listen(interrupt);
-  let outcome;
-  try {
-    outcome = await context.actions.plan(
+  const { value: outcome, interrupted } = await interruptible(context, (signal) =>
+    context.actions.plan(
       {
         operation,
         ...(options.findingId === undefined ? {} : { findingId: options.findingId }),
@@ -131,7 +129,7 @@ export async function runPlan(context: CliContext, options: PlanOptions): Promis
         ...(options.destination === undefined
           ? {}
           : { destination: rawPathFromUtf8(context.resolvePath(options.destination)) }),
-        ...(options.source === undefined ? {} : { sourceDisposition: options.source }),
+        ...(source === undefined ? {} : { sourceDisposition: source }),
         ...(options.keepPath === undefined
           ? {}
           : { keepPath: rawPathFromUtf8(context.resolvePath(options.keepPath)) }),
@@ -139,14 +137,12 @@ export async function runPlan(context: CliContext, options: PlanOptions): Promis
           ? {}
           : { replacePath: rawPathFromUtf8(context.resolvePath(options.replacePath)) }),
       },
-      controller.signal,
-    );
-  } finally {
-    context.signals.stop(interrupt);
-  }
+      signal,
+    ),
+  );
 
   if (outcome.kind === "refused") {
-    return refuse(context, "clean plan", options.asJson, outcome.failure);
+    return refuseAfter(context, "clean plan", options.asJson, interrupted, outcome.failure);
   }
 
   if (options.asJson) {
@@ -177,26 +173,20 @@ export async function runPlan(context: CliContext, options: PlanOptions): Promis
  * it cannot stand in for the acknowledgement an irreversible plan needs.
  */
 export async function runApply(context: CliContext, options: ApplyOptions): Promise<number> {
-  const controller = new AbortController();
-  const interrupt = (): void => controller.abort();
-  context.signals.listen(interrupt);
-  let outcome;
-  try {
-    outcome = await context.actions.apply(
+  const { value: outcome, interrupted } = await interruptible(context, (signal) =>
+    context.actions.apply(
       {
         planId: options.planId,
         confirmed: options.confirmed,
         acknowledgePermanent: options.acknowledgePermanent,
         interactive: context.interactive && !options.asJson,
       },
-      controller.signal,
-    );
-  } finally {
-    context.signals.stop(interrupt);
-  }
+      signal,
+    ),
+  );
 
   if (outcome.kind === "refused") {
-    return refuse(context, "clean apply", options.asJson, outcome.failure);
+    return refuseAfter(context, "clean apply", options.asJson, interrupted, outcome.failure);
   }
   if (outcome.kind === "unavailable") {
     return refuse(context, "clean apply", options.asJson, {
@@ -217,7 +207,9 @@ export async function runApply(context: CliContext, options: ApplyOptions): Prom
         },
       ];
 
-  const exitCode = complete ? EXIT.complete : EXIT.incomplete;
+  // Ctrl+C stops the action before its next item; what it did is journalled and
+  // reported in full, and the status says it was interrupted.
+  const exitCode = exitAfter(interrupted, complete ? EXIT.complete : EXIT.incomplete);
   if (options.asJson) {
     writeEnvelope(
       context.output.stdout,
@@ -328,18 +320,12 @@ export async function runUndo(context: CliContext, options: UndoOptions): Promis
     });
   }
 
-  const controller = new AbortController();
-  const interrupt = (): void => controller.abort();
-  context.signals.listen(interrupt);
-  let outcome;
-  try {
-    outcome = await context.actions.restore(options.actionId, controller.signal);
-  } finally {
-    context.signals.stop(interrupt);
-  }
+  const { value: outcome, interrupted } = await interruptible(context, (signal) =>
+    context.actions.restore(options.actionId, signal),
+  );
 
   if (outcome.kind === "refused") {
-    return refuse(context, "undo", options.asJson, outcome.failure);
+    return refuseAfter(context, "undo", options.asJson, interrupted, outcome.failure);
   }
   if (outcome.kind === "unavailable") {
     return refuse(context, "undo", options.asJson, {
@@ -349,7 +335,7 @@ export async function runUndo(context: CliContext, options: UndoOptions): Promis
   }
 
   const complete = outcome.result.state === "complete";
-  const exitCode = complete ? EXIT.complete : EXIT.incomplete;
+  const exitCode = exitAfter(interrupted, complete ? EXIT.complete : EXIT.incomplete);
   const warnings: Warning[] = complete
     ? []
     : [
@@ -397,7 +383,7 @@ export async function runFind(context: CliContext, options: FindOptions): Promis
       message: `'find' takes one of ${FIND_KINDS.join(", ")}, not '${options.kind}'.`,
     });
   }
-  if (options.limit !== undefined && !/^[1-9][0-9]{0,3}$/.test(options.limit)) {
+  if (options.limit !== undefined && (!/^[1-9][0-9]{0,3}$/.test(options.limit) || Number(options.limit) > 1000)) {
     return refuse(context, "find", options.asJson, {
       code: "invalid-input",
       message: "'--limit' accepts a whole number of entries from 1 to 1000.",
@@ -443,12 +429,8 @@ export async function runFind(context: CliContext, options: FindOptions): Promis
     staleBeforeNanoseconds = staleBeforeNanoseconds_(context.now(), Number(days));
   }
 
-  const controller = new AbortController();
-  const interrupt = (): void => controller.abort();
-  context.signals.listen(interrupt);
-  let outcome;
-  try {
-    outcome = await context.actions.find(
+  const { value: outcome, interrupted } = await interruptible(context, (signal) =>
+    context.actions.find(
       {
         kind: options.kind as FindKind,
         scanId: scan.scanId,
@@ -461,14 +443,12 @@ export async function runFind(context: CliContext, options: FindOptions): Promis
         ...(minimumBytes === undefined ? {} : { minimumBytes }),
         ...(staleBeforeNanoseconds === undefined ? {} : { staleBeforeNanoseconds }),
       },
-      controller.signal,
-    );
-  } finally {
-    context.signals.stop(interrupt);
-  }
+      signal,
+    ),
+  );
 
   if (outcome.kind === "refused") {
-    return refuse(context, "find", options.asJson, outcome.failure);
+    return refuseAfter(context, "find", options.asJson, interrupted, outcome.failure);
   }
   if (outcome.kind === "unavailable") {
     return refuse(context, "find", options.asJson, {
@@ -477,15 +457,15 @@ export async function runFind(context: CliContext, options: FindOptions): Promis
     });
   }
   if (outcome.kind === "duplicates") {
-    return renderDuplicates(context, options, scan.scanId, scan.completeness, outcome.result);
+    return renderDuplicates(context, options, scan.scanId, scan.completeness, outcome.result, interrupted);
   }
   if (outcome.kind === "stale") {
-    return renderStale(context, options, scan.scanId, scan.completeness, outcome);
+    return renderStale(context, options, scan.scanId, scan.completeness, outcome, interrupted);
   }
 
   // A page of a partial scan is not a picture of the whole tree, and says so.
   const complete = scan.completeness.complete;
-  const exitCode = complete ? EXIT.complete : EXIT.incomplete;
+  const exitCode = exitAfter(interrupted, complete ? EXIT.complete : EXIT.incomplete);
   const warnings = complete ? [] : scan.completeness.warnings;
 
   if (options.asJson) {
@@ -531,9 +511,10 @@ function renderStale(
   scanId: string,
   completeness: ScanCompleteness,
   outcome: { readonly entries: readonly IndexedEntry[]; readonly nextCursor?: string; readonly basis: StalenessBasis },
+  interrupted: boolean,
 ): number {
   const complete = completeness.complete;
-  const exitCode = complete ? EXIT.complete : EXIT.incomplete;
+  const exitCode = exitAfter(interrupted, complete ? EXIT.complete : EXIT.incomplete);
   const warnings = complete ? [] : completeness.warnings;
 
   if (options.asJson) {
@@ -584,9 +565,10 @@ function renderDuplicates(
   scanId: string,
   completeness: ScanCompleteness,
   result: DuplicateOutcome,
+  interrupted: boolean,
 ): number {
   if (result.kind === "refused") {
-    return refuse(context, "find", options.asJson, result.failure);
+    return refuseAfter(context, "find", options.asJson, interrupted, result.failure);
   }
   if (result.kind === "unavailable") {
     return refuse(context, "find", options.asJson, {
@@ -600,7 +582,7 @@ function renderDuplicates(
   // have hit a cap or an unreadable file. Either one means the listing is not
   // the whole picture, so both are reported and both set the exit status.
   const complete = completeness.complete && result.complete;
-  const exitCode = complete ? EXIT.complete : EXIT.incomplete;
+  const exitCode = exitAfter(interrupted, complete ? EXIT.complete : EXIT.incomplete);
   const warnings = [...(completeness.complete ? [] : completeness.warnings), ...result.warnings];
 
   if (options.asJson) {
@@ -662,6 +644,7 @@ function refuse(
   command: string,
   asJson: boolean,
   failure: OperationFailure,
+  exitCode: number = EXIT.operationalError,
 ): number {
   if (asJson) {
     writeEnvelope(
@@ -670,13 +653,25 @@ function refuse(
         command,
         generatedAt: context.now(),
         status: "error",
-        exitCode: EXIT.operationalError,
+        exitCode,
         warnings: [],
         failure,
       }),
     );
   } else {
-    context.output.stderr(`${failure.message}\n`);
+    context.output.stderr(`${sanitizeText(failure.message)}\n`);
   }
-  return EXIT.operationalError;
+  return exitCode;
+}
+
+/** A refusal from a service that Ctrl+C may have cut short. */
+function refuseAfter(
+  context: CliContext,
+  command: string,
+  asJson: boolean,
+  interrupted: boolean,
+  failure: OperationFailure,
+): number {
+  const after = refusalAfter(interrupted, failure);
+  return refuse(context, command, asJson, after.failure, after.exitCode);
 }

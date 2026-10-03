@@ -2,7 +2,7 @@ import { boundedLimit, olderThanNanoseconds, parseSize } from "../../application
 import type { EntryFilter, EntrySort, SortOrder } from "../../ports/scan.js";
 import type { SnapshotSummary } from "../../ports/snapshots.js";
 import type { RawPath } from "../../domain/models.js";
-import { isWithin, pathBytes, rawPathFromUtf8 } from "../../domain/paths.js";
+import { isWithin, pathBytes, rawPathFromUtf8, sanitizeText } from "../../domain/paths.js";
 import type { CliContext } from "../context.js";
 import {
   EXIT,
@@ -15,6 +15,7 @@ import {
 } from "../output.js";
 import { entryLines, ownerLines, typeTotalLines, warningLines } from "../text.js";
 import type { Warning } from "../../domain/models.js";
+import { StaleScanIndex } from "../../domain/errors.js";
 
 export interface ExploreOptions {
   readonly asJson: boolean;
@@ -62,7 +63,7 @@ export async function runExplore(context: CliContext, options: ExploreOptions): 
       "'--cursor' takes a cursor Disktop printed. Run the command without it to start again.",
     );
   }
-  if (options.limit !== undefined && !/^[1-9][0-9]*$/.test(options.limit)) {
+  if (options.limit !== undefined && (!/^[1-9][0-9]{0,3}$/.test(options.limit) || Number(options.limit) > 1000)) {
     return refuse(context, options.asJson, "invalid-input", "'--limit' accepts a whole number of entries from 1 to 1000.");
   }
 
@@ -74,19 +75,34 @@ export async function runExplore(context: CliContext, options: ExploreOptions): 
     return refuse(context, options.asJson, "invalid-input", "'--older-than' accepts a whole number of days.");
   }
 
-  const outcome = await context.storage.explore.page({
-    scanId: snapshot.scanId,
-    // The path narrows the listing to that subtree. Using it only to choose a
-    // snapshot would answer with the largest entries in the whole scan while
-    // appearing to answer about this directory.
-    filter: { ...filter, underPath: wanted },
-    sort: options.sort ?? "allocated",
-    order: options.order ?? "descending",
-    limit: boundedLimit(options.limit === undefined ? undefined : Number(options.limit)),
-    ...(options.cursor === undefined ? {} : { cursor: options.cursor }),
-    includeTypeTotals: options.typeTotals,
-    ...(options.owners === true ? { includeOwnerTotals: true } : {}),
-  });
+  // The index keeps only the newest scans, so a snapshot can outlive its rows.
+  // That is a reason to scan again, and it is said as one.
+  let outcome: Awaited<ReturnType<typeof context.storage.explore.page>>;
+  try {
+    outcome = await context.storage.explore.page({
+      scanId: snapshot.scanId,
+      // The path narrows the listing to that subtree. Using it only to choose a
+      // snapshot would answer with the largest entries in the whole scan while
+      // appearing to answer about this directory.
+      filter: { ...filter, underPath: wanted },
+      sort: options.sort ?? "allocated",
+      order: options.order ?? "descending",
+      limit: boundedLimit(options.limit === undefined ? undefined : Number(options.limit)),
+      ...(options.cursor === undefined ? {} : { cursor: options.cursor }),
+      includeTypeTotals: options.typeTotals,
+      ...(options.owners === true ? { includeOwnerTotals: true } : {}),
+    });
+  } catch (error) {
+    if (error instanceof StaleScanIndex) {
+      return refuse(
+        context,
+        options.asJson,
+        "invalid-input",
+        `The index no longer holds the scan that covered ${wanted.display}. Run 'disktop scan ${wanted.display}' and explore again.`,
+      );
+    }
+    throw error;
+  }
 
   if (outcome.kind === "unavailable") {
     return refuse(
@@ -232,7 +248,7 @@ function refuse(context: CliContext, asJson: boolean, code: "invalid-input" | "u
       }),
     );
   } else {
-    context.output.stderr(`${message}\n`);
+    context.output.stderr(`${sanitizeText(message)}\n`);
   }
   return EXIT.operationalError;
 }

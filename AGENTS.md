@@ -1,6 +1,6 @@
 # Agent guide for Disktop
 
-Read [PLAN.md](PLAN.md) before implementation. It is the product scope, target folder structure, interface map, phase gates, and acceptance checklist. **Phases 0 through 6 are complete; Phase 7 is the next gate.** The contracts are normative and enforced:
+Read [PLAN.md](PLAN.md) before implementation. It is the product scope, target folder structure, interface map, phase gates, and acceptance checklist. **Phases 0 through 7 are complete; Phase 8 (whole-product validation and the sole `1.0.0` release) is the remaining gate.** The contracts are normative and enforced:
 `schemas/cli/v1/` and `schemas/native/v1/` define public JSON and the helper protocol,
 `src/domain/paths.ts` and `src/domain/protected-paths.ts` define path bytes and the refusal
 policy, `src/storage/` defines configuration, `eslint.config.mjs` enforces the dependency rule,
@@ -8,13 +8,33 @@ policy, `src/storage/` defines configuration, `eslint.config.mjs` enforces the d
 `docs/adr/` record the reasoning. Change a contract and its schema, examples, tests, and docs
 in the same commit.
 
-The TypeScript CLI implements `devices`, the `--json` dashboard, `alerts check`, the 80×24
-dashboard TUI, `scan`, `explore`, `snapshots list|diff`, `clean`, `clean plan`, `clean apply`,
-`history`, `undo`, `find duplicates|stale|empty|broken`, and `timer install|uninstall` against
-real `lsblk`, `/proc/self/mountinfo`, `statfs`, manager, and helper readings. `report` and
-`completion` are declared in `src/cli/parser.ts` and refuse with `not-implemented`. The Rust
-helper implements every operation in `schemas/native/v1/request.json`. Use the package scripts
-for checks and the phase gates in the plan for feature completion.
+The TypeScript CLI implements every command in `src/cli/parser.ts` — `devices`, the `--json`
+dashboard, `alerts check`, `scan`, `explore`, `snapshots list|diff`, `clean`, `clean plan`,
+`clean apply`, `history`, `undo`, `find duplicates|stale|empty|broken`, `report`,
+`completion`, and `timer install|uninstall` — and the full TUI (`src/tui/`, all six tabs)
+against real `lsblk`, `/proc/self/mountinfo`, `statfs`, manager, and helper readings. The
+Rust helper implements every operation in `schemas/native/v1/request.json`. Use the package
+scripts for checks and the phase gates in the plan for feature completion.
+
+Phase 7's contracts: the TUI reaches only `TuiServices` (`src/tui/services.ts`), the same
+application services the CLI handlers get, and can do nothing a command cannot. Views are
+pure functions from state to a `Frame` of exactly the terminal's rows, measured in cells
+with `src/tui/text.ts`; only `src/tui/render.ts` writes escapes, always through
+`noFormat`, and strips controls from every span. Every piece of TUI work is a task in
+`src/tui/controller.ts` with its own `AbortController` and a generation check, so a stale
+answer never overwrites a newer one, and a task that changes the disk is never abandoned —
+leaving waits for it to journal. No single key mutates anything: `c` opens a review, `y`
+applies a reversible plan, an irreversible one needs `yes` typed. Reports are pure
+renderers in `src/reports/` (CSV formula-neutralised, HTML escaped with a no-script CSP),
+written through `src/storage/report-files.ts`, which never replaces an existing file.
+Completions are generated from `COMMANDS`, like help.
+
+Phase 8's packaging contract: `vendor/bin/disktop-fs-linux-{x64,arm64}-{gnu,musl}` plus
+`SHA256SUMS` are what `scripts/build-release.mjs` produces, what `src/native/locator.ts`
+verifies, and what both workflows check; `tests/unit/release-contract.test.mjs` fails if
+any of them names a different helper. `package.json` `files` is an allowlist checked by
+`tests/package/package.test.mjs` against the packed tarball, which it then installs and
+runs. `prepublishOnly` refuses outside the guarded publish workflow.
 
 Phase 6's contracts: a manager plan holds an action id, its items, and its parameters, and
 its argv is derived from them by the fixed templates in `src/domain/managers.ts` every time

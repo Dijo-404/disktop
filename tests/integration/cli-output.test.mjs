@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { spawnSync } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
 import { existsSync } from "node:fs";
 import { test } from "node:test";
 import { compileBundle } from "../support/schemas.mjs";
@@ -88,12 +88,32 @@ test("alerts check validates and reports 0, 1, or 3 and nothing else", () => {
   }
 });
 
-test("an unbuilt command still emits a schema-valid error envelope on stdout", () => {
-  const result = disktop(["report", "--json"]);
+test("a refused command still emits a schema-valid error envelope on stdout", () => {
+  // --json claims stdout for the envelope, so a report with nowhere else to go is refused.
+  const result = disktop(["report", "--format", "json", "--json"]);
   const envelope = envelopeFrom(result);
   validate("error", envelope);
+  validate("report", envelope);
   assert.equal(result.status, 2);
-  assert.equal(envelope.error.code, "not-implemented");
+  assert.equal(envelope.error.code, "invalid-input");
+});
+
+test("disktop report describes this machine as a document that validates", () => {
+  const result = disktop(["report", "--format", "json"]);
+  assert.ok([0, 3].includes(result.status), `unexpected exit ${result.status}: ${result.stderr}`);
+  const document = JSON.parse(result.stdout);
+  validate("report-document", document);
+  assert.deepEqual(document.sections, ["capacity"]);
+  assert.equal(document.status === "complete", result.status === 0);
+  assert.ok(document.capacity.filesystems.length > 0);
+});
+
+test("disktop completion prints a script its shell accepts", () => {
+  const result = disktop(["completion", "bash"]);
+  assert.equal(result.status, 0);
+  assert.equal(result.stderr, "");
+  const check = spawnSync("bash", ["-n"], { input: result.stdout, encoding: "utf8" });
+  assert.equal(check.status, 0, check.stderr);
 });
 
 test("structured output goes to stdout and diagnostics stay on stderr", () => {
@@ -141,6 +161,87 @@ test("disktop clean apply refuses a plan nobody reviewed", () => {
 
   assert.equal(result.status, 2);
   assert.equal(envelope.error.code, "invalid-plan");
+});
+
+/**
+ * Run the CLI with a stdout whose reader has already gone, as `| head -1`
+ * leaves it after one line. The first write is a broken pipe.
+ */
+function withClosedStdout(args) {
+  return new Promise((resolve, reject) => {
+    const child = spawn(process.execPath, ["dist/bin/disktop.js", ...args], {
+      stdio: ["ignore", "pipe", "pipe"],
+      env: { ...process.env, NO_COLOR: "1" },
+    });
+    child.stdout.destroy();
+    let stderr = "";
+    child.stderr.setEncoding("utf8").on("data", (chunk) => {
+      stderr += chunk;
+    });
+    child.on("error", reject);
+    child.on("close", (status, signal) => resolve({ status, signal, stderr }));
+  });
+}
+
+test("a reader that leaves early gets no stack trace and no alert-reached status", async () => {
+  for (const [args, statuses] of [
+    [["--help"], [0]],
+    [["devices"], [0, 3]],
+    [["history", "--json"], [0]],
+  ]) {
+    const result = await withClosedStdout(args);
+    assert.equal(result.signal, null, `${args.join(" ")} was killed by ${result.signal}`);
+    assert.ok(statuses.includes(result.status), `${args.join(" ")} exited ${result.status}: ${result.stderr}`);
+    assert.doesNotMatch(result.stderr, /EPIPE|\n\s+at |node:internal/, `${args.join(" ")} printed a trace`);
+  }
+});
+
+test("a real `| head -1` pipeline ends quietly", () => {
+  const result = spawnSync("sh", ["-c", "node dist/bin/disktop.js devices | head -1 >/dev/null; node dist/bin/disktop.js --help | head -1 >/dev/null"], {
+    encoding: "utf8",
+    env: { ...process.env, NO_COLOR: "1" },
+  });
+  assert.equal(result.stderr, "", "nothing reaches stderr when a reader stops early");
+});
+
+test("help and version answer without building any service", () => {
+  // Building services places Disktop's files under the home directory and
+  // refuses a relative one; help and version never get that far, so they
+  // still answer where every real command would refuse to start.
+  const env = { ...process.env, HOME: "relative-home", NO_COLOR: "1" };
+  for (const args of [["--help"], ["--version"], ["scan", "--help"]]) {
+    const result = spawnSync(process.execPath, ["dist/bin/disktop.js", ...args], { encoding: "utf8", env });
+    assert.equal(result.status, 0, result.stderr);
+    assert.equal(result.stderr, "");
+  }
+  const refused = spawnSync(process.execPath, ["dist/bin/disktop.js", "devices"], { encoding: "utf8", env });
+  assert.equal(refused.status, 2, "a real command still refuses, which is what makes the check above meaningful");
+  assert.doesNotMatch(refused.stderr, /\n\s+at /);
+});
+
+test("an invalid argument exits 2 with the reason on stderr and nothing on stdout", () => {
+  for (const args of [["devices", "--bogus"], ["wipe-everything"], ["history", "--limit"], ["devices", "--units", "furlongs"]]) {
+    const result = disktop(args);
+    assert.equal(result.status, 2, args.join(" "));
+    assert.equal(result.stdout, "", args.join(" "));
+    assert.notEqual(result.stderr.trim(), "", args.join(" "));
+    assert.doesNotMatch(result.stderr, /\n\s+at /);
+  }
+  const json = disktop(["devices", "--bogus", "--json"]);
+  assert.equal(json.status, 2);
+  validate("error", JSON.parse(json.stdout));
+});
+
+test("an argument that is not UTF-8 is refused before anything is scanned or planned", () => {
+  // A real process argument with a byte that is not UTF-8, which no Node API
+  // can produce directly; the shell writes it.
+  const result = spawnSync("sh", ["-c", "node dist/bin/disktop.js scan \"$(printf 'dir\\377')\""], {
+    encoding: "utf8",
+    env: { ...process.env, NO_COLOR: "1" },
+  });
+  assert.equal(result.status, 2, result.stderr);
+  assert.equal(result.stdout, "");
+  assert.match(result.stderr, /not valid UTF-8/);
 });
 
 test("disktop history reads the journal and validates against its schema", () => {

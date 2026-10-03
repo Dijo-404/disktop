@@ -12,7 +12,7 @@
  */
 import assert from "node:assert/strict";
 import { spawn, spawnSync } from "node:child_process";
-import { existsSync, readFileSync } from "node:fs";
+import { existsSync, readFileSync, statSync } from "node:fs";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -30,7 +30,15 @@ const SMALL = Math.max(2_000, Math.round(LARGE / 10));
 
 const RELEASE_HELPER = "native/disktop-fs/target/release/disktop-fs";
 const DEBUG_HELPER = "native/disktop-fs/target/debug/disktop-fs";
-const helperPath = existsSync(RELEASE_HELPER) ? RELEASE_HELPER : DEBUG_HELPER;
+/**
+ * The release build when it is at least as new as the debug build. A release
+ * binary left over from an older checkout would otherwise be measured instead
+ * of the code under test.
+ */
+const helperPath =
+  existsSync(RELEASE_HELPER) && (!existsSync(DEBUG_HELPER) || statSync(RELEASE_HELPER).mtimeMs >= statSync(DEBUG_HELPER).mtimeMs)
+    ? RELEASE_HELPER
+    : DEBUG_HELPER;
 /** A debug build is several times slower; its timings are reported, not enforced. */
 const timingsAreBinding = helperPath === RELEASE_HELPER;
 
@@ -235,6 +243,157 @@ test(
     } finally {
       await small.cleanup();
       await large.cleanup();
+    }
+  },
+);
+
+/**
+ * One helper process held open for a whole browsing session, the way an
+ * interactive surface keeps one, so each request's time is the helper's own.
+ */
+function helperSession() {
+  const child = spawn(helperPath, [], { stdio: ["pipe", "pipe", "pipe"] });
+  const waiting = new Map();
+  let buffer = "";
+  let next = 0;
+  child.stdout.setEncoding("utf8").on("data", (chunk) => {
+    buffer += chunk;
+    let newline = buffer.indexOf("\n");
+    while (newline >= 0) {
+      const line = buffer.slice(0, newline);
+      buffer = buffer.slice(newline + 1);
+      newline = buffer.indexOf("\n");
+      if (line.trim() === "") {
+        continue;
+      }
+      const event = JSON.parse(line);
+      if (event.event === "complete" || event.event === "error") {
+        waiting.get(event.requestId)?.(event);
+        waiting.delete(event.requestId);
+      }
+    }
+  });
+  return {
+    pid: child.pid,
+    request(operation, args) {
+      next += 1;
+      const requestId = `${operation}-${next}`;
+      return new Promise((resolve) => {
+        waiting.set(requestId, resolve);
+        child.stdin.write(`${JSON.stringify({ protocolVersion: 1, requestId, operation, arguments: args })}\n`);
+      });
+    },
+    close() {
+      child.stdin.end();
+      return new Promise((resolve) => child.on("close", resolve));
+    },
+  };
+}
+
+function resident(pid) {
+  const match = /VmRSS:\s*(\d+) kB/.exec(readFileSync(`/proc/${pid}/status`, "utf8"));
+  return Number(match[1]) * 1024;
+}
+
+const BROWSE_BUDGET_MS = 50;
+
+test(
+  "a directory of half the tree is browsed in pages whose cost and memory do not grow",
+  { timeout: 30 * 60_000 },
+  async () => {
+    // One directory holding half the entries: every file empty, so every size
+    // ties and the keyset tie-break is what keeps pages apart.
+    const entries = Math.max(5_000, Math.round(LARGE / 2));
+    const fixture = await createLargeFixture({ entries, fanOut: entries });
+    const home = await disktopHome();
+    const indexDirectory = join(home, "cache", "disktop");
+    const session = helperSession();
+    try {
+      const scan = await session.request("scan", {
+        roots: [base64(fixture.root)],
+        crossFilesystems: false,
+        excludes: [base64(indexDirectory)],
+        accounting: "allocated",
+        indexDirectory: base64(indexDirectory),
+      });
+      assert.equal(scan.event, "complete", JSON.stringify(scan.error));
+      const scanId = scan.result.scanId;
+      const query = (filter, sort, cursor, limit = "200") =>
+        session.request("query-index", {
+          scanId,
+          indexDirectory: base64(indexDirectory),
+          filter,
+          sort,
+          order: "descending",
+          limit,
+          ...(cursor === undefined ? {} : { cursor }),
+        });
+
+      // The directory's own row, found by its path, and then its children.
+      const bucket = join(fixture.root, "bucket-0");
+      const own = await query({ atPath: base64(bucket) }, "allocated", undefined, "1");
+      assert.equal(own.result.entries.length, 1);
+      const parentId = own.result.entries[0].id;
+
+      const timings = [];
+      let afterFirstCycle;
+      const pages = 50;
+      for (const sort of ["allocated", "apparent", "modified", "name"]) {
+        const seen = new Set();
+        let cursor;
+        for (let page = 0; page < pages; page += 1) {
+          const started = process.hrtime.bigint();
+          const answer = await query({ parentId }, sort, cursor);
+          timings.push(Number(process.hrtime.bigint() - started) / 1e6);
+          assert.equal(answer.event, "complete", JSON.stringify(answer.error));
+          for (const entry of answer.result.entries) {
+            assert.equal(seen.has(entry.id), false, `${sort}: a child came back on two pages`);
+            seen.add(entry.id);
+          }
+          cursor = answer.result.nextCursor;
+          if (cursor === undefined) {
+            break;
+          }
+        }
+        afterFirstCycle ??= resident(session.pid);
+      }
+      // Many more pages, cycling through the same orders. A per-page leak of
+      // a few kilobytes would show here; SQLite's bounded page cache is
+      // already warm, so a healthy helper stays where it was.
+      for (let round = 0; round < 10; round += 1) {
+        for (const sort of ["allocated", "apparent", "modified", "name"]) {
+          let cursor;
+          for (let page = 0; page < pages; page += 1) {
+            const answer = await query({ parentId }, sort, cursor);
+            cursor = answer.result.nextCursor;
+            if (cursor === undefined) {
+              break;
+            }
+          }
+        }
+      }
+      const afterMany = resident(session.pid);
+
+      timings.sort((left, right) => left - right);
+      const median = timings[Math.floor(timings.length / 2)];
+      const slowest = timings.at(-1);
+      process.stderr.write(
+        `browse ${entries} children by parentId, 200 per page: median ${median.toFixed(1)} ms, ` +
+          `slowest ${slowest.toFixed(1)} ms over ${timings.length} pages; ` +
+          `helper RSS ${(afterFirstCycle / MEBIBYTE).toFixed(1)} -> ${(afterMany / MEBIBYTE).toFixed(1)} MiB ` +
+          `over ${timings.length * 10} further pages\n`,
+      );
+
+      assert.ok(
+        afterMany - afterFirstCycle < 4 * MEBIBYTE,
+        `helper memory grew with pages: ${(afterFirstCycle / MEBIBYTE).toFixed(1)} -> ${(afterMany / MEBIBYTE).toFixed(1)} MiB`,
+      );
+      if (timingsAreBinding) {
+        assert.ok(median < BROWSE_BUDGET_MS, `a page of children took ${median.toFixed(1)} ms at the median`);
+      }
+    } finally {
+      await session.close();
+      await fixture.cleanup();
     }
   },
 );

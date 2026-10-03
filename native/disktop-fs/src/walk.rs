@@ -18,8 +18,15 @@ use std::time::{Duration, Instant};
 /// process descriptor limit with its open directory streams.
 pub const MAX_DEPTH: u32 = 512;
 
+/// A progress snapshot goes out after this many entries or this long,
+/// whichever comes first, so a slow walk still looks alive...
 const PROGRESS_ENTRIES: u64 = 4096;
 const PROGRESS_INTERVAL: Duration = Duration::from_millis(250);
+/// ...and never sooner than this after the last one, however fast the walk
+/// reads. Ten a second is as often as anybody can read a number change, and
+/// a cap in time rather than in entries keeps a fast disk from turning
+/// progress into the bulk of what crosses the pipe.
+const PROGRESS_MIN_INTERVAL: Duration = Duration::from_millis(100);
 
 /// The most individual warnings one scan reports.
 ///
@@ -322,7 +329,11 @@ impl Walk<'_> {
                 }
                 Err(error) => {
                     let path = frame.path.clone();
-                    self.note_inaccessible(&path, &error);
+                    if vanished(&error) {
+                        self.note_churn(&path, &error);
+                    } else {
+                        self.note_inaccessible(&path, &error);
+                    }
                     self.close_frame(stack)?;
                     continue;
                 }
@@ -538,8 +549,9 @@ impl Walk<'_> {
 
     fn report(&mut self, path: &[u8]) {
         self.throttle();
-        if self.since_progress < PROGRESS_ENTRIES
-            && self.last_progress.elapsed() < PROGRESS_INTERVAL
+        let elapsed = self.last_progress.elapsed();
+        if elapsed < PROGRESS_MIN_INTERVAL
+            || (self.since_progress < PROGRESS_ENTRIES && elapsed < PROGRESS_INTERVAL)
         {
             return;
         }
@@ -595,8 +607,22 @@ impl Walk<'_> {
                 "A symbolic link was not followed.".to_owned(),
                 Some(path.to_vec()),
             ),
+            _ if vanished(error) => self.note_churn(path, error),
             _ => self.note_inaccessible(path, error),
         }
+    }
+
+    /// A directory that was there when its entry was read and gone, or no
+    /// longer a directory, when the walk opened it. Nothing here is
+    /// unreadable — the tree simply moved — but the result stops claiming to
+    /// be a complete picture of it.
+    fn note_churn(&mut self, path: &[u8], error: &io::Error) {
+        self.totals.complete = false;
+        self.warn(
+            "changed-during-scan",
+            format!("The directory changed while the scan was reading it: {error}"),
+            Some(path.to_vec()),
+        );
     }
 
     fn note_inaccessible(&mut self, path: &[u8], error: &io::Error) {
@@ -608,6 +634,16 @@ impl Walk<'_> {
             Some(path.to_vec()),
         );
     }
+}
+
+/// Whether a failure means the entry went away or changed kind underneath the
+/// walk, rather than that it could not be read. `ESTALE` is the same answer
+/// from a network filesystem whose server removed it.
+fn vanished(error: &io::Error) -> bool {
+    matches!(
+        error.raw_os_error(),
+        Some(libc::ENOENT | libc::ENOTDIR | libc::ESTALE)
+    )
 }
 
 pub fn join(parent: &[u8], name: &[u8]) -> Vec<u8> {
@@ -866,6 +902,225 @@ mod tests {
         assert_eq!(by_size.shared_bytes, 100_000);
         assert!(by_blocks.shared_bytes >= 100_000);
         assert_eq!(by_blocks.shared_bytes % 512, 0);
+    }
+
+    /// Make `names` as a chain of nested directories below `root`, one
+    /// `mkdirat` at a time, so the chain can be longer than `PATH_MAX`.
+    fn chain(root: &std::path::Path, names: &[Vec<u8>]) {
+        let root = std::ffi::CString::new(root.as_os_str().as_bytes()).unwrap();
+        let mut parent = unsafe { libc::open(root.as_ptr(), libc::O_RDONLY | libc::O_DIRECTORY) };
+        assert!(parent >= 0);
+        for name in names {
+            let child = std::ffi::CString::new(name.clone()).unwrap();
+            assert_eq!(unsafe { libc::mkdirat(parent, child.as_ptr(), 0o700) }, 0);
+            let next =
+                unsafe { libc::openat(parent, child.as_ptr(), libc::O_RDONLY | libc::O_DIRECTORY) };
+            assert!(next >= 0);
+            unsafe { libc::close(parent) };
+            parent = next;
+        }
+        let leaf = std::ffi::CString::new("leaf").unwrap();
+        let file = unsafe {
+            libc::openat(
+                parent,
+                leaf.as_ptr(),
+                libc::O_WRONLY | libc::O_CREAT | libc::O_EXCL,
+                0o600,
+            )
+        };
+        assert!(file >= 0);
+        unsafe {
+            libc::close(file);
+            libc::close(parent);
+        }
+    }
+
+    /// Remove a chain made by `chain`, deepest first, without ever building
+    /// its full path.
+    fn remove_chain(root: &std::path::Path, names: &[Vec<u8>]) {
+        let root = std::ffi::CString::new(root.as_os_str().as_bytes()).unwrap();
+        let mut descriptors =
+            vec![unsafe { libc::open(root.as_ptr(), libc::O_RDONLY | libc::O_DIRECTORY) }];
+        for name in names {
+            let child = std::ffi::CString::new(name.clone()).unwrap();
+            let parent = *descriptors.last().unwrap();
+            descriptors.push(unsafe {
+                libc::openat(parent, child.as_ptr(), libc::O_RDONLY | libc::O_DIRECTORY)
+            });
+        }
+        let leaf = std::ffi::CString::new("leaf").unwrap();
+        unsafe { libc::unlinkat(*descriptors.last().unwrap(), leaf.as_ptr(), 0) };
+        for (index, name) in names.iter().enumerate().rev() {
+            let child = std::ffi::CString::new(name.clone()).unwrap();
+            unsafe {
+                libc::close(descriptors[index + 1]);
+                libc::unlinkat(descriptors[index], child.as_ptr(), libc::AT_REMOVEDIR);
+            }
+        }
+        unsafe { libc::close(descriptors[0]) };
+    }
+
+    #[test]
+    fn names_at_name_max_in_a_path_longer_than_path_max_are_walked_byte_for_byte() {
+        let sandbox = Sandbox::new("walk-long-names");
+        // 255 bytes each: invalid UTF-8, a control byte, a newline, and a
+        // four-byte emoji, forty deep — about ten kilobytes of path.
+        let names: Vec<Vec<u8>> = (0..40u8)
+            .map(|level| {
+                let mut name = vec![0xff, 0xfe, 0x01, b'\n'];
+                name.extend_from_slice("🗂".as_bytes());
+                name.push(b'0' + level % 10);
+                name.resize(255, b'a' + level % 26);
+                name
+            })
+            .collect();
+        chain(sandbox.path(), &names);
+
+        let mut sink = Collector::default();
+        let totals = walk(&options(sandbox.path()), &mut sink, &AtomicBool::new(false))
+            .expect("the walk completes");
+        remove_chain(sandbox.path(), &names);
+
+        assert!(
+            totals.complete,
+            "{:?}",
+            totals
+                .warnings
+                .iter()
+                .map(|w| &w.message)
+                .collect::<Vec<_>>()
+        );
+        // The root, forty directories, and the leaf.
+        assert_eq!(totals.scanned_entries, 42);
+        for name in &names {
+            assert!(
+                sink.rows.iter().any(|row| &row.1 == name),
+                "a 255-byte name did not survive as bytes"
+            );
+        }
+    }
+
+    #[test]
+    fn a_fast_walk_reports_progress_at_most_ten_times_a_second() {
+        let sandbox = Sandbox::new("walk-progress-rate");
+        for bucket in 0..40 {
+            let directory = format!("bucket-{bucket}");
+            sandbox.directory(directory.as_bytes());
+            for file in 0..500 {
+                std::fs::write(
+                    sandbox.path().join(&directory).join(format!("f{file}")),
+                    b"",
+                )
+                .expect("a sandbox file");
+            }
+        }
+
+        let mut sink = Collector::default();
+        let started = Instant::now();
+        let totals = walk(&options(sandbox.path()), &mut sink, &AtomicBool::new(false)).unwrap();
+        let elapsed = started.elapsed();
+
+        assert_eq!(totals.scanned_entries, 1 + 40 + 40 * 500);
+        // However many entries a second the walk reads, a reader is sent no
+        // more than one snapshot per hundred milliseconds: a fast disk must not
+        // turn progress into the bulk of what crosses the pipe.
+        let allowed = (elapsed.as_millis() / 100) as usize;
+        assert!(
+            sink.progress_calls <= allowed,
+            "{} progress events in {elapsed:?}",
+            sink.progress_calls
+        );
+    }
+
+    #[test]
+    fn a_tree_deeper_than_the_limit_stops_descending_and_says_so() {
+        let sandbox = Sandbox::new("walk-deep");
+        let names: Vec<Vec<u8>> = (0..(MAX_DEPTH + 40)).map(|_| b"d".to_vec()).collect();
+        chain(sandbox.path(), &names);
+
+        let mut sink = Collector::default();
+        let totals = walk(&options(sandbox.path()), &mut sink, &AtomicBool::new(false))
+            .expect("a deep tree never overflows or aborts the walk");
+        remove_chain(sandbox.path(), &names);
+
+        assert!(!totals.complete);
+        assert!(
+            totals
+                .warnings
+                .iter()
+                .any(|warning| warning.code == "depth-limit-reached")
+        );
+        // Every level down to the limit was entered, and the next one was
+        // recorded without being entered.
+        assert_eq!(totals.scanned_entries, 1 + u64::from(MAX_DEPTH) + 1);
+        // Every directory that was entered was closed again with its totals.
+        assert_eq!(sink.finished.len(), 1 + MAX_DEPTH as usize);
+    }
+
+    #[test]
+    fn directories_vanishing_mid_walk_are_churn_not_unreadable_directories() {
+        use std::sync::Arc;
+        let sandbox = Sandbox::new("walk-churn");
+        for slot in 0..64 {
+            sandbox.directory(format!("slot-{slot}").as_bytes());
+        }
+        let root = sandbox.path().to_path_buf();
+        let stop = Arc::new(AtomicBool::new(false));
+        let churner = {
+            let stop = Arc::clone(&stop);
+            let root = root.clone();
+            std::thread::spawn(move || {
+                // Directories appear, gain a file, and disappear again, as a
+                // build tree does under a scan; some become files in between.
+                let mut round = 0u64;
+                while !stop.load(Ordering::Relaxed) {
+                    for slot in 0..64 {
+                        let directory = root.join(format!("slot-{slot}"));
+                        let _ = std::fs::remove_file(directory.join("inside"));
+                        let _ = std::fs::remove_dir(&directory);
+                        if round.is_multiple_of(3) {
+                            let _ = std::fs::write(&directory, b"now a file");
+                            let _ = std::fs::remove_file(&directory);
+                        }
+                        let _ = std::fs::create_dir(&directory);
+                        let _ = std::fs::write(directory.join("inside"), b"x");
+                    }
+                    round += 1;
+                }
+            })
+        };
+
+        let mut churned = 0;
+        for _ in 0..200 {
+            let mut sink = Collector::default();
+            let totals = walk(&options(&root), &mut sink, &AtomicBool::new(false))
+                .expect("churn never aborts a walk");
+            // Nothing in the tree is unreadable: whatever could not be opened
+            // was gone or was no longer a directory by the time it was.
+            assert_eq!(
+                totals.inaccessible_directories,
+                0,
+                "a vanished directory was reported as unreadable: {:?}",
+                totals
+                    .warnings
+                    .iter()
+                    .map(|warning| &warning.message)
+                    .collect::<Vec<_>>()
+            );
+            if totals
+                .warnings
+                .iter()
+                .any(|warning| warning.code == "changed-during-scan")
+            {
+                churned += 1;
+                assert!(!totals.complete, "a walk that saw churn claims to be whole");
+            }
+        }
+        stop.store(true, Ordering::Relaxed);
+        churner.join().expect("the churn thread");
+        // The race is not guaranteed on every host; when it never happened the
+        // assertions above still held for 200 walks of a changing tree.
+        eprintln!("{churned} of 200 walks saw a directory change under them");
     }
 
     #[test]

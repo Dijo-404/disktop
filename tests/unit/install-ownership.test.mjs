@@ -76,3 +76,85 @@ test("a refused start is a permission-denied envelope, not an internal error", a
   assert.equal(status, 2);
   assert.equal(JSON.parse(stdout).error.code, "permission-denied");
 });
+
+function linkedTree(entries, links) {
+  const base = tree(entries);
+  return {
+    async lstat(path) {
+      if (Object.hasOwn(links, path)) {
+        return { uid: 0, mode: 0o777, isDirectory: () => false, isSymbolicLink: () => true };
+      }
+      return base.lstat(path);
+    },
+    readdir: base.readdir,
+    async realpath(path) {
+      if (Object.hasOwn(links, path)) {
+        return links[path];
+      }
+      return path;
+    },
+  };
+}
+
+const LINKED_TREE = {
+  ...ROOT_TREE,
+  "/usr/lib/node_modules/disktop": { children: ["dist", "node_modules"] },
+  "/usr/lib/node_modules/disktop/node_modules": { children: ["terminal-kit", ".bin"] },
+  "/usr/lib/node_modules/disktop/node_modules/.bin": { children: ["tool"] },
+};
+
+test("a link inside the install that points outside it is refused, because its target is never checked", async () => {
+  // `npm link` and workspace installs leave links like this. Node follows them
+  // when it loads a module, so root would run code from wherever they point.
+  const outcome = await verifyRootOwnedInstall(
+    "/usr/lib/node_modules/disktop",
+    linkedTree(LINKED_TREE, {
+      "/usr/lib/node_modules/disktop/node_modules/terminal-kit": "/home/example/src/terminal-kit",
+      "/usr/lib/node_modules/disktop/node_modules/.bin/tool": "/usr/lib/node_modules/disktop/dist/disktop.js",
+    }),
+  );
+  assert.equal(outcome.ok, false);
+  assert.match(outcome.reason, /terminal-kit/);
+  assert.match(outcome.reason, /outside/);
+});
+
+test("a link that stays inside the install is accepted, since everything it can reach is checked", async () => {
+  const outcome = await verifyRootOwnedInstall(
+    "/usr/lib/node_modules/disktop",
+    linkedTree({ ...LINKED_TREE, "/usr/lib/node_modules/disktop/node_modules": { children: [".bin"] } }, {
+      "/usr/lib/node_modules/disktop/node_modules/.bin/tool": "/usr/lib/node_modules/disktop/dist/disktop.js",
+    }),
+  );
+  assert.deepEqual(outcome, { ok: true });
+});
+
+test("a link that resolves nowhere is refused: whoever creates its target chooses what runs", async () => {
+  const reader = linkedTree({ ...LINKED_TREE, "/usr/lib/node_modules/disktop/node_modules": { children: [".bin"] } }, {
+    "/usr/lib/node_modules/disktop/node_modules/.bin/tool": "/usr/lib/node_modules/disktop/dist/disktop.js",
+  });
+  reader.realpath = async () => {
+    throw Object.assign(new Error("ENOENT"), { code: "ENOENT" });
+  };
+  const outcome = await verifyRootOwnedInstall("/usr/lib/node_modules/disktop", reader);
+  assert.equal(outcome.ok, false);
+});
+
+test("the Node binary root would run is held to the same rule as the install", async () => {
+  const { verifyRootOwnedExecutable } = await import("../../dist/platform/linux/install-ownership.js");
+  const system = tree({
+    "/": { children: ["usr", "home"] },
+    "/usr": { children: ["bin"] },
+    "/usr/bin": { children: ["node"] },
+    "/usr/bin/node": { mode: 0o755 },
+    "/home": { children: ["example"] },
+    "/home/example": { uid: 1000, children: [".nvm"] },
+    "/home/example/.nvm": { uid: 1000, children: ["node"] },
+    "/home/example/.nvm/node": { uid: 1000, mode: 0o755 },
+  });
+  assert.deepEqual(await verifyRootOwnedExecutable("/usr/bin/node", system), { ok: true });
+  // `sudo env PATH=$PATH disktop` with Node from a version manager runs a
+  // binary the user's own processes can replace.
+  const borrowed = await verifyRootOwnedExecutable("/home/example/.nvm/node", system);
+  assert.equal(borrowed.ok, false);
+  assert.match(borrowed.reason, /\/home\/example/);
+});

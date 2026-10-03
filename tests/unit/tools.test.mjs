@@ -147,3 +147,94 @@ test("a simulated purge takes only kernel package names, and at least one", asyn
   assert.equal(isAllowedQuery("rpm", ["-e", "--test", "--", "kernel-core-6.10.6-200.fc40.x86_64"]), true);
   assert.equal(isAllowedQuery("rpm", ["-e", "--", "kernel-core-6.10.6-200.fc40.x86_64"]), false);
 });
+
+test("a device argument cannot climb out of /dev", async () => {
+  const { isAllowedQuery } = await import("../../dist/platform/linux/tools.js");
+  for (const device of ["/dev/sda", "/dev/nvme0n1", "/dev/disk/by-id/nvme-Example_SSD_1TB_S1234", "/dev/mapper/luks-0a1b"]) {
+    assert.equal(isAllowedQuery("smartctl", ["-H", "-A", "-j", device]), true, device);
+  }
+  for (const device of ["/dev/../etc/shadow", "/dev/sda/../../etc/shadow", "/dev/./sda", "/dev/sda/..", "/dev//sda"]) {
+    assert.equal(isAllowedQuery("smartctl", ["-H", "-A", "-j", device]), false, device);
+  }
+});
+
+test("a query that outlives its time limit is killed, even when it ignores SIGTERM", async () => {
+  const { runFixedCommand } = await import("../../dist/platform/linux/process.js");
+  const begun = Date.now();
+  const outcome = await runFixedCommand("sh", ["-c", "trap '' TERM; sleep 20 & wait"], {
+    timeoutMilliseconds: 200,
+    maxOutputBytes: 1024,
+  });
+  assert.ok(Date.now() - begun < 5_000, `the query held the caller for ${Date.now() - begun} ms`);
+  assert.notEqual(outcome.capability.status, "available");
+  assert.match(outcome.capability.explanation, /did not finish within/);
+});
+
+test("a query's output is bounded, and running past the bound is a failure rather than a short answer", async () => {
+  const { runFixedCommand } = await import("../../dist/platform/linux/process.js");
+  const outcome = await runFixedCommand("sh", ["-c", "while :; do printf 'xxxxxxxxxxxxxxxx'; done"], {
+    timeoutMilliseconds: 5_000,
+    maxOutputBytes: 64 * 1024,
+  });
+  assert.notEqual(outcome.capability.status, "available");
+  assert.match(outcome.capability.explanation, /more than 65536 bytes/);
+  assert.ok(outcome.stdout.length <= 64 * 1024);
+});
+
+test("a query reads nothing from Disktop's own stdin", async () => {
+  const { runFixedCommand } = await import("../../dist/platform/linux/process.js");
+  // `cat` with an open stdin would wait for input until the time limit.
+  const begun = Date.now();
+  const outcome = await runFixedCommand("cat", [], { timeoutMilliseconds: 3_000, maxOutputBytes: 1024 });
+  assert.equal(outcome.capability.status, "available");
+  assert.ok(Date.now() - begun < 2_000);
+});
+
+test("queries and manager commands select the same daemon and see nothing else", async () => {
+  // Discovery and verification ask through the query runner; apply runs
+  // through the manager runner. If only one of them passed DOCKER_HOST or the
+  // home directory holding docker's current context, a reviewed plan would be
+  // previewed against one daemon and applied to another.
+  const { runFixedCommand, toolEnvironment } = await import("../../dist/platform/linux/process.js");
+  const { createCommandRunner } = await import("../../dist/platform/linux/privilege.js");
+  const environment = {
+    HOME: "/home/example",
+    XDG_RUNTIME_DIR: "/run/user/1000",
+    DOCKER_HOST: "unix:///run/user/1000/docker.sock",
+    DOCKER_CONTEXT: "rootless",
+    CONTAINER_HOST: "unix:///run/user/1000/podman/podman.sock",
+    AWS_SECRET_ACCESS_KEY: "do-not-pass",
+    LD_PRELOAD: "/tmp/evil.so",
+    PATH: "/home/example/bin:/usr/bin",
+  };
+
+  const query = await runFixedCommand("env", [], undefined, environment);
+  const seen = Object.fromEntries(
+    query.stdout.trim().split("\n").map((line) => [line.slice(0, line.indexOf("=")), line.slice(line.indexOf("=") + 1)]),
+  );
+
+  let managerEnv;
+  const runner = createCommandRunner({
+    euid: 1000,
+    environment,
+    resolve: async (name) => (name === "docker" ? "/usr/bin/docker" : undefined),
+    spawn: async (_program, _argv, options) => {
+      managerEnv = options.env;
+      return { exitCode: 0, stdout: "", stderr: "" };
+    },
+  });
+  await runner.run({ tool: "docker", arguments: ["image", "rm", "--", "x"] }, "user", {
+    interactive: false,
+    signal: new AbortController().signal,
+  });
+
+  assert.deepEqual(seen, toolEnvironment(environment));
+  assert.deepEqual(managerEnv, toolEnvironment(environment));
+  for (const name of ["HOME", "XDG_RUNTIME_DIR", "DOCKER_HOST", "DOCKER_CONTEXT", "CONTAINER_HOST"]) {
+    assert.equal(seen[name], environment[name], name);
+  }
+  assert.equal(seen.AWS_SECRET_ACCESS_KEY, undefined);
+  assert.equal(seen.LD_PRELOAD, undefined);
+  assert.equal(seen.PATH, "/usr/bin:/bin:/usr/sbin:/sbin", "PATH is never the caller's");
+  assert.equal(seen.LC_ALL, "C", "parsed output is always in the C locale");
+});

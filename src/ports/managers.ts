@@ -12,7 +12,11 @@ import type {
 import type { Capability, Warning } from "../domain/models.js";
 
 export interface CommandRun {
-  readonly status: "ran" | "denied" | "missing-tool" | "cancelled";
+  /**
+   * `cancelled` ran and was stopped, so what it did has to be asked about;
+   * `not-started` was stopped before anything was spawned, so it did nothing.
+   */
+  readonly status: "ran" | "denied" | "missing-tool" | "cancelled" | "not-started";
   readonly exitCode: number | null;
   /** The last 4 KiB of what the command printed, sanitized. */
   readonly output: string;

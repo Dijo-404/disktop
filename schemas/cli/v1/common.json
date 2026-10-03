@@ -1430,6 +1430,10 @@
             "$ref": "#/$defs/journalItem"
           }
         },
+        "itemsOmitted": {
+          "description": "How many of this action's items a history page left out to stay bounded. Present only when some were; the counts above still cover every item, and undo reads the whole record.",
+          "$ref": "#/$defs/decimalInteger"
+        },
         "manager": {
           "description": "What a manager was asked to run, and what became of each command. One that started and never finished reads 'uncertain'.",
           "type": "object",

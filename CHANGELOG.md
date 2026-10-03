@@ -1,8 +1,154 @@
 # Changelog
 
-All public changes will be recorded here when the first complete Linux release is published.
+All notable changes to Disktop are recorded here. Versions follow [Semantic Versioning](https://semver.org/).
 
-## Unreleased
+## 1.0.0 — unreleased (release candidate)
+
+The first public release. Everything below the Phase headings was built in internal
+phases that were never published; this is the first version anybody can install.
+
+### Phase 7: the complete terminal UI, reports, and completions
+
+- The TUI is the whole product in a terminal, at 80×24 and down to 40×10:
+  - **Disks**: usage bars per filesystem, and for the selected one a stacked bar that
+    separates used, root-reserved, and available space, with its device, inodes, and
+    every mount.
+  - **Explore**: a stored scan, a directory at a time, with each entry's share of its
+    parent, growth since the previous comparable snapshot, a trend sparkline of the
+    total, and a file-type distribution. `f` cycles largest files, duplicates, stale
+    files, empty directories, and broken links; `/` filters with
+    `words ext:log >1GiB age>30 type:dir`, compiled to the same filter as `explore`.
+  - **Clean**, **Dev**, **Apps**: findings with sizes that never pass an estimate (`~`)
+    or an unmeasured size (`unknown`) off as a measurement, actionable findings totalled
+    by category apart from informational ones, and which detectors could not run.
+  - **History**: the journal item by item, with undo behind its own confirmation.
+  - Reviewed plans: `c` reviews, `y` applies a reversible plan, an irreversible one
+    needs `yes` typed. A plan that needs root suspends the TUI for the password prompt.
+    Results keep selected bytes, bytes moved to Trash, and observed free space apart.
+  - Scans with live progress; Esc stops a scan and keeps what it read.
+  - Vim keys, arrows, number keys, mouse (rows, tabs, wheel), and `?` help.
+  - `NO_COLOR` removes colour and keeps bold and inverse; a non-UTF-8 locale, the
+    kernel console, or `DISKTOP_ASCII=1` get ASCII glyphs; `TERM=dumb` gets the text
+    dashboard. The palette keeps the terminal's own foreground for text so a light
+    terminal stays legible.
+- The renderer writes only the rows that changed, in one write, and measures terminal
+  cells so wide and emoji names keep columns aligned. terminal-kit read `%s` and `^r`
+  in a filename as its own format and markup syntax; frames now go through `noFormat`.
+- Every piece of TUI work is cancellable and generation-checked, so a slow answer to an
+  old question never replaces a newer one; leaving waits for an action to journal its
+  current item. The TUI holds at most 10,000 rows of a directory and asks for a filter
+  beyond that.
+- `disktop report --format json|csv|html [--output FILE]` exports capacity, a stored
+  scan (`--path`), and findings (`--findings`). CSV neutralises formulas and carries raw
+  path bytes; HTML is one escaped file with no scripts and a restrictive CSP. A report
+  never replaces an existing file.
+- `disktop completion bash|zsh|fish`, generated from the command table that drives
+  `--help`.
+- The README carries a demo rendered from the TUI's own frames.
+
+### Phase 8: hardening and release engineering
+
+- The package is `disktop@1.0.0`: only compiled JavaScript, the four helpers and their
+  `SHA256SUMS`, the public CLI schemas, README, LICENSE, and this changelog. No install
+  script; `prepublishOnly` refuses outside the guarded publish workflow.
+- Four prebuilt helpers (x86-64 and ARM64, glibc 2.28+ and static musl) are built by
+  `scripts/build-release.mjs`. The locator, the build, and both workflows agree on their
+  names and on `SHA256SUMS`, and a test fails if they ever disagree again; before, a
+  packaged install would never have found its helper.
+- `npm run test:package` packs the tarball, checks it against an allowlist, installs it
+  into a clean prefix, runs it, and proves a tampered helper is refused. CI builds all
+  four helpers, runs the musl one on Alpine and the glibc one on the 2.28 floor, runs
+  the recovery and performance suites, and tests the packed package on each target.
+- Node side:
+  - The helper client no longer crashes on a helper that stops reading (EPIPE), keeps a
+    bounded line buffer, times out a handshake that never comes, and always reaps the
+    process.
+  - `--help` and `--version` answer without reading any configuration; a closed pipe
+    (`disktop devices | head -1`) exits quietly with the command's own status; an
+    unexpected error is one sanitized line and exit `2`.
+  - Ctrl+C makes every long command stop at a safe boundary, report what it did, and
+    exit `130`; a second Ctrl+C never abandons an item in progress.
+  - Every external tool is bounded in output and time and killed if it overstays;
+    preview and apply now reach the same Docker daemon; a manager command stopped before
+    it started is reported as never run.
+  - A dead network mount no longer hangs the dashboard; device and filesystem names
+    cannot carry terminal escapes.
+  - A snapshot whose recorded id did not match its file name could make pruning delete
+    outside the snapshot store; it is now refused. Disktop's own files are read as
+    regular files only, bounded, and written atomically with a directory fsync.
+  - Under root, every file of the install, every symlink in it, and the Node binary
+    itself must be root-owned.
+  - Empty, repeated, and undecodable arguments are refused instead of guessed at.
+- Helper (every mutation re-audited; each fix has a test that failed first):
+  - A cross-filesystem move with permanent disposal could lose the only copy on a power
+    cut: the destination directory is now fsynced after publishing and before the
+    source is touched.
+  - A source that changed while it was being copied could be published torn; it is
+    revalidated before publishing and skipped as changed. Archive members are held to
+    their header size.
+  - A save landing between a hardlink replacement's byte compare and its exchange could
+    be swapped out and lost; the compared descriptor is held across the exchange and
+    anything else is exchanged back.
+  - A file saved over a Trash target just before the rename went to Trash under the
+    wrong identity; what arrives is checked and put back if it is not what was
+    reviewed.
+  - Very deep trees (beyond the stack) crashed the helper mid-item; every walk uses an
+    explicit stack with one 512-level limit, refused at plan time and again before
+    anything is touched.
+  - Archive verification closed a descriptor twice, which could close an unrelated file.
+  - Staging is created exclusively and only Disktop's own staged output is ever
+    removed; read-only directories (Go's module cache) move correctly; an
+    irreversible removal of a tree that contains one is refused before it starts
+    rather than stopping halfway.
+  - An item whose source could not be disposed of after publishing is settled as
+    uncertain instead of staying "in progress" forever.
+  - Cancel is honoured inside a large copy, archive, or verification, up to the
+    publish; the staged output is removed and the item is skipped.
+  - Names near `NAME_MAX` can be trashed, moved, and compressed; undo restores the full
+    name.
+  - `statx` is a raw syscall, so the static musl helper needs no libc version cfg.
+  - A history page is bounded: a record lists at most 1000 items and counts the rest in
+    `itemsOmitted`; undo still reads the whole record.
+  - Reconciliation no longer treats the helper's own in-flight actions as abandoned.
+- Scan and index (measured on a million-entry tree, release build):
+  - Each scan is its own SQLite file, appended to with no secondary index and indexed
+    once when the walk ends: a million-entry scan takes 5.2 s instead of 48 s and its
+    index 241 MB instead of 565 MB.
+  - Every query shape a surface uses is index-backed with row-value cursors: a
+    directory's children come back in 0.2–1.7 ms at any page, a ranked subtree in
+    0.6 ms, type totals in 85 ms instead of 712 ms. Query plans are asserted in tests.
+  - The index directory and files were world-readable (`0755`/`0644`), exposing every
+    name below a scan root to other users; they are now `0700`/`0600`.
+  - Measuring a finding's size no longer evicts the person's own scan from the index:
+    measurements get their own index.
+  - A directory removed mid-scan is reported as a change during the scan rather than
+    as unreadable; a fast scan sends at most ten progress events a second.
+  - The duplicate search holds one size class at a time (helper peak memory 114 MiB →
+    33 MiB on a million entries) and stops within milliseconds when cancelled.
+  - A new `atPath` filter returns the one row at a path, which is how the TUI browses a
+    directory even where a directory's own size ties with its files (Btrfs).
+  - `explore` and `find` over a scan the index has since pruned say which scan to run
+    again instead of failing as an internal error.
+- Category totals no longer compare every finding with every other: at the most
+  findings discovery returns, a findings tab redraws in 3 ms instead of half a second.
+- Ctrl+C typed at a terminal reached the helper too (it shared the terminal's process
+  group) and killed it mid-item, so a scan could not report and an action could not
+  journal its item. The helper now runs in its own process group and is asked to stop
+  by request ID; it still ends when Disktop is killed, because its stdin closes.
+- TUI fixes from an independent review, each with a test that failed first:
+  - A signal never abandons an action on a timer: it is asked to stop after its
+    current item and waited for. Ctrl+C at a sudo or pkexec password prompt cancels
+    that action and the TUI carries on.
+  - A plan answered late can no longer replace an open dialog, so a key meant for one
+    dialog cannot confirm another; a confirming key within 400 ms of a dialog
+    appearing is ignored; a stopped plan's answer is dropped.
+  - A duplicate copy is offered Trash or a byte-compared hardlink, never a plain
+    permanent removal.
+  - A plan is confirmed only at 60×20 or larger, where all of it is on screen; a
+    manager review counts every command it will run.
+  - One change to the disk at a time; History refreshes when an action finishes; a
+    failed or superseded scan no longer leaves or steals the progress panel; cursors
+    never outlive their query; flag and keycap emoji are measured two cells wide.
 
 ### Phase 6: manager cleanup, alerts, and the gaps earlier phases left
 

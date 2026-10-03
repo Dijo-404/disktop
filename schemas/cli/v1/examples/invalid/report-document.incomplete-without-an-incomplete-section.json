@@ -1,0 +1,110 @@
+{
+  "schemaVersion": "1",
+  "document": "disktop-report",
+  "generatedAt": "2026-09-29T08:15:04.117Z",
+  "generator": {
+    "name": "disktop",
+    "version": "1.0.0"
+  },
+  "status": "incomplete",
+  "sections": [
+    "capacity"
+  ],
+  "capacity": {
+    "complete": true,
+    "warnings": [],
+    "capability": {
+      "status": "available",
+      "explanation": "lsblk, mountinfo, and statfs all responded."
+    },
+    "devices": [
+      {
+        "id": "nvme0n1",
+        "name": "nvme0n1",
+        "kind": "unknown",
+        "removable": false,
+        "sizeBytes": "1000204886016",
+        "model": "Example NVMe 1TB",
+        "transport": "nvme",
+        "partitions": [
+          "nvme0n1p1",
+          "nvme0n1p2"
+        ]
+      },
+      {
+        "id": "sdb",
+        "name": "sdb",
+        "kind": "hdd",
+        "removable": true,
+        "sizeBytes": "31029460992",
+        "transport": "usb",
+        "partitions": [
+          "sdb1"
+        ]
+      }
+    ],
+    "filesystems": [
+      {
+        "filesystem": {
+          "id": "fs-259-2",
+          "type": "ext4",
+          "source": "/dev/nvme0n1p2",
+          "mounts": [
+            {
+              "bytesBase64": "Lw==",
+              "display": "/",
+              "utf8": "/"
+            },
+            {
+              "bytesBase64": "L2hvbWU=",
+              "display": "/home",
+              "utf8": "/home"
+            }
+          ],
+          "totalBytes": "1000000000000",
+          "freeBytes": "500000000000",
+          "availableBytes": "450000000000",
+          "totalInodes": "61054976",
+          "freeInodes": "58120993",
+          "network": false,
+          "removable": false,
+          "readOnly": false,
+          "deviceId": "nvme0n1"
+        },
+        "usedPercent": 52,
+        "inodesUsedPercent": 4
+      },
+      {
+        "filesystem": {
+          "id": "fs-8-17",
+          "type": "exfat",
+          "source": "/dev/sdb1",
+          "mounts": [
+            {
+              "bytesBase64": "L21lZGlhL3VzYg==",
+              "display": "/media/usb",
+              "utf8": "/media/usb"
+            }
+          ],
+          "totalBytes": "31020023808",
+          "freeBytes": "9932111872",
+          "availableBytes": "9932111872",
+          "network": false,
+          "removable": true,
+          "readOnly": false,
+          "deviceId": "sdb"
+        },
+        "usedPercent": 67
+      }
+    ],
+    "alerts": []
+  },
+  "scan": {
+    "included": false,
+    "reason": "No --path was given, so no scan is included. Add --path PATH to include the newest stored scan that covers it."
+  },
+  "findings": {
+    "included": false,
+    "reason": "Detectors were not run. Add --findings to include what they found."
+  }
+}

@@ -1,0 +1,288 @@
+{
+  "schemaVersion": "1",
+  "document": "disktop-report",
+  "generatedAt": "2026-09-29T08:15:04.117Z",
+  "generator": {
+    "name": "disktop",
+    "version": "1.0.0"
+  },
+  "status": "incomplete",
+  "sections": [
+    "capacity",
+    "scan",
+    "findings"
+  ],
+  "capacity": {
+    "complete": true,
+    "warnings": [],
+    "capability": {
+      "status": "available",
+      "explanation": "lsblk, mountinfo, and statfs all responded."
+    },
+    "devices": [
+      {
+        "id": "nvme0n1",
+        "name": "nvme0n1",
+        "kind": "unknown",
+        "removable": false,
+        "sizeBytes": "1000204886016",
+        "model": "Example NVMe 1TB",
+        "transport": "nvme",
+        "partitions": [
+          "nvme0n1p1",
+          "nvme0n1p2"
+        ]
+      },
+      {
+        "id": "sdb",
+        "name": "sdb",
+        "kind": "hdd",
+        "removable": true,
+        "sizeBytes": "31029460992",
+        "transport": "usb",
+        "partitions": [
+          "sdb1"
+        ]
+      }
+    ],
+    "filesystems": [
+      {
+        "filesystem": {
+          "id": "fs-259-2",
+          "type": "ext4",
+          "source": "/dev/nvme0n1p2",
+          "mounts": [
+            {
+              "bytesBase64": "Lw==",
+              "display": "/",
+              "utf8": "/"
+            },
+            {
+              "bytesBase64": "L2hvbWU=",
+              "display": "/home",
+              "utf8": "/home"
+            }
+          ],
+          "totalBytes": "1000000000000",
+          "freeBytes": "500000000000",
+          "availableBytes": "450000000000",
+          "totalInodes": "61054976",
+          "freeInodes": "58120993",
+          "network": false,
+          "removable": false,
+          "readOnly": false,
+          "deviceId": "nvme0n1"
+        },
+        "usedPercent": 52,
+        "inodesUsedPercent": 4
+      },
+      {
+        "filesystem": {
+          "id": "fs-8-17",
+          "type": "exfat",
+          "source": "/dev/sdb1",
+          "mounts": [
+            {
+              "bytesBase64": "L21lZGlhL3VzYg==",
+              "display": "/media/usb",
+              "utf8": "/media/usb"
+            }
+          ],
+          "totalBytes": "31020023808",
+          "freeBytes": "9932111872",
+          "availableBytes": "9932111872",
+          "network": false,
+          "removable": true,
+          "readOnly": false,
+          "deviceId": "sdb"
+        },
+        "usedPercent": 67
+      }
+    ],
+    "alerts": []
+  },
+  "scan": {
+    "included": true,
+    "complete": true,
+    "warnings": [],
+    "subject": {
+      "bytesBase64": "L2hvbWUvZXhhbXBsZS9wcm9qZWN0cw==",
+      "display": "/home/example/projects",
+      "utf8": "/home/example/projects"
+    },
+    "snapshot": {
+      "id": "snap-2026-09-29T08-15-04-117Z-0a1b2c3d",
+      "scanId": "scan-1759190400-0a1b2c3d",
+      "scannedAt": "2026-09-29T08:15:04.117Z",
+      "scope": {
+        "roots": [
+          {
+            "bytesBase64": "L2hvbWUvZXhhbXBsZS9wcm9qZWN0cw==",
+            "display": "/home/example/projects",
+            "utf8": "/home/example/projects"
+          }
+        ],
+        "excludes": [
+          {
+            "bytesBase64": "L3Byb2M=",
+            "display": "/proc",
+            "utf8": "/proc"
+          }
+        ],
+        "accounting": "allocated",
+        "crossFilesystems": false,
+        "filesystems": [
+          "fs-259-2"
+        ]
+      },
+      "totals": {
+        "allocatedBytes": "91268055040",
+        "apparentBytes": "90993422336",
+        "sharedBytes": "2097152"
+      },
+      "completeness": {
+        "complete": false,
+        "scannedEntries": "431204",
+        "inaccessibleDirectories": "1",
+        "excludedMounts": [
+          {
+            "bytesBase64": "L2hvbWUvZXhhbXBsZS9wcm9qZWN0cy9tbnQ=",
+            "display": "/home/example/projects/mnt",
+            "utf8": "/home/example/projects/mnt"
+          }
+        ]
+      }
+    },
+    "typeTotals": [
+      {
+        "extension": "log",
+        "entries": "12",
+        "allocatedBytes": "9007199254744064",
+        "apparentBytes": "9007199254744000"
+      },
+      {
+        "extension": "",
+        "entries": "3",
+        "allocatedBytes": "12288",
+        "apparentBytes": "9001"
+      }
+    ]
+  },
+  "findings": {
+    "included": true,
+    "complete": false,
+    "warnings": [
+      {
+        "code": "provider-denied",
+        "message": "diagnostic.open-deleted was denied: lsof could not be run by this user."
+      }
+    ],
+    "capability": {
+      "status": "available",
+      "explanation": "1 of 2 detectors ran."
+    },
+    "measured": true,
+    "findings": [
+      {
+        "id": "cache.language:cargo-registry",
+        "providerId": "cache.language",
+        "providerVersion": 1,
+        "category": "language-cache",
+        "title": "Cargo registry cache",
+        "evidence": [
+          "Downloaded crate sources and their index."
+        ],
+        "paths": [
+          {
+            "bytesBase64": "L2hvbWUvZXhhbXBsZS8uY2FyZ28vcmVnaXN0cnk=",
+            "display": "/home/example/.cargo/registry",
+            "utf8": "/home/example/.cargo/registry"
+          }
+        ],
+        "size": {
+          "bytes": "7314112512",
+          "basis": "measured-allocated",
+          "explanation": "Blocks on disk, from the scan index."
+        },
+        "confidence": "observed",
+        "capability": {
+          "status": "available",
+          "explanation": "The directory was read."
+        },
+        "availableActionIds": [
+          "trash"
+        ],
+        "regenerationCost": "Re-downloaded on the next build that needs a crate.",
+        "active": false
+      },
+      {
+        "id": "cache.browser:firefox-profile",
+        "providerId": "cache.browser",
+        "providerVersion": 1,
+        "category": "browser-cache",
+        "title": "Firefox profile default-release",
+        "evidence": [
+          "A profile holds logins and history, not disposable cache."
+        ],
+        "paths": [
+          {
+            "bytesBase64": "L2hvbWUvZXhhbXBsZS8ubW96aWxsYS9maXJlZm94L2RlZmF1bHQtcmVsZWFzZQ==",
+            "display": "/home/example/.mozilla/firefox/default-release",
+            "utf8": "/home/example/.mozilla/firefox/default-release"
+          }
+        ],
+        "size": {
+          "basis": "unknown",
+          "explanation": "No stored scan covers this path."
+        },
+        "confidence": "observed",
+        "capability": {
+          "status": "available",
+          "explanation": "The directory was read."
+        },
+        "availableActionIds": [],
+        "active": true
+      }
+    ],
+    "providers": [
+      {
+        "providerId": "cache.language",
+        "version": 1,
+        "capability": {
+          "status": "available",
+          "explanation": "8 cache roots exist."
+        },
+        "findings": 1,
+        "complete": true,
+        "ran": true
+      },
+      {
+        "providerId": "diagnostic.open-deleted",
+        "version": 1,
+        "capability": {
+          "status": "permission-denied",
+          "explanation": "lsof could not be run by this user."
+        },
+        "findings": 0,
+        "complete": false,
+        "ran": false
+      }
+    ],
+    "categoryTotals": [
+      {
+        "category": "language-cache",
+        "findings": 1,
+        "bytes": "7314112512",
+        "unmeasured": 0,
+        "nested": 0
+      },
+      {
+        "category": "browser-cache",
+        "findings": 1,
+        "bytes": "0",
+        "unmeasured": 1,
+        "nested": 0
+      }
+    ]
+  }
+}

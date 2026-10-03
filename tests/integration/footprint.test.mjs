@@ -6,6 +6,7 @@
  * developer's own cache or data.
  */
 import assert from "node:assert/strict";
+import { spawnSync } from "node:child_process";
 import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -45,7 +46,7 @@ function footprintFor(indexDirectory, home) {
     start: () => NativeHelperClient.start(),
   });
   return createIndexFootprint({
-    scanner,
+    measurement: scanner,
     index: scanner,
     snapshots: { async list() { return []; } },
     ...(home === undefined ? {} : { home }),
@@ -73,6 +74,24 @@ test("two directories are measured in one pass, in proportion to what they hold"
     reading.measurements.map((measurement) => measurement.basis),
     ["measured-allocated", "measured-allocated"],
   );
+});
+
+test("a directory of hundreds of empty files is measured, however its row ties with theirs", async () => {
+  const root = await sandbox();
+  // On Btrfs and tmpfs a directory's own inode holds no blocks, so it ties
+  // at zero with every empty file below it and a ranked listing of the
+  // subtree puts it last.
+  const crowded = await sizedDirectory(root, "crowded", 300, 0);
+  const footprints = footprintFor(join(root, "index"));
+
+  const reading = await footprints.measure([rawPathFromUtf8(crowded)], new AbortController().signal);
+
+  assert.equal(
+    reading.measurements[0].basis,
+    "measured-allocated",
+    `${reading.measurements[0].explanation} ${JSON.stringify(reading.warnings)}`,
+  );
+  assert.equal(typeof reading.measurements[0].bytes, "bigint");
 });
 
 test("a directory that does not exist is unknown, and the ones beside it still measure", async () => {
@@ -104,6 +123,46 @@ test("a directory whose name is not valid UTF-8 is measured from its bytes", asy
 
   assert.ok(reading.measurements[0].bytes > 0n, `measured ${reading.measurements[0].basis}: ${reading.measurements[0].explanation}`);
   assert.equal(reading.measurements[0].basis, "measured-allocated");
+});
+
+test("measuring findings never pushes a person's own scan out of the index", async () => {
+  const home = await sandbox();
+  const cache = join(home, ".cache", "pip", "http");
+  await mkdir(cache, { recursive: true });
+  await writeFile(join(cache, "blob"), "p".repeat(100_000));
+  await mkdir(join(home, "config", "disktop"), { recursive: true });
+  // One scan kept: a single measurement written into the same index would
+  // be enough to evict it.
+  await writeFile(join(home, "config", "disktop", "config.toml"), "[scan]\nkeep_scans = 1\n");
+  const run = (args) =>
+    spawnSync(process.execPath, ["dist/bin/disktop.js", ...args], {
+      encoding: "utf8",
+      env: {
+        ...process.env,
+        NO_COLOR: "1",
+        HOME: home,
+        XDG_CONFIG_HOME: join(home, "config"),
+        XDG_DATA_HOME: join(home, "data"),
+        XDG_CACHE_HOME: join(home, "cache"),
+        XDG_STATE_HOME: join(home, "state"),
+      },
+    });
+
+  const scanned = JSON.parse(run(["scan", join(home, ".cache"), "--json"]).stdout);
+  assert.equal(scanned.status, "complete", JSON.stringify(scanned.error ?? scanned.warnings));
+
+  // Each `clean` measures the pip cache it finds with a scan of its own.
+  for (let round = 0; round < 2; round += 1) {
+    const clean = JSON.parse(run(["clean", "--json"]).stdout);
+    assert.ok(
+      clean.data.findings.some((finding) => finding.size.basis === "measured-allocated"),
+      `nothing was measured, so this proves nothing: ${JSON.stringify(clean.data.findings.map((finding) => finding.size))}`,
+    );
+  }
+
+  const explored = JSON.parse(run(["explore", join(home, ".cache"), "--json"]).stdout);
+  assert.equal(explored.error, undefined, JSON.stringify(explored.error));
+  assert.equal(explored.data.scanId, scanned.data.scanId);
 });
 
 test("the helper groups a scan's files by owner and the totals reach Node intact", async () => {

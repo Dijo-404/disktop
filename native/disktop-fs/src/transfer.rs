@@ -18,16 +18,43 @@ use crate::content;
 use crate::sys::{self, EntryKind};
 use sha2::{Digest, Sha256};
 use std::io;
+use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
 use std::os::unix::io::RawFd;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 /// Bytes per read while streaming. The same order as the index's batch size:
 /// large enough that the syscall cost disappears, small enough to stay out of
 /// the way of everything else on the machine.
 const COPY_BYTES: usize = 256 * 1024;
 
-/// How deep a tree may be copied. A loop cannot be made with `RESOLVE_NO_SYMLINKS`,
-/// but a genuinely pathological tree should stop rather than exhaust the stack.
-const MAX_DEPTH: u32 = 256;
+/// What a copy or an archive stops with when its action is cancelled,
+/// recognisable by type so the item can be reported as stopped rather than
+/// failed. Nothing has been published when it is returned, and whatever was
+/// staged is the caller's to take back.
+#[derive(Debug)]
+pub struct Cancelled;
+
+impl std::fmt::Display for Cancelled {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("the action was cancelled while this was being written")
+    }
+}
+
+impl std::error::Error for Cancelled {}
+
+pub fn is_cancelled(error: &io::Error) -> bool {
+    error.get_ref().is_some_and(|inner| inner.is::<Cancelled>())
+}
+
+/// Stop here if somebody cancelled. Asked between chunks and between
+/// entries, so a copy of something large stops promptly rather than only once
+/// it has finished.
+pub fn check(cancelled: &AtomicBool) -> io::Result<()> {
+    if cancelled.load(Ordering::Relaxed) {
+        return Err(io::Error::other(Cancelled));
+    }
+    Ok(())
+}
 
 pub struct Copied {
     /// Files written, not counting directories or links.
@@ -49,6 +76,7 @@ pub fn copy_file(
     permissions: u32,
     modified_nanoseconds: Option<u64>,
     on_created: &mut dyn FnMut(RawFd) -> io::Result<()>,
+    cancelled: &AtomicBool,
 ) -> io::Result<u64> {
     let staged = sys::openat_create_exclusive(destination_parent, name, permissions)?;
     if let Err(error) = on_created(staged) {
@@ -58,27 +86,35 @@ pub fn copy_file(
     // The umask masked the mode the create asked for, so the bits are set
     // again here; otherwise a copy of a 0o666 file arrives as 0o644.
     let outcome = sys::fchmod(staged, permissions)
-        .and_then(|()| stream_and_verify(source, staged))
-        .and_then(|bytes| {
-            // The modification time comes across last, after the write that
+        .and_then(|()| stream(source, staged, cancelled))
+        .and_then(|(bytes, written)| {
+            // The modification time comes across after the last write, which
             // would otherwise have set it to now. A copy of a file is the same
             // file, and one dated today is a different answer to the question
-            // "when did this last change?".
+            // "when did this last change?". It is set before the `fsync` so it
+            // is as durable as the bytes are.
             if let Some(nanoseconds) = modified_nanoseconds {
                 sys::set_modified(staged, nanoseconds)?;
             }
+            // The bytes have to be on the device before they are read back, or
+            // the verification reads the page cache and proves nothing about
+            // the disk.
+            sys::fsync(staged)?;
+            verify(staged, &written)?;
             Ok(bytes)
         });
     sys::close(staged);
     outcome
 }
 
-fn stream_and_verify(source: RawFd, staged: RawFd) -> io::Result<u64> {
+/// Copy every byte, returning how many there were and their digest.
+fn stream(source: RawFd, staged: RawFd, cancelled: &AtomicBool) -> io::Result<(u64, [u8; 32])> {
     let mut buffer = vec![0u8; COPY_BYTES];
     let mut hasher = Sha256::new();
     let mut offset = 0u64;
 
     loop {
+        check(cancelled)?;
         let read = pread(source, &mut buffer, offset)?;
         if read == 0 {
             break;
@@ -87,103 +123,139 @@ fn stream_and_verify(source: RawFd, staged: RawFd) -> io::Result<u64> {
         hasher.update(&buffer[..read]);
         offset += read as u64;
     }
+    Ok((offset, hasher.finalize().into()))
+}
 
-    // The bytes have to be on the device before they are read back, or the
-    // verification reads the page cache and proves nothing about the disk.
-    sys::fsync(staged)?;
-
-    let written: [u8; 32] = hasher.finalize().into();
-    let readback = content::full_digest(staged)?;
-    if written != readback {
+/// Read the staged copy back and compare it with what was read from the source.
+fn verify(staged: RawFd, written: &[u8; 32]) -> io::Result<()> {
+    if content::full_digest(staged)? != *written {
         return Err(io::Error::new(
             io::ErrorKind::InvalidData,
             "the copy does not match what was read, so it was not published",
         ));
     }
-    Ok(offset)
+    Ok(())
 }
+
+/// The mode a directory is written with while its contents are copied into it.
+///
+/// Its own permissions are applied once everything inside it has arrived: a
+/// read-only directory — a Go module cache is full of them — could not be
+/// copied into at all if it took its final mode first.
+const WORKING_DIRECTORY_MODE: u32 = 0o700;
 
 /// Copy a whole tree into `destination_parent` under `name`.
 ///
 /// The root directory is created under the staging name; everything below it
 /// keeps its own name, because only the thing being published needs hiding
-/// until it is complete.
+/// until it is complete. The staging name must be free: a directory already
+/// there is somebody else's, and is neither written into nor reported as
+/// created.
 pub fn copy_tree(
     source: RawFd,
     destination_parent: RawFd,
     name: &[u8],
     permissions: u32,
     on_created: &mut dyn FnMut(RawFd) -> io::Result<()>,
+    cancelled: &AtomicBool,
 ) -> io::Result<Copied> {
-    sys::mkdirat(destination_parent, name, permissions)?;
-    let staged = sys::open_directory_no_symlinks(destination_parent, name)?;
-    if let Err(error) = on_created(staged) {
-        sys::close(staged);
-        return Err(error);
-    }
-    sys::fchmod(staged, permissions)?;
+    sys::mkdirat_exclusive(destination_parent, name, WORKING_DIRECTORY_MODE)?;
+    let staged = owned(sys::open_directory_no_symlinks(destination_parent, name)?);
+    on_created(staged.as_raw_fd())?;
     let mut copied = Copied { files: 0, bytes: 0 };
-    let outcome = copy_children(source, staged, 0, &mut copied);
-    // The directory's own bytes have to be durable too, or a crash could leave
-    // a published name pointing at a directory missing half its entries.
-    let _ = sys::fsync(staged);
-    sys::close(staged);
-    outcome.map(|()| copied)
+    copy_children(source, staged, permissions, &mut copied, cancelled)?;
+    Ok(copied)
 }
 
+/// One directory being copied: where it is read from, where it is written to,
+/// the permissions it gets once it is complete, and the names it has left, in
+/// reverse so the next one is a `pop`.
+struct Frame {
+    source: OwnedFd,
+    destination: OwnedFd,
+    permissions: u32,
+    names: Vec<Vec<u8>>,
+}
+
+impl Frame {
+    fn enter(source: OwnedFd, destination: OwnedFd, permissions: u32) -> io::Result<Frame> {
+        // Names are read before anything is written, so what `readdir` returns
+        // is not affected by what this is creating elsewhere.
+        let mut stream = sys::Directory::from_descriptor(duplicate(source.as_raw_fd())?)?;
+        let mut names = Vec::new();
+        while let Some(name) = stream.next_name()? {
+            names.push(name);
+        }
+        names.reverse();
+        Ok(Frame {
+            source,
+            destination,
+            permissions,
+            names,
+        })
+    }
+}
+
+/// Copy everything under `source` into `destination`, depth first.
+///
+/// The directories being copied are kept on an explicit stack rather than the
+/// call stack, so no tree is deep enough to crash the helper partway through a
+/// copy; past `subtree::MAX_DEPTH` levels it stops with an error instead.
 fn copy_children(
     source: RawFd,
-    destination: RawFd,
-    depth: u32,
+    destination: OwnedFd,
+    permissions: u32,
     copied: &mut Copied,
+    cancelled: &AtomicBool,
 ) -> io::Result<()> {
-    if depth >= MAX_DEPTH {
-        return Err(io::Error::other(
-            "the tree is deeper than Disktop will copy in one action",
-        ));
-    }
-
-    // Names are read before anything is written, so what `readdir` returns is
-    // not affected by what this is creating elsewhere.
-    let mut stream = sys::Directory::from_descriptor(duplicate(source)?)?;
-    let mut names = Vec::new();
-    while let Some(name) = stream.next_name()? {
-        names.push(name);
-    }
-    drop(stream);
-
-    for name in names {
+    let mut stack = vec![Frame::enter(
+        owned(duplicate(source)?),
+        destination,
+        permissions,
+    )?];
+    while let Some(frame) = stack.last_mut() {
+        let Some(name) = frame.names.pop() else {
+            let finished = stack.pop().expect("the frame being copied is on the stack");
+            // Everything inside it has arrived, so it can take its own mode
+            // now, even one that would have refused the writes above.
+            sys::fchmod(finished.destination.as_raw_fd(), finished.permissions)?;
+            // The directory's own entries have to be durable too, or a crash
+            // could leave a published name pointing at a directory missing
+            // half of what was copied into it. A directory that cannot be made
+            // durable stops the copy: it is not published on a hope.
+            sys::fsync(finished.destination.as_raw_fd())?;
+            continue;
+        };
+        check(cancelled)?;
+        let source = frame.source.as_raw_fd();
+        let destination = frame.destination.as_raw_fd();
         let metadata = sys::metadata_at(source, &name)?;
         match metadata.kind {
             EntryKind::Directory => {
+                // The frames on the stack are this directory's ancestors, so
+                // their count is how deep it is.
+                if stack.len() > crate::subtree::MAX_DEPTH {
+                    return Err(crate::subtree::too_deep());
+                }
                 // No mount crossing: a nested mount inside the source is
                 // another filesystem, and copying it here would quietly pull
                 // in something nobody reviewed.
-                let child = sys::open_child_directory(source, &name, false)?;
-                let result = (|| -> io::Result<()> {
-                    sys::mkdirat(destination, &name, metadata.permissions)?;
-                    let into = sys::open_directory_no_symlinks(destination, &name)?;
-                    sys::fchmod(into, metadata.permissions)?;
-                    let outcome = copy_children(child, into, depth + 1, copied);
-                    let _ = sys::fsync(into);
-                    sys::close(into);
-                    outcome
-                })();
-                sys::close(child);
-                result?;
+                let child = owned(sys::open_child_directory(source, &name, false)?);
+                sys::mkdirat_exclusive(destination, &name, WORKING_DIRECTORY_MODE)?;
+                let into = owned(sys::open_directory_no_symlinks(destination, &name)?);
+                stack.push(Frame::enter(child, into, metadata.permissions)?);
             }
             EntryKind::File => {
-                let descriptor = sys::openat_read_no_symlinks(source, &name)?;
-                let outcome = copy_file(
-                    descriptor,
+                let descriptor = owned(sys::openat_read_no_symlinks(source, &name)?);
+                let bytes = copy_file(
+                    descriptor.as_raw_fd(),
                     destination,
                     &name,
                     metadata.permissions,
                     Some(metadata.modified_nanoseconds),
                     &mut |_| Ok(()),
-                );
-                sys::close(descriptor);
-                let bytes = outcome?;
+                    cancelled,
+                )?;
                 copied.files += 1;
                 copied.bytes += bytes;
             }
@@ -202,6 +274,11 @@ fn copy_children(
         }
     }
     Ok(())
+}
+
+/// Take ownership of a descriptor nothing else will close.
+fn owned(descriptor: RawFd) -> OwnedFd {
+    unsafe { OwnedFd::from_raw_fd(descriptor) }
 }
 
 /// A private copy of a directory descriptor, so a stream can own one without
@@ -283,6 +360,7 @@ mod tests {
                 seen = Some((metadata.inode, metadata.apparent_bytes));
                 Ok(())
             },
+            &AtomicBool::new(false),
         )
         .unwrap();
         let copied = sys::metadata_at(parent, b"copy.bin").unwrap();
@@ -301,11 +379,40 @@ mod tests {
         sandbox.file(b"source.bin", 4096);
         let parent = sys::open_root(&sandbox.bytes()).unwrap();
         let source = sys::openat_read_no_symlinks(parent, b"source.bin").unwrap();
-        let outcome = copy_file(source, parent, b"copy.bin", 0o600, None, &mut |_| {
-            Err(io::Error::other("the journal refused"))
-        });
+        let outcome = copy_file(
+            source,
+            parent,
+            b"copy.bin",
+            0o600,
+            None,
+            &mut |_| Err(io::Error::other("the journal refused")),
+            &AtomicBool::new(false),
+        );
         sys::close(source);
         sys::close(parent);
         assert!(outcome.is_err());
+    }
+
+    /// A cancelled copy stops at the next chunk with an error the caller can
+    /// recognise, rather than running to the end of a large file first.
+    #[test]
+    fn a_cancelled_copy_stops_and_says_why() {
+        let sandbox = Sandbox::new("transfer-cancelled");
+        sandbox.file(b"source.bin", 4 * COPY_BYTES);
+        let parent = sys::open_root(&sandbox.bytes()).unwrap();
+        let source = sys::openat_read_no_symlinks(parent, b"source.bin").unwrap();
+        let outcome = copy_file(
+            source,
+            parent,
+            b"copy.bin",
+            0o600,
+            None,
+            &mut |_| Ok(()),
+            &AtomicBool::new(true),
+        );
+        sys::close(source);
+        sys::close(parent);
+        let error = outcome.expect_err("a cancelled copy does not finish");
+        assert!(is_cancelled(&error), "{error}");
     }
 }

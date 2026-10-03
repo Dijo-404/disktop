@@ -20,7 +20,7 @@ use crate::guard;
 use crate::index;
 use crate::sys::{self, EntryKind};
 use rusqlite::Connection;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicBool, Ordering};
 
 /// Groups a single request may report. A listing nobody can read is not a
@@ -30,7 +30,6 @@ pub const MAX_GROUPS: u32 = 1000;
 pub const MAX_FILES_PER_GROUP: u32 = 1000;
 
 pub struct Request {
-    pub scan_id: String,
     /// The primary-key range of the path being searched, from `subtree_range`.
     pub under: Option<(i64, i64)>,
     /// Files below this size are not candidates. Zero-length files are all
@@ -70,99 +69,207 @@ pub struct Report {
     pub files_hashed: u64,
 }
 
+/// Size classes read from the index at a time. The search never holds more
+/// than this many sizes and one class's members, however many files share a
+/// size across the whole scan.
+const SIZE_BATCH: u32 = 256;
+
+/// Individual warnings one search reports; the rest are counted. A tree of
+/// unreadable files would otherwise grow the answer with every one of them.
+const MAX_WARNINGS: usize = 64;
+
+/// How much of a file is read between two looks at the cancel flag.
+const READ_BYTES: usize = 1024 * 1024;
+
 /// Read one scan's index and report the groups of identical files in it.
 pub fn find(
     connection: &Connection,
     request: &Request,
     cancelled: &AtomicBool,
 ) -> rusqlite::Result<Report> {
-    let mut report = Report {
-        groups: Vec::new(),
-        complete: true,
-        warnings: Vec::new(),
-        candidates_read: 0,
-        files_hashed: 0,
+    let mut search = Search {
+        report: Report {
+            groups: Vec::new(),
+            complete: true,
+            warnings: Vec::new(),
+            candidates_read: 0,
+            files_hashed: 0,
+        },
+        suppressed: 0,
+        cancelled,
     };
+    search.run(connection, request)?;
+    Ok(search.finish())
+}
 
-    let classes = index::size_candidates(
-        connection,
-        &request.scan_id,
-        request.under,
-        request.minimum_bytes.max(1),
-    )?;
-    let mut resolver = index::PathResolver::new(connection);
+struct Search<'a> {
+    report: Report,
+    /// Warnings counted rather than listed once the list was full.
+    suppressed: u64,
+    cancelled: &'a AtomicBool,
+}
 
-    let maximum_groups = request.maximum_groups.min(MAX_GROUPS);
-    let maximum_files = request.maximum_files_per_group.min(MAX_FILES_PER_GROUP);
+/// Why a search stopped before it ran out of size classes.
+enum Stop {
+    Cancelled,
+    Truncated(u32),
+}
 
-    for (apparent_bytes, members) in classes {
-        if cancelled.load(Ordering::Relaxed) {
-            report.complete = false;
-            report
-                .warnings
-                .push("The search was cancelled; these are the groups found so far.".to_owned());
-            return Ok(report);
+impl Search<'_> {
+    fn stopped(&self) -> bool {
+        self.cancelled.load(Ordering::Relaxed)
+    }
+
+    fn warn(&mut self, message: String) {
+        self.report.complete = false;
+        if self.report.warnings.len() >= MAX_WARNINGS {
+            self.suppressed += 1;
+            return;
         }
-        if report.groups.len() as u32 >= maximum_groups {
-            return Ok(truncated(report, maximum_groups));
-        }
+        self.report.warnings.push(message);
+    }
 
-        report.candidates_read += members.len() as u64;
-        let mut paths = Vec::with_capacity(members.len());
-        for member in &members {
-            paths.push(resolver.path(member.parent_id, &member.name)?);
-        }
+    fn run(&mut self, connection: &Connection, request: &Request) -> rusqlite::Result<()> {
+        let maximum_groups = request.maximum_groups.min(MAX_GROUPS);
+        let maximum_files = request.maximum_files_per_group.min(MAX_FILES_PER_GROUP);
+        let minimum = request.minimum_bytes.max(1);
 
-        // Each stage narrows the last one's survivors, so a file alone in its
-        // size class is never opened and a file alone after the edge digest is
-        // never read through.
-        // One size class can hold more groups than the cap allows, so the cap
-        // is checked where a group is added rather than only between classes.
-        // Leaving the loop without saying so would drop groups from an answer
-        // that still called itself whole.
-        let edges = partition(&paths, apparent_bytes, Stage::Edges, &mut report);
+        // Largest sizes first, a batch at a time: each batch resumes below the
+        // smallest size the last one held.
+        let mut below: Option<u64> = None;
+        loop {
+            let sizes =
+                index::duplicate_sizes(connection, request.under, minimum, below, SIZE_BATCH)?;
+            if sizes.is_empty() {
+                return Ok(());
+            }
+            for apparent_bytes in sizes {
+                below = Some(apparent_bytes);
+                if let Some(stop) = self.stop_before_class(maximum_groups) {
+                    return self.stop(stop);
+                }
+                let paths = class_paths(connection, request.under, apparent_bytes)?;
+                self.report.candidates_read += paths.len() as u64;
+                if let Some(stop) =
+                    self.class(&paths, apparent_bytes, maximum_groups, maximum_files)
+                {
+                    return self.stop(stop);
+                }
+            }
+        }
+    }
+
+    fn stop_before_class(&self, maximum_groups: u32) -> Option<Stop> {
+        if self.stopped() {
+            return Some(Stop::Cancelled);
+        }
+        if self.report.groups.len() as u32 >= maximum_groups {
+            return Some(Stop::Truncated(maximum_groups));
+        }
+        None
+    }
+
+    /// Narrow one size class to its groups.
+    ///
+    /// Each stage narrows the last one's survivors, so a file alone in its
+    /// size class is never opened and a file alone after the edge digest is
+    /// never read through. One size class can hold more groups than the cap
+    /// allows, so the cap is checked where a group is added rather than only
+    /// between classes: leaving the loop without saying so would drop groups
+    /// from an answer that still called itself whole.
+    fn class(
+        &mut self,
+        paths: &[Vec<u8>],
+        apparent_bytes: u64,
+        maximum_groups: u32,
+        maximum_files: u32,
+    ) -> Option<Stop> {
+        let edges = self.partition(paths, apparent_bytes, Stage::Edges);
         for (_, bucket) in edges {
-            let full = partition(&bucket, apparent_bytes, Stage::Whole, &mut report);
+            if self.stopped() {
+                return Some(Stop::Cancelled);
+            }
+            let full = self.partition(&bucket, apparent_bytes, Stage::Whole);
+            if self.stopped() {
+                // A digest cut short groups nothing, and a bucket finished
+                // before the cancel is reported with the rest of what was
+                // found only if it was found whole.
+                return Some(Stop::Cancelled);
+            }
             for (digest, mut group) in full {
                 group.sort_by(|left, right| left.path.cmp(&right.path));
                 if group.len() < 2 {
                     continue;
                 }
-                if report.groups.len() as u32 >= maximum_groups {
-                    return Ok(truncated(report, maximum_groups));
+                if self.report.groups.len() as u32 >= maximum_groups {
+                    return Some(Stop::Truncated(maximum_groups));
                 }
                 if group.len() as u32 > maximum_files {
-                    report.complete = false;
-                    report.warnings.push(format!(
+                    self.warn(format!(
                         "A group of {} identical files was truncated to {maximum_files}.",
                         group.len(),
                     ));
                     group.truncate(maximum_files as usize);
                 }
-                report.groups.push(Group {
+                self.report.groups.push(Group {
                     apparent_bytes,
                     digest,
                     files: group,
                 });
             }
         }
+        None
     }
 
-    Ok(report)
+    /// Stop, and say that the answer is not everything there is.
+    ///
+    /// Returning the groups found so far while still claiming the answer is
+    /// whole would be the one thing a listing of duplicates must not do: a
+    /// person would read it as "these are all of them" and act on that.
+    fn stop(&mut self, stop: Stop) -> rusqlite::Result<()> {
+        self.report.complete = false;
+        // These two are never dropped for being late, whatever the cap.
+        self.report.warnings.push(match stop {
+            Stop::Cancelled => {
+                "The search was cancelled; these are the groups found so far.".to_owned()
+            }
+            Stop::Truncated(maximum_groups) => format!(
+                "Stopped after {maximum_groups} group(s); there are more identical files than \
+                 this answer lists. Narrow the search with a path or a larger minimum size."
+            ),
+        });
+        Ok(())
+    }
+
+    fn finish(mut self) -> Report {
+        if self.suppressed > 0 {
+            self.report.warnings.push(format!(
+                "{} further files could not be read or were truncated, and were counted but not \
+                 listed.",
+                self.suppressed
+            ));
+        }
+        self.report
+    }
 }
 
-/// Stop, and say that the answer is not everything there is.
+/// Every candidate path in one size class.
 ///
-/// Returning the groups found so far while still claiming the answer is whole
-/// would be the one thing a listing of duplicates must not do: a person would
-/// read it as "these are all of them" and act on that.
-fn truncated(mut report: Report, maximum_groups: u32) -> Report {
-    report.complete = false;
-    report.warnings.push(format!(
-        "Stopped after {maximum_groups} group(s); there are more identical files than this \
-         answer lists. Narrow the search with a path or a larger minimum size."
-    ));
-    report
+/// Paths are rebuilt with a resolver that lives for this class alone, so its
+/// memo of directory paths is bounded by one class rather than growing with
+/// every directory the whole search passes through.
+fn class_paths(
+    connection: &Connection,
+    under: Option<(i64, i64)>,
+    apparent_bytes: u64,
+) -> rusqlite::Result<Vec<Vec<u8>>> {
+    let members = index::files_of_size(connection, under, apparent_bytes)?;
+    let mut resolver = index::PathResolver::new(connection);
+    let mut paths = Vec::with_capacity(members.len());
+    for member in &members {
+        paths.push(resolver.path(member.parent_id, &member.name)?);
+    }
+    Ok(paths)
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -171,64 +278,112 @@ enum Stage {
     Whole,
 }
 
-/// Split a set of candidates by digest, keeping only the buckets with a twin.
-///
-/// The first stage takes paths and opens them; the second takes the candidates
-/// the first already opened and identified, so a file is stat'd once however
-/// many stages it survives.
-fn partition<T: Candidate>(
-    members: &[T],
-    apparent_bytes: u64,
-    stage: Stage,
-    report: &mut Report,
-) -> Vec<([u8; 32], Vec<CandidateFile>)> {
-    let mut buckets: HashMap<[u8; 32], Vec<CandidateFile>> = HashMap::new();
-    let mut seen: HashMap<(u64, u64), ()> = HashMap::new();
+impl Search<'_> {
+    /// Split a set of candidates by digest, keeping only the buckets with a
+    /// twin.
+    ///
+    /// The first stage takes paths and opens them; the second takes the
+    /// candidates the first already opened and identified, so a file is
+    /// stat'd once however many stages it survives. The cancel flag is read
+    /// before every file and inside every long one; a stage that stops early
+    /// returns what it has, and the caller, seeing the flag, discards it.
+    fn partition<T: Candidate>(
+        &mut self,
+        members: &[T],
+        apparent_bytes: u64,
+        stage: Stage,
+    ) -> Vec<([u8; 32], Vec<CandidateFile>)> {
+        let mut buckets: HashMap<[u8; 32], Vec<CandidateFile>> = HashMap::new();
+        let mut seen: HashSet<(u64, u64)> = HashSet::new();
 
-    for member in members {
-        let path = member.path();
-        let Some((file, candidate)) = open_candidate(path, apparent_bytes, report) else {
-            continue;
-        };
-
-        // One inode, however many names reach it. Removing the second name
-        // frees nothing, so it is not a member of a group somebody will act on.
-        if seen
-            .insert((candidate.device, candidate.inode), ())
-            .is_some()
-        {
-            sys::close(file);
-            continue;
-        }
-
-        let digest = match stage {
-            Stage::Edges => content::edge_digest(file, candidate.apparent_bytes),
-            Stage::Whole => content::full_digest(file),
-        };
-        sys::close(file);
-
-        match digest {
-            Ok(digest) => {
-                // Counted at the first stage only. The second stage re-reads a
-                // subset of these files, and counting that would make the
-                // number larger than the candidates it came from.
-                if stage == Stage::Edges {
-                    report.files_hashed += 1;
-                }
-                buckets.entry(digest).or_default().push(candidate);
+        for member in members {
+            if self.stopped() {
+                break;
             }
-            Err(error) => {
-                report.complete = false;
-                report.warnings.push(format!(
+            let path = member.path();
+            let Some((file, candidate)) = self.open_candidate(path, apparent_bytes) else {
+                continue;
+            };
+
+            // One inode, however many names reach it. Removing the second
+            // name frees nothing, so it is not a member of a group somebody
+            // will act on.
+            if !seen.insert((candidate.device, candidate.inode)) {
+                sys::close(file);
+                continue;
+            }
+
+            let digest = match stage {
+                Stage::Edges => content::edge_digest(file, candidate.apparent_bytes).map(Some),
+                Stage::Whole => full_digest(file, self.cancelled),
+            };
+            sys::close(file);
+
+            match digest {
+                Ok(Some(digest)) => {
+                    // Counted at the first stage only. The second stage
+                    // re-reads a subset of these files, and counting that
+                    // would make the number larger than the candidates it
+                    // came from.
+                    if stage == Stage::Edges {
+                        self.report.files_hashed += 1;
+                    }
+                    buckets.entry(digest).or_default().push(candidate);
+                }
+                Ok(None) => break,
+                Err(error) => self.warn(format!(
                     "{} could not be read, so it was left out: {error}",
                     String::from_utf8_lossy(path),
-                ));
+                )),
             }
         }
-    }
 
-    buckets.retain(|_, group| group.len() > 1);
-    buckets.into_iter().collect()
+        buckets.retain(|_, group| group.len() > 1);
+        buckets.into_iter().collect()
+    }
+}
+
+/// A SHA-256 of every byte of the file, streamed, or `None` when the search
+/// was cancelled partway.
+///
+/// The same digest `content::full_digest` takes — a test holds the two
+/// equal — with one difference: it looks at the cancel flag between reads, so
+/// stopping a search over a virtual machine image takes a moment rather than
+/// as long as reading the image. Like that one it groups and never
+/// authorises; nothing acts on it without comparing the bytes again.
+fn full_digest(
+    descriptor: std::os::unix::io::RawFd,
+    cancelled: &AtomicBool,
+) -> std::io::Result<Option<[u8; 32]>> {
+    use sha2::{Digest, Sha256};
+    let mut hasher = Sha256::new();
+    let mut buffer = vec![0u8; READ_BYTES];
+    let mut offset = 0u64;
+    loop {
+        if cancelled.load(Ordering::Relaxed) {
+            return Ok(None);
+        }
+        let read = unsafe {
+            libc::pread(
+                descriptor,
+                buffer.as_mut_ptr() as *mut libc::c_void,
+                buffer.len(),
+                offset as libc::off_t,
+            )
+        };
+        if read < 0 {
+            let error = std::io::Error::last_os_error();
+            if error.kind() == std::io::ErrorKind::Interrupted {
+                continue;
+            }
+            return Err(error);
+        }
+        if read == 0 {
+            return Ok(Some(hasher.finalize().into()));
+        }
+        hasher.update(&buffer[..read as usize]);
+        offset += read as u64;
+    }
 }
 
 /// Open one candidate read-only and read its live identity.
@@ -238,63 +393,69 @@ fn partition<T: Candidate>(
 /// scan cannot make this read something outside the tree. A file the index
 /// remembers at a different size has changed and is no longer a candidate for
 /// this size class.
-fn open_candidate(
-    path: &[u8],
-    apparent_bytes: u64,
-    report: &mut Report,
-) -> Option<(std::os::unix::io::RawFd, CandidateFile)> {
-    let parent = match guard::resolve_parent(path) {
-        Ok(parent) => parent,
-        Err(refusal) => {
-            report.complete = false;
-            report.warnings.push(format!(
-                "{} could not be reached, so it was left out: {}",
-                String::from_utf8_lossy(path),
-                refusal.message,
-            ));
+impl Search<'_> {
+    fn open_candidate(
+        &mut self,
+        path: &[u8],
+        apparent_bytes: u64,
+    ) -> Option<(std::os::unix::io::RawFd, CandidateFile)> {
+        let parent = match guard::resolve_parent(path) {
+            Ok(parent) => parent,
+            Err(refusal) => {
+                self.warn(format!(
+                    "{} could not be reached, so it was left out: {}",
+                    String::from_utf8_lossy(path),
+                    refusal.message,
+                ));
+                return None;
+            }
+        };
+
+        let metadata = sys::metadata_at(parent.descriptor(), &parent.name).ok()?;
+        if metadata.kind != EntryKind::File || metadata.apparent_bytes != apparent_bytes {
             return None;
         }
-    };
 
-    let metadata = sys::metadata_at(parent.descriptor(), &parent.name).ok()?;
-    if metadata.kind != EntryKind::File || metadata.apparent_bytes != apparent_bytes {
-        return None;
+        let descriptor = match sys::openat_read_no_symlinks(parent.descriptor(), &parent.name) {
+            Ok(descriptor) => descriptor,
+            Err(error) => {
+                self.warn(format!(
+                    "{} could not be opened, so it was left out: {error}",
+                    String::from_utf8_lossy(path),
+                ));
+                return None;
+            }
+        };
+
+        // The open followed no symlink, but the name could have been replaced
+        // between the metadata read and the open. The descriptor's own identity is
+        // the one that counts, because it is what was read.
+        let opened = match sys::metadata_of(descriptor) {
+            Ok(opened)
+                if opened.kind == EntryKind::File && opened.apparent_bytes == apparent_bytes =>
+            {
+                opened
+            }
+            _ => {
+                sys::close(descriptor);
+                return None;
+            }
+        };
+
+        Some((
+            descriptor,
+            CandidateFile {
+                path: path.to_vec(),
+                device: opened.device,
+                inode: opened.inode,
+                apparent_bytes: opened.apparent_bytes,
+                modified_nanoseconds: opened.modified_nanoseconds,
+                owner_id: opened.owner_id,
+                group_id: opened.group_id,
+                permissions: opened.permissions,
+            },
+        ))
     }
-
-    let descriptor = match sys::openat_read_no_symlinks(parent.descriptor(), &parent.name) {
-        Ok(descriptor) => descriptor,
-        Err(error) => {
-            report.complete = false;
-            report.warnings.push(format!(
-                "{} could not be opened, so it was left out: {error}",
-                String::from_utf8_lossy(path),
-            ));
-            return None;
-        }
-    };
-
-    // The open followed no symlink, but the name could have been replaced
-    // between the metadata read and the open. The descriptor's own identity is
-    // the one that counts, because it is what was read.
-    let opened = sys::metadata_of(descriptor).ok()?;
-    if opened.kind != EntryKind::File || opened.apparent_bytes != apparent_bytes {
-        sys::close(descriptor);
-        return None;
-    }
-
-    Some((
-        descriptor,
-        CandidateFile {
-            path: path.to_vec(),
-            device: opened.device,
-            inode: opened.inode,
-            apparent_bytes: opened.apparent_bytes,
-            modified_nanoseconds: opened.modified_nanoseconds,
-            owner_id: opened.owner_id,
-            group_id: opened.group_id,
-            permissions: opened.permissions,
-        },
-    ))
 }
 
 /// Something with a path, so the two stages can share one partitioner.
@@ -340,12 +501,16 @@ mod tests {
         };
         let totals = walk(&options, &mut writer, &AtomicBool::new(false)).unwrap();
         writer.finish(&totals, &limits).unwrap();
-        (index::open(&index_directory).unwrap(), scan_id)
+        (
+            index::open_scan(&index_directory, &scan_id)
+                .unwrap()
+                .unwrap(),
+            scan_id,
+        )
     }
 
-    fn request(scan_id: &str) -> Request {
+    fn request(_scan_id: &str) -> Request {
         Request {
-            scan_id: scan_id.to_owned(),
             under: None,
             minimum_bytes: 1,
             maximum_groups: MAX_GROUPS,
@@ -611,7 +776,7 @@ mod tests {
         let (connection, scan_id) = scanned(&sandbox, "subtree");
         let mut under = sandbox.bytes();
         under.extend_from_slice(b"/inside");
-        let range = index::subtree_range(&connection, &scan_id, &under)
+        let range = index::subtree_range(&connection, &under)
             .unwrap()
             .expect("the path is in this scan");
 
@@ -628,6 +793,100 @@ mod tests {
         assert!(
             report.groups.is_empty(),
             "the copy outside the searched path is not its pair",
+        );
+    }
+
+    #[test]
+    fn a_cancel_stops_the_search_inside_a_large_file() {
+        let sandbox = Sandbox::new("duplicates-cancel-large");
+        // Two identical sparse files of a gigabyte each: one size class, two
+        // edge digests, and then two full reads that take seconds.
+        for name in ["a", "b"] {
+            std::fs::File::create(sandbox.path().join(name))
+                .and_then(|file| file.set_len(1 << 30))
+                .expect("a sparse file");
+        }
+        let (connection, scan_id) = scanned(&sandbox, "cancel-large");
+
+        let cancelled = std::sync::Arc::new(AtomicBool::new(false));
+        let canceller = {
+            let cancelled = std::sync::Arc::clone(&cancelled);
+            std::thread::spawn(move || {
+                std::thread::sleep(std::time::Duration::from_millis(50));
+                cancelled.store(true, Ordering::Relaxed);
+            })
+        };
+        let started = std::time::Instant::now();
+        let report = find(&connection, &request(&scan_id), &cancelled).unwrap();
+        let elapsed = started.elapsed();
+        canceller.join().unwrap();
+
+        assert!(
+            elapsed < std::time::Duration::from_secs(2),
+            "the search ran for {elapsed:?} after being asked to stop"
+        );
+        assert!(!report.complete);
+        assert!(report.groups.is_empty());
+        assert!(
+            report
+                .warnings
+                .iter()
+                .any(|warning| warning.contains("cancelled")),
+            "{:?}",
+            report.warnings
+        );
+    }
+
+    #[test]
+    fn the_digest_that_groups_files_is_the_sha256_of_their_content() {
+        use std::os::unix::io::AsRawFd;
+        let sandbox = Sandbox::new("duplicates-digest");
+        let bytes: Vec<u8> = (0..1_000_003u32).map(|index| (index % 251) as u8).collect();
+        write(&sandbox, "a", &bytes);
+        let file = std::fs::File::open(sandbox.path().join("a")).unwrap();
+
+        let streamed = full_digest(file.as_raw_fd(), &AtomicBool::new(false))
+            .unwrap()
+            .expect("not cancelled");
+        assert_eq!(
+            streamed,
+            content::full_digest(file.as_raw_fd()).unwrap(),
+            "the cancellable digest drifted from the one content.rs defines"
+        );
+    }
+
+    #[test]
+    fn unreadable_candidates_are_counted_without_growing_the_warnings_for_ever() {
+        if unsafe { libc::geteuid() } == 0 {
+            return;
+        }
+        let sandbox = Sandbox::new("duplicates-unreadable");
+        let count = MAX_WARNINGS + 40;
+        for index in 0..count {
+            let name = format!("locked-{index}");
+            write(&sandbox, &name, &vec![3u8; 4096]);
+            sandbox.chmod(name.as_bytes(), 0o000);
+        }
+        let (connection, scan_id) = scanned(&sandbox, "unreadable");
+
+        let report = find(&connection, &request(&scan_id), &AtomicBool::new(false)).unwrap();
+        for index in 0..count {
+            sandbox.chmod(format!("locked-{index}").as_bytes(), 0o600);
+        }
+
+        assert!(!report.complete);
+        assert!(
+            report.warnings.len() <= MAX_WARNINGS + 1,
+            "{} warnings",
+            report.warnings.len()
+        );
+        assert!(
+            report
+                .warnings
+                .iter()
+                .any(|warning| warning.contains("40 further")),
+            "the overflow is summarised rather than dropped: {:?}",
+            report.warnings.last()
         );
     }
 }

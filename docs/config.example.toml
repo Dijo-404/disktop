@@ -24,11 +24,15 @@ accounting = "allocated"
 # On WSL, keep /mnt/c and friends out of scans unless selected explicitly.
 exclude_windows_mounts = true
 excludes = ["/proc", "/sys", "/dev", "/run"]
-# Byte budget for the helper's index. When the file grows past it, whole older
-# scans are dropped, oldest first; the newest scan is never the one dropped.
+# Byte budget for the helper's index, one file per scan. When the files grow
+# past it, whole older scans are removed, oldest first; the newest scan is never
+# the one removed.
 max_index_bytes = 2147483648  # 16 MiB to 1 TiB
 # How many scans the index keeps, newest first, including the one being
-# written. Older scans' detailed rows are pruned rather than accumulated.
+# written. An older scan's file is removed rather than accumulated. The scans
+# `disktop clean` takes to measure what it finds are kept apart, in an index of
+# their own holding two scans and a quarter of max_index_bytes, so measuring
+# never pushes out a scan of yours.
 keep_scans = 3  # 1 to 100
 
 [find]

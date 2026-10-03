@@ -149,6 +149,24 @@ test("undoing a compress says the archive it published is still where it was put
   );
 });
 
+test("a history page that left items out is no evidence that nothing went to Trash", async () => {
+  // A large move's first items failed; the ones that went to Trash are among
+  // those the page did not carry. The helper reads the whole record itself.
+  const shortened = {
+    ...TRASHED,
+    id: "act-shortened",
+    operation: "copy-move",
+    items: [{ ...TRASHED.items[0], destination: undefined, outcome: "failed" }],
+    itemsOmitted: 499_999n,
+  };
+  const { service: undo, calls } = service([shortened]);
+
+  const outcome = await undo.restore("act-shortened", SIGNAL);
+
+  assert.equal(outcome.kind, "restored");
+  assert.equal(calls.some((call) => call.kind === "restore"), true);
+});
+
 test("undoing a move whose source was removed permanently refuses", async () => {
   const permanent = {
     ...TRASHED,

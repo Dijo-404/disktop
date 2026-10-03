@@ -461,3 +461,100 @@ test("a manager command that started and never reported back is uncertain, and s
   const again = await journal(root);
   assert.equal(again.reconciled, "0", "reconciling twice changes nothing");
 });
+
+/**
+ * Every event the real helper writes for an item it refuses is one the
+ * published schema accepts. The item reasons the copying and linking actions
+ * use were missing from the schema's list, and nothing compared the two.
+ */
+test("the item reasons the helper emits are all in the published schema", async () => {
+  const root = await mkdtemp(join(tmpdir(), "disktop-recovery-reasons-"));
+  sandboxes.push(root);
+  await mkdir(join(root, "work"), { recursive: true });
+  await mkdir(join(root, "elsewhere"), { recursive: true });
+  await writeFile(join(root, "work", "taken.bin"), "a".repeat(4096));
+  await writeFile(join(root, "elsewhere", "taken.bin"), "already here");
+  await writeFile(join(root, "work", "keep.bin"), "b".repeat(4096));
+  await writeFile(join(root, "work", "other.bin"), "c".repeat(4096));
+
+  const moved = await runUntil(
+    request("copy-move", "reasons-move", {
+      planId: "plan-recovery-reason1",
+      journalDirectory: encode(join(root, "state")),
+      homeTrashDirectory: encode(join(root, "trash")),
+      destinationDirectory: encode(join(root, "elsewhere")),
+      sourceDisposition: "trash",
+      targets: [
+        {
+          path: encode(join(root, "work", "taken.bin")),
+          expected: await fingerprint(join(root, "work", "taken.bin")),
+          reviewedBytes: "4096",
+        },
+      ],
+    }),
+    () => false,
+  );
+  const linked = await runUntil(
+    request("dedup-hardlink", "reasons-link", {
+      planId: "plan-recovery-reason2",
+      journalDirectory: encode(join(root, "state")),
+      keep: {
+        path: encode(join(root, "work", "keep.bin")),
+        expected: await fingerprint(join(root, "work", "keep.bin")),
+        reviewedBytes: "0",
+      },
+      targets: [
+        {
+          path: encode(join(root, "work", "other.bin")),
+          expected: await fingerprint(join(root, "work", "other.bin")),
+          reviewedBytes: "4096",
+        },
+      ],
+    }),
+    () => false,
+  );
+
+  const validate = validators.get("event");
+  const reasons = [];
+  for (const event of [...moved.events, ...linked.events]) {
+    assert.ok(validate(event), `${JSON.stringify(event)}: ${JSON.stringify(validate.errors)}`);
+    if (event.event === "item-result" && event.itemResult.reason !== undefined) {
+      reasons.push(event.itemResult.reason);
+    }
+  }
+  assert.deepEqual(reasons.sort(), ["content-changed", "destination-exists"]);
+});
+
+/**
+ * A crash can leave the journal's last write torn. The journal is SQLite in
+ * WAL mode with `synchronous = FULL`: every record is committed by an fsynced
+ * frame before the syscall it describes, and a frame whose checksum does not
+ * hold is ignored on the next open. A torn tail therefore loses at most the
+ * write that was tearing, never an earlier record, and never stops the
+ * journal from opening.
+ */
+test("a torn tail on the journal loses nothing that was recorded before it", async () => {
+  const { appendFile, stat } = await import("node:fs/promises");
+  const { root, paths } = await sandbox(40);
+  await runUntil(
+    await trashRequest(root, paths),
+    (seen) => seen.filter((event) => event.event === "item-result").length >= 3,
+  );
+  const wal = join(root, "state", "journal-v1.sqlite-wal");
+  assert.ok(existsSync(wal), "a killed helper leaves its write-ahead log behind");
+  const before = (await stat(wal)).size;
+  // Half a frame of what a dying write would leave: a header-shaped start
+  // and nothing that checks out.
+  await appendFile(wal, Buffer.concat([Buffer.from([0x37, 0x7f, 0x06, 0x82]), Buffer.alloc(2000, 0xa5)]));
+  assert.ok((await stat(wal)).size > before);
+
+  const page = await journal(root);
+  const record = page.records.find((entry) => entry.planId === "plan-recovery-000001");
+  assert.ok(record, "the interrupted action survived the torn tail");
+  assert.notEqual(record.state, "complete");
+  const completed = record.items.filter((item) => item.outcome === "completed");
+  assert.ok(completed.length >= 3, `only ${completed.length} completed items survived`);
+  for (const item of record.items) {
+    assert.notEqual(item.outcome, "in-progress");
+  }
+});

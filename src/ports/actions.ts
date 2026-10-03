@@ -75,6 +75,11 @@ export interface JournalRecord {
   readonly freeBytesBefore?: Bytes;
   readonly freeBytesAfter?: Bytes;
   readonly items: readonly JournalItem[];
+  /**
+   * How many items a history page left out of `items`, which then holds only
+   * the first ones. A shortened list is never evidence that an item is absent.
+   */
+  readonly itemsOmitted?: bigint;
   readonly manager?: JournalManager;
 }
 

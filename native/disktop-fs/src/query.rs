@@ -95,6 +95,11 @@ impl Order {
 pub struct EntryFilter {
     /// Inclusive primary-key range covering one path and its whole subtree.
     pub under: Option<(i64, i64)>,
+    /// The one row at exactly this path. A subtree's first row is the path's
+    /// own, but a listing sorted by size cannot be trusted to put it first: a
+    /// directory whose own inode holds no blocks ties with the files below it,
+    /// and the tie-break then follows the sort order down into the subtree.
+    pub at: Option<i64>,
     pub parent_id: Option<i64>,
     pub name_contains: Option<String>,
     pub extension: Option<String>,
@@ -163,21 +168,117 @@ pub struct QueryPage {
     pub owner_totals: Option<Vec<OwnerTotal>>,
 }
 
-/// One page, plus the cursor that continues it when more rows remain.
-pub fn query(connection: &Connection, request: &QueryRequest) -> rusqlite::Result<QueryPage> {
+/// A subtree with no more rows than this is read whole and sorted, rather than
+/// found by walking a sort index and skipping everything outside it.
+///
+/// Reading a range costs one step per row in it, about 60 ms per million on
+/// the reference machine. Walking a sort index costs one step per row it
+/// passes over, which for a page of `n` rows from a subtree holding a fraction
+/// `f` of the scan is about `n / f`: the smaller the subtree, the more of the
+/// index lies between two of its rows. At fifty thousand rows the range is
+/// read in a few milliseconds and the walk has stopped being the cheaper one
+/// for any scan of a realistic size.
+const SMALL_RANGE: i64 = 50_000;
+
+/// How a page reaches its rows.
+///
+/// SQLite chooses well when it can see how selective a constraint is, and it
+/// cannot see that here: the subtree is a primary-key range whose width is
+/// bound at run time, so every subtree looks the same size to it. The helper
+/// knows the width exactly, so it makes the choice itself, and the choice is
+/// visible in `EXPLAIN QUERY PLAN` and tested there.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum Access {
+    /// One directory's children, read from an index that already holds them
+    /// in the requested order, so a page costs its own rows and no more.
+    Children,
+    /// A primary-key range — the subtree, or the whole scan — read in full
+    /// and sorted with a bounded sorter.
+    Range,
+    /// A sort index read in order until the page is full. Only chosen when
+    /// nothing but the subtree and a common kind narrows the rows, so the
+    /// walk stops after about a page's worth of matches.
+    Ranked,
+    /// An equality on extension or owner, which has an index SQLite can see.
+    Planner,
+}
+
+fn access(request: &QueryRequest) -> Access {
+    let filter = &request.filter;
+    if filter.at.is_some() {
+        // One primary-key lookup.
+        return Access::Range;
+    }
+    if filter.parent_id.is_some() {
+        return Access::Children;
+    }
+    if filter.extension.is_some() || filter.owner_id.is_some() {
+        return Access::Planner;
+    }
+    let ranked_sort = request.sort != Sort::Name;
+    // A rare kind would leave the walk passing over nearly everything. Files
+    // are most of any tree. Directories are not, but across a whole scan they
+    // rank first by size, because each carries its subtree's total; inside a
+    // subtree that has few of them, the walk could pass over the whole index.
+    let common_kind = filter.kinds.as_ref().is_none_or(|kinds| {
+        kinds.contains(&EntryKind::File)
+            || (kinds.contains(&EntryKind::Directory) && filter.under.is_none())
+    });
+    // A size bound on the column the index is ordered by is where the walk
+    // starts and stops, not a filter it skips rows for.
+    let size_bound = request.sort != Sort::Allocated
+        && (filter.min_allocated_bytes.is_some() || filter.max_allocated_bytes.is_some());
+    let only_subtree = filter.name_contains.is_none()
+        && !size_bound
+        && filter.modified_before_nanoseconds.is_none()
+        && filter.max_child_entries.is_none()
+        && filter.broken.is_none()
+        && common_kind;
+    let small = filter
+        .under
+        .is_some_and(|(first, last)| last.saturating_sub(first) < SMALL_RANGE);
+    if ranked_sort && only_subtree && !small {
+        Access::Ranked
+    } else {
+        Access::Range
+    }
+}
+
+/// The `FROM` clause that makes SQLite take the path `access` chose.
+fn source(access: Access, sort: Sort) -> String {
+    let suffix = match sort {
+        Sort::Allocated => "allocated",
+        Sort::Apparent => "apparent",
+        Sort::Modified => "modified",
+        Sort::Name => "name",
+    };
+    match access {
+        Access::Children => format!("entry INDEXED BY entry_child_{suffix}"),
+        Access::Ranked => format!("entry INDEXED BY entry_{suffix}"),
+        // NOT INDEXED still lets SQLite use the primary key, which is the
+        // range; it only stops it walking a sort index instead.
+        Access::Range => "entry NOT INDEXED".to_owned(),
+        Access::Planner => "entry".to_owned(),
+    }
+}
+
+/// The statement for one page and its bound values.
+fn page_statement(request: &QueryRequest) -> rusqlite::Result<(String, Vec<Value>)> {
     let limit = request.limit.clamp(1, MAX_LIMIT);
-    let mut clauses = vec!["scan_id = ?".to_owned()];
-    let mut arguments: Vec<Value> = vec![Value::Text(request.scan_id.clone())];
+    let mut clauses: Vec<String> = Vec::new();
+    let mut arguments: Vec<Value> = Vec::new();
     push_filters(&request.filter, &mut clauses, &mut arguments);
 
     if let Some(cursor) = &request.cursor {
         let (key, id) = decode_cursor(cursor)?;
+        // A row value, not `a < ? OR (a = ? AND id < ?)`: SQLite can start an
+        // index range at a row value, so page fifty costs what page one does,
+        // and it cannot start one at a disjunction.
         clauses.push(format!(
-            "({column} {comparison} ? OR ({column} = ? AND id {comparison} ?))",
+            "({column}, id) {comparison} (?, ?)",
             column = request.sort.column(),
             comparison = request.order.comparison(),
         ));
-        arguments.push(request.sort.key_value(&key));
         arguments.push(request.sort.key_value(&key));
         arguments.push(Value::Integer(id));
     }
@@ -188,13 +289,24 @@ pub fn query(connection: &Connection, request: &QueryRequest) -> rusqlite::Resul
         "SELECT id, parent_id, name, search_name, kind, device, inode, mount_id, link_count,
                 apparent_bytes, allocated_bytes, owner_id, modified_ns, shared, child_entries,
                 broken
-         FROM entry WHERE {} ORDER BY {} {}, id {} LIMIT ?",
-        clauses.join(" AND "),
+         FROM {} WHERE {} ORDER BY {} {}, id {} LIMIT ?",
+        source(access(request), request.sort),
+        if clauses.is_empty() {
+            "1".to_owned()
+        } else {
+            clauses.join(" AND ")
+        },
         request.sort.column(),
         request.order.keyword(),
         request.order.keyword(),
     );
+    Ok((sql, arguments))
+}
 
+/// One page, plus the cursor that continues it when more rows remain.
+pub fn query(connection: &Connection, request: &QueryRequest) -> rusqlite::Result<QueryPage> {
+    let limit = request.limit.clamp(1, MAX_LIMIT);
+    let (sql, arguments) = page_statement(request)?;
     let mut statement = connection.prepare(&sql)?;
     let mut rows = statement.query(params_from_iter(arguments.iter()))?;
     let mut resolver = PathResolver::new(connection);
@@ -266,35 +378,7 @@ fn owner_totals(
     connection: &Connection,
     request: &QueryRequest,
 ) -> rusqlite::Result<Vec<OwnerTotal>> {
-    let mut clauses = vec![
-        "scan_id = ?".to_owned(),
-        "kind = 0".to_owned(),
-        "shared = 0".to_owned(),
-    ];
-    let mut arguments: Vec<Value> = vec![Value::Text(request.scan_id.clone())];
-    let filter = EntryFilter {
-        under: request.filter.under,
-        parent_id: request.filter.parent_id,
-        name_contains: request.filter.name_contains.clone(),
-        extension: request.filter.extension.clone(),
-        min_allocated_bytes: request.filter.min_allocated_bytes,
-        max_allocated_bytes: request.filter.max_allocated_bytes,
-        modified_before_nanoseconds: request.filter.modified_before_nanoseconds,
-        owner_id: request.filter.owner_id,
-        kinds: None,
-        // Both totals cover regular files, which never carry a child count and
-        // are never broken links, so narrowing by either would empty them.
-        max_child_entries: None,
-        broken: None,
-    };
-    push_filters(&filter, &mut clauses, &mut arguments);
-    arguments.push(Value::Integer(i64::from(MAX_OWNER_TOTALS)));
-
-    let sql = format!(
-        "SELECT owner_id, COUNT(*), SUM(allocated_bytes), SUM(apparent_bytes)
-         FROM entry WHERE {} GROUP BY owner_id ORDER BY SUM(allocated_bytes) DESC LIMIT ?",
-        clauses.join(" AND "),
-    );
+    let (sql, arguments) = totals_statement(request, Totals::Owner);
     let mut statement = connection.prepare(&sql)?;
     let mut rows = statement.query(params_from_iter(arguments.iter()))?;
     let mut totals = Vec::new();
@@ -318,36 +402,7 @@ fn type_totals(
     connection: &Connection,
     request: &QueryRequest,
 ) -> rusqlite::Result<Vec<TypeTotal>> {
-    let mut clauses = vec![
-        "scan_id = ?".to_owned(),
-        "kind = 0".to_owned(),
-        "shared = 0".to_owned(),
-    ];
-    let mut arguments: Vec<Value> = vec![Value::Text(request.scan_id.clone())];
-    let mut filter = EntryFilter {
-        under: request.filter.under,
-        parent_id: request.filter.parent_id,
-        name_contains: request.filter.name_contains.clone(),
-        extension: request.filter.extension.clone(),
-        min_allocated_bytes: request.filter.min_allocated_bytes,
-        max_allocated_bytes: request.filter.max_allocated_bytes,
-        modified_before_nanoseconds: request.filter.modified_before_nanoseconds,
-        owner_id: request.filter.owner_id,
-        kinds: None,
-        // Both totals cover regular files, which never carry a child count and
-        // are never broken links, so narrowing by either would empty them.
-        max_child_entries: None,
-        broken: None,
-    };
-    filter.kinds = None;
-    push_filters(&filter, &mut clauses, &mut arguments);
-    arguments.push(Value::Integer(i64::from(MAX_TYPE_TOTALS)));
-
-    let sql = format!(
-        "SELECT extension, COUNT(*), SUM(allocated_bytes), SUM(apparent_bytes)
-         FROM entry WHERE {} GROUP BY extension ORDER BY SUM(allocated_bytes) DESC LIMIT ?",
-        clauses.join(" AND "),
-    );
+    let (sql, arguments) = totals_statement(request, Totals::Extension);
     let mut statement = connection.prepare(&sql)?;
     let mut rows = statement.query(params_from_iter(arguments.iter()))?;
     let mut totals = Vec::new();
@@ -362,11 +417,80 @@ fn type_totals(
     Ok(totals)
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Totals {
+    Extension,
+    Owner,
+}
+
+/// The statement for one aggregate over regular files and its bound values.
+///
+/// Each aggregate has a covering index that starts with its group column and
+/// holds every other column it reads, so a large subtree is summed from the
+/// index in group order, without a sorter and without visiting the table.
+/// A small subtree is cheaper to read as a range. A filter on a column the
+/// index does not hold would send every row back to the table, so that reads
+/// the range too.
+fn totals_statement(request: &QueryRequest, totals: Totals) -> (String, Vec<Value>) {
+    let mut clauses = vec!["kind = 0".to_owned(), "shared = 0".to_owned()];
+    let mut arguments: Vec<Value> = Vec::new();
+    let filter = EntryFilter {
+        under: request.filter.under,
+        at: request.filter.at,
+        parent_id: request.filter.parent_id,
+        name_contains: request.filter.name_contains.clone(),
+        extension: request.filter.extension.clone(),
+        min_allocated_bytes: request.filter.min_allocated_bytes,
+        max_allocated_bytes: request.filter.max_allocated_bytes,
+        modified_before_nanoseconds: request.filter.modified_before_nanoseconds,
+        owner_id: request.filter.owner_id,
+        kinds: None,
+        // Both totals cover regular files, which never carry a child count and
+        // are never broken links, so narrowing by either would empty them.
+        max_child_entries: None,
+        broken: None,
+    };
+    push_filters(&filter, &mut clauses, &mut arguments);
+
+    let (column, index, limit) = match totals {
+        Totals::Extension => ("extension", "entry_type", MAX_TYPE_TOTALS),
+        Totals::Owner => ("owner_id", "entry_owner", MAX_OWNER_TOTALS),
+    };
+    let covered = filter.parent_id.is_none()
+        && filter.at.is_none()
+        && filter.name_contains.is_none()
+        && filter.modified_before_nanoseconds.is_none()
+        && (totals == Totals::Owner || filter.owner_id.is_none())
+        && (totals == Totals::Extension || filter.extension.is_none());
+    let small = filter
+        .under
+        .is_some_and(|(first, last)| last.saturating_sub(first) < SMALL_RANGE);
+    let source = if filter.parent_id.is_some() {
+        "entry INDEXED BY entry_child_allocated".to_owned()
+    } else if covered && !small {
+        format!("entry INDEXED BY {index}")
+    } else {
+        "entry NOT INDEXED".to_owned()
+    };
+
+    arguments.push(Value::Integer(i64::from(limit)));
+    let sql = format!(
+        "SELECT {column}, COUNT(*), SUM(allocated_bytes), SUM(apparent_bytes)
+         FROM {source} WHERE {} GROUP BY {column} ORDER BY SUM(allocated_bytes) DESC LIMIT ?",
+        clauses.join(" AND "),
+    );
+    (sql, arguments)
+}
+
 fn push_filters(filter: &EntryFilter, clauses: &mut Vec<String>, arguments: &mut Vec<Value>) {
     if let Some((first, last)) = filter.under {
         clauses.push("id >= ? AND id <= ?".to_owned());
         arguments.push(Value::Integer(first));
         arguments.push(Value::Integer(last));
+    }
+    if let Some(id) = filter.at {
+        clauses.push("id = ?".to_owned());
+        arguments.push(Value::Integer(id));
     }
     if let Some(parent) = filter.parent_id {
         clauses.push("parent_id = ?".to_owned());
@@ -491,7 +615,12 @@ mod tests {
         };
         let totals = walk(&options, &mut writer, &AtomicBool::new(false)).unwrap();
         writer.finish(&totals, &limits).unwrap();
-        (crate::index::open(&index_directory).unwrap(), scan_id)
+        (
+            crate::index::open_scan(&index_directory, &scan_id)
+                .unwrap()
+                .unwrap(),
+            scan_id,
+        )
     }
 
     fn request(scan_id: &str) -> QueryRequest {
@@ -703,7 +832,9 @@ mod subtree_tests {
         let totals = walk(&options, &mut writer, &AtomicBool::new(false)).unwrap();
         writer.finish(&totals, &limits).unwrap();
         (
-            index::open(&index_directory).unwrap(),
+            index::open_scan(&index_directory, &scan_id)
+                .unwrap()
+                .unwrap(),
             scan_id,
             index_directory,
         )
@@ -721,7 +852,7 @@ mod subtree_tests {
         let (connection, scan_id, _index) = scan(&sandbox, "filter");
         let mut under = sandbox.bytes();
         under.extend_from_slice(b"/inside");
-        let range = index::subtree_range(&connection, &scan_id, &under)
+        let range = index::subtree_range(&connection, &under)
             .unwrap()
             .expect("the path is in this scan");
 
@@ -767,20 +898,14 @@ mod subtree_tests {
     fn a_path_that_is_not_in_the_scan_resolves_to_nothing_rather_than_everything() {
         let sandbox = Sandbox::new("query-subtree-missing");
         sandbox.file(b"a.bin", 10);
-        let (connection, scan_id, _index) = scan(&sandbox, "missing");
+        let (connection, _scan_id, _index) = scan(&sandbox, "missing");
 
         let mut absent = sandbox.bytes();
         absent.extend_from_slice(b"/never-created");
-        assert_eq!(
-            index::subtree_range(&connection, &scan_id, &absent).unwrap(),
-            None
-        );
+        assert_eq!(index::subtree_range(&connection, &absent).unwrap(), None);
 
         // A path above the scan root is not in the scan either.
-        assert_eq!(
-            index::subtree_range(&connection, &scan_id, b"/").unwrap(),
-            None
-        );
+        assert_eq!(index::subtree_range(&connection, b"/").unwrap(), None);
     }
 
     #[test]
@@ -792,9 +917,7 @@ mod subtree_tests {
 
         let mut target = sandbox.bytes();
         target.extend_from_slice(b"/only.bin");
-        let range = index::subtree_range(&connection, &scan_id, &target)
-            .unwrap()
-            .unwrap();
+        let range = index::subtree_range(&connection, &target).unwrap().unwrap();
 
         let page = query(
             &connection,
@@ -815,5 +938,310 @@ mod subtree_tests {
         .unwrap();
         assert_eq!(page.entries.len(), 1);
         assert!(page.entries[0].path.ends_with(b"only.bin"));
+    }
+
+    /// Give a path a modification time, without following a final symlink.
+    fn set_modified(path: &std::path::Path, seconds: i64) {
+        let name = std::ffi::CString::new(path.as_os_str().as_bytes()).unwrap();
+        let times = [
+            libc::timespec {
+                tv_sec: seconds,
+                tv_nsec: 0,
+            },
+            libc::timespec {
+                tv_sec: seconds,
+                tv_nsec: 0,
+            },
+        ];
+        let result = unsafe {
+            libc::utimensat(
+                libc::AT_FDCWD,
+                name.as_ptr(),
+                times.as_ptr(),
+                libc::AT_SYMLINK_NOFOLLOW,
+            )
+        };
+        assert_eq!(result, 0, "utimensat failed in the sandbox");
+    }
+
+    fn sorted_page(scan_id: &str, filter: EntryFilter, sort: Sort) -> QueryRequest {
+        QueryRequest {
+            scan_id: scan_id.to_owned(),
+            filter,
+            sort,
+            order: Order::Descending,
+            limit: 100,
+            cursor: None,
+            include_type_totals: false,
+            include_owner_totals: false,
+        }
+    }
+
+    #[test]
+    fn the_row_at_a_path_is_that_path_even_when_a_descendant_ties_with_it() {
+        let sandbox = Sandbox::new("query-at-path");
+        sandbox.directory(b"tied");
+        sandbox.file(b"tied/only", 0);
+        sandbox.file(b"sibling", 0);
+        // The directory and the file below it share a modification time, as a
+        // btrfs directory and an empty file below it share zero blocks.
+        set_modified(&sandbox.path().join("tied/only"), 1_700_000_000);
+        set_modified(&sandbox.path().join("tied"), 1_700_000_000);
+        let (connection, scan_id, _index) = scan(&sandbox, "at-path");
+
+        let mut tied = sandbox.bytes();
+        tied.extend_from_slice(b"/tied");
+        let range = index::subtree_range(&connection, &tied)
+            .unwrap()
+            .expect("the path is in this scan");
+
+        // Sorted, the subtree's first row is not the directory's own: the tie
+        // is broken by row ID in the same descending order, and the file was
+        // written after its directory.
+        let ranked = query(
+            &connection,
+            &sorted_page(
+                &scan_id,
+                EntryFilter {
+                    under: Some(range),
+                    ..EntryFilter::default()
+                },
+                Sort::Modified,
+            ),
+        )
+        .unwrap();
+        assert!(ranked.entries[0].path.ends_with(b"/tied/only"));
+
+        for sort in [Sort::Allocated, Sort::Apparent, Sort::Modified, Sort::Name] {
+            let page = query(
+                &connection,
+                &sorted_page(
+                    &scan_id,
+                    EntryFilter {
+                        at: Some(range.0),
+                        ..EntryFilter::default()
+                    },
+                    sort,
+                ),
+            )
+            .unwrap();
+            assert_eq!(page.entries.len(), 1, "exactly the one row at the path");
+            assert_eq!(page.entries[0].path, tied);
+            assert_eq!(page.entries[0].kind, EntryKind::Directory);
+            assert!(page.next_cursor.is_none());
+        }
+
+        // Its children are then one parent ID away.
+        let children = query(
+            &connection,
+            &sorted_page(
+                &scan_id,
+                EntryFilter {
+                    parent_id: Some(range.0),
+                    ..EntryFilter::default()
+                },
+                Sort::Name,
+            ),
+        )
+        .unwrap();
+        assert_eq!(children.entries.len(), 1);
+        assert!(children.entries[0].path.ends_with(b"/tied/only"));
+    }
+}
+
+#[cfg(test)]
+mod plan_tests {
+    use super::*;
+    use crate::index::{self, IndexWriter};
+    use crate::testing::Sandbox;
+    use crate::walk::{Accounting, ScanOptions, walk};
+    use std::os::unix::ffi::OsStrExt;
+    use std::sync::atomic::AtomicBool;
+
+    fn scanned(sandbox: &Sandbox) -> (Connection, String) {
+        let index_directory = sandbox.directory(b".disktop-index");
+        let scan_id = "scan-plan-tests".to_owned();
+        let roots = vec![sandbox.bytes()];
+        let limits = index::IndexLimits::default();
+        let mut writer =
+            IndexWriter::begin(&index_directory, &scan_id, &roots, "allocated", &limits).unwrap();
+        let options = ScanOptions {
+            roots,
+            cross_filesystems: false,
+            excludes: vec![index_directory.as_os_str().as_bytes().to_vec()],
+            accounting: Accounting::Allocated,
+            throttle_bytes_per_second: None,
+            max_depth: None,
+        };
+        let totals = walk(&options, &mut writer, &AtomicBool::new(false)).unwrap();
+        writer.finish(&totals, &limits).unwrap();
+        let connection = index::open_scan(&index_directory, &scan_id)
+            .unwrap()
+            .unwrap();
+        (connection, scan_id)
+    }
+
+    fn plan_of(connection: &Connection, sql: &str, arguments: &[Value]) -> String {
+        let mut statement = connection
+            .prepare(&format!("EXPLAIN QUERY PLAN {sql}"))
+            .expect("the statement prepares");
+        let mut rows = statement
+            .query(params_from_iter(arguments.iter()))
+            .expect("the plan runs");
+        let mut steps = Vec::new();
+        while let Some(row) = rows.next().unwrap() {
+            steps.push(row.get::<_, String>(3).unwrap());
+        }
+        steps.join(" | ")
+    }
+
+    fn page_plan(connection: &Connection, request: &QueryRequest) -> String {
+        let (sql, arguments) = page_statement(request).expect("a statement");
+        plan_of(connection, &sql, &arguments)
+    }
+
+    fn request(scan_id: &str, filter: EntryFilter, sort: Sort) -> QueryRequest {
+        QueryRequest {
+            scan_id: scan_id.to_owned(),
+            filter,
+            sort,
+            order: Order::Descending,
+            limit: 200,
+            cursor: None,
+            include_type_totals: false,
+            include_owner_totals: false,
+        }
+    }
+
+    #[test]
+    fn browsing_a_directory_reads_one_page_of_an_index_in_every_order() {
+        let sandbox = Sandbox::new("query-plan-children");
+        sandbox.file(b"a.txt", 10);
+        let (connection, scan_id) = scanned(&sandbox);
+
+        for (sort, index) in [
+            (Sort::Allocated, "entry_child_allocated"),
+            (Sort::Apparent, "entry_child_apparent"),
+            (Sort::Modified, "entry_child_modified"),
+            (Sort::Name, "entry_child_name"),
+        ] {
+            for order in [Order::Descending, Order::Ascending] {
+                let mut page = request(
+                    &scan_id,
+                    EntryFilter {
+                        parent_id: Some(1),
+                        ..EntryFilter::default()
+                    },
+                    sort,
+                );
+                page.order = order;
+                let plan = page_plan(&connection, &page);
+                assert!(plan.contains(index), "{plan}");
+                assert!(!plan.contains("TEMP B-TREE"), "a page was sorted: {plan}");
+
+                // A later page starts the index range at the cursor rather
+                // than reading past everything before it.
+                let key = if sort == Sort::Name { "m" } else { "4096" };
+                page.cursor = Some(encode_cursor(key, 7));
+                let plan = page_plan(&connection, &page);
+                assert!(plan.contains(index), "{plan}");
+                assert!(!plan.contains("TEMP B-TREE"), "{plan}");
+                assert!(
+                    plan.contains(&format!("(parent_id=? AND {}", sort.column())),
+                    "the cursor did not bound the index range: {plan}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn ranking_a_large_subtree_walks_a_sort_index_and_a_small_one_reads_its_range() {
+        let sandbox = Sandbox::new("query-plan-ranked");
+        sandbox.file(b"a.txt", 10);
+        let (connection, scan_id) = scanned(&sandbox);
+
+        let large = request(
+            &scan_id,
+            EntryFilter {
+                under: Some((1, 1 + SMALL_RANGE * 4)),
+                ..EntryFilter::default()
+            },
+            Sort::Allocated,
+        );
+        let plan = page_plan(&connection, &large);
+        assert!(plan.contains("entry_allocated"), "{plan}");
+        assert!(!plan.contains("TEMP B-TREE"), "{plan}");
+
+        let whole = request(&scan_id, EntryFilter::default(), Sort::Modified);
+        let plan = page_plan(&connection, &whole);
+        assert!(plan.contains("entry_modified"), "{plan}");
+        assert!(!plan.contains("TEMP B-TREE"), "{plan}");
+
+        let small = request(
+            &scan_id,
+            EntryFilter {
+                under: Some((10, 20)),
+                ..EntryFilter::default()
+            },
+            Sort::Allocated,
+        );
+        let plan = page_plan(&connection, &small);
+        assert!(plan.contains("INTEGER PRIMARY KEY"), "{plan}");
+
+        // A size bound on the ranked column is where the walk starts.
+        let sized = request(
+            &scan_id,
+            EntryFilter {
+                under: Some((1, 1 + SMALL_RANGE * 4)),
+                min_allocated_bytes: Some(1 << 30),
+                kinds: Some(vec![EntryKind::File]),
+                ..EntryFilter::default()
+            },
+            Sort::Allocated,
+        );
+        let plan = page_plan(&connection, &sized);
+        assert!(
+            plan.contains("entry_allocated (allocated_bytes>?"),
+            "{plan}"
+        );
+
+        let exact = request(
+            &scan_id,
+            EntryFilter {
+                at: Some(5),
+                ..EntryFilter::default()
+            },
+            Sort::Allocated,
+        );
+        let plan = page_plan(&connection, &exact);
+        assert!(plan.contains("INTEGER PRIMARY KEY (rowid=?)"), "{plan}");
+    }
+
+    #[test]
+    fn totals_over_a_large_subtree_come_from_a_covering_index() {
+        let sandbox = Sandbox::new("query-plan-totals");
+        sandbox.file(b"a.txt", 10);
+        let (connection, scan_id) = scanned(&sandbox);
+
+        let large = request(
+            &scan_id,
+            EntryFilter {
+                under: Some((1, 1 + SMALL_RANGE * 4)),
+                ..EntryFilter::default()
+            },
+            Sort::Allocated,
+        );
+        for (totals, index) in [
+            (Totals::Extension, "COVERING INDEX entry_type"),
+            (Totals::Owner, "COVERING INDEX entry_owner"),
+        ] {
+            let (sql, arguments) = totals_statement(&large, totals);
+            let plan = plan_of(&connection, &sql, &arguments);
+            assert!(plan.contains(index), "{plan}");
+            assert!(
+                !plan.contains("TEMP B-TREE FOR GROUP BY"),
+                "the aggregate sorted its rows: {plan}"
+            );
+        }
     }
 }

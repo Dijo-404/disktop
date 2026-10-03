@@ -1,0 +1,35 @@
+{
+  "protocolVersion": 1,
+  "requestId": "journal-02",
+  "eventId": "1",
+  "event": "complete",
+  "result": {
+    "reconciled": "0",
+    "records": [
+      {
+        "id": "act-1759305679004-9f2c1ab07d4e5610",
+        "planId": "plan-01HQ8Z3M4K5N6P7Q",
+        "operation": "trash",
+        "startedAtMilliseconds": "1759305679004",
+        "finishedAtMilliseconds": "1759305999231",
+        "state": "complete",
+        "completed": "500000",
+        "skipped": "0",
+        "failed": "0",
+        "selectedBytes": "7314112512",
+        "bytesMovedToTrash": "7314112512",
+        "items": [
+          {
+            "position": "0",
+            "path": "L2hvbWUvZXhhbXBsZS9jYWNoZS8w",
+            "destination": "L2hvbWUvZXhhbXBsZS8ubG9jYWwvc2hhcmUvVHJhc2gvZmlsZXMvMA==",
+            "outcome": "completed",
+            "bytes": "14628"
+          }
+        ],
+        "itemsOmitted": "499999"
+      }
+    ],
+    "nextCursor": "3137353933303536373930303400616374"
+  }
+}

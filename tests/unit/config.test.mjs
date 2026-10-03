@@ -217,3 +217,36 @@ test("how much journal a vacuum keeps is configurable, bounded, and 512 MiB by d
   assert.equal(parseConfigDocument("[managers]\njournal_keep_bytes = 1073741824\n").managers.journalKeepBytes, 1_073_741_824);
   assert.throws(() => parseConfigDocument("[managers]\njournal_keep_bytes = 1024\n"), /between/);
 });
+
+test("a configuration that is a pipe or an endless device is reported, never waited on or read whole", async () => {
+  const { spawnSync } = await import("node:child_process");
+  const { mkdtemp, rm, symlink, writeFile } = await import("node:fs/promises");
+  const { tmpdir } = await import("node:os");
+  const { join } = await import("node:path");
+  const { loadConfigFile } = await import("../../dist/storage/config.js");
+  const root = await mkdtemp(join(tmpdir(), "disktop-config-"));
+  try {
+    const pipe = join(root, "pipe.toml");
+    assert.equal(spawnSync("mkfifo", [pipe]).status, 0);
+    const endless = join(root, "endless.toml");
+    await symlink("/dev/zero", endless);
+    const linked = join(root, "linked.toml");
+    const real = join(root, "real.toml");
+    await writeFile(real, "units = \"si\"\n");
+    await symlink(real, linked);
+
+    const begun = Date.now();
+    for (const path of [pipe, endless]) {
+      const loaded = await loadConfigFile(path);
+      assert.equal(loaded.source, "defaults");
+      assert.match(loaded.problem ?? "", /could not be read: .*not a regular file/);
+    }
+    assert.ok(Date.now() - begun < 2_000);
+
+    // A configuration kept in a dotfiles repository and linked into place is ordinary.
+    const followed = await loadConfigFile(linked);
+    assert.equal(followed.config.units, "si");
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});

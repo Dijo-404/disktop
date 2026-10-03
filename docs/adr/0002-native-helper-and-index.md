@@ -24,6 +24,10 @@ normalized searchable column, parents are referenced by ID rather than by repeat
 paths, and size, extension, timestamp, and owner are indexed. Node asks for filtered,
 sorted, paginated results; it never receives the whole tree.
 
+Each scan is its own SQLite file, appended to without secondary indexes while the walk
+runs, indexed once when it ends, and published by a rename; from then on it is only
+read. Pruning a scan removes its file.
+
 ## Consequences
 
 Node memory is a function of page size, not entry count, which is what makes the budget
@@ -52,6 +56,24 @@ the entries, which is the property this decision exists for. The test asserts
 the budgets and also fails if the larger tree's peak exceeds the smaller one's
 by more than half, so a regression that reintroduces per-entry accumulation
 fails rather than being restated as a new budget.
+
+**Re-measured before 1.0.0**, after each scan became its own index file built
+once at the end, with an index per browsing order. Same test, same machine,
+release helper, `npm run bench`:
+
+| Figure | Budget | Observed |
+| --- | --- | --- |
+| Node peak RSS | under 256 MiB, flat in entry count | 81.2 MiB at 100,000 entries, 82.3 MiB at 1,000,000 |
+| Helper peak RSS | under 512 MiB | 22.3 MiB |
+| First progress event | within 2 s | 102 ms; progress is now capped at ten events a second |
+| One paginated index page | within 200 ms | 90 ms, including Node startup and spawning the helper |
+| One page of a directory's children (`parentId`, 200 rows) | median under 50 ms | 1.5 ms median, 5.4 ms slowest, for a directory of 500,000 entries |
+| Helper RSS across 2,000 further pages | flat | 9.8 MiB to 9.9 MiB |
+
+On a second million-entry tree with varied sizes, names, and depths
+(not part of the suite), a full scan fell from 48 s to 5.2 s and its index
+from 565 MB to 241 MB; ranking a subtree, and listing a directory's
+children in any order at any page, take under 2 ms in the helper.
 
 Two figures are deliberately conservative. The index page is timed end to end,
 including starting Node and spawning the helper, because that is what a person

@@ -117,3 +117,66 @@ test("as root, a root command runs directly", async () => {
   await runner.run({ tool: "apt-get", arguments: ["clean"] }, "root", { interactive: false, signal: SIGNAL });
   assert.deepEqual([spawned[0].program, spawned[0].argv], ["/usr/bin/apt-get", ["clean"]]);
 });
+
+test("a command whose stop was asked for before it started is never run", async () => {
+  const controller = new AbortController();
+  controller.abort();
+  const { runner, spawned } = fakeRunner();
+  const run = await runner.run({ tool: "apt-get", arguments: ["clean"] }, "root", { interactive: false, signal: controller.signal });
+  // Distinct from "cancelled", which means it ran and was stopped: the
+  // executor verifies a stopped command's items and skips a never-started one's.
+  assert.equal(run.status, "not-started");
+  assert.match(run.explanation, /never run/i);
+  assert.deepEqual(spawned, [], "nothing was spawned after Ctrl+C");
+});
+
+test("a running command is stopped by an abort, and killed if it ignores SIGTERM", async () => {
+  const { spawnCommand } = await import("../../dist/platform/linux/privilege.js");
+  const controller = new AbortController();
+  const begun = Date.now();
+  const pending = spawnCommand("/bin/sh", ["-c", "trap '' TERM; exec sleep 20"], {
+    interactive: false,
+    signal: controller.signal,
+    timeoutMilliseconds: 60_000,
+    env: { PATH: "/usr/bin:/bin" },
+    killGraceMilliseconds: 200,
+  });
+  setTimeout(() => controller.abort(), 100);
+  const result = await pending;
+  assert.ok(Date.now() - begun < 5_000, `the command held the caller for ${Date.now() - begun} ms`);
+  assert.equal(result.signal, "SIGKILL");
+});
+
+test("an abort that landed before the spawn still stops the command", async () => {
+  const { spawnCommand } = await import("../../dist/platform/linux/privilege.js");
+  const controller = new AbortController();
+  controller.abort();
+  const begun = Date.now();
+  const result = await spawnCommand("/bin/sh", ["-c", "exec sleep 20"], {
+    interactive: false,
+    signal: controller.signal,
+    timeoutMilliseconds: 60_000,
+    env: { PATH: "/usr/bin:/bin" },
+  });
+  assert.ok(Date.now() - begun < 5_000);
+  assert.notEqual(result.signal, null);
+});
+
+test("an escalated command is never sent SIGKILL, which would orphan what sudo started", async () => {
+  const { spawnCommand } = await import("../../dist/platform/linux/privilege.js");
+  const controller = new AbortController();
+  // With no grace configured for an escalated command, SIGTERM is all it gets:
+  // sudo relays it, and killing sudo itself would leave the root command
+  // running with nobody to journal how it ended.
+  const pending = spawnCommand("/bin/sh", ["-c", "trap 'exit 7' TERM; sleep 20 & wait"], {
+    interactive: false,
+    signal: controller.signal,
+    timeoutMilliseconds: 60_000,
+    env: { PATH: "/usr/bin:/bin" },
+    escalated: true,
+    killGraceMilliseconds: 100,
+  });
+  setTimeout(() => controller.abort(), 100);
+  const result = await pending;
+  assert.equal(result.exitCode, 7, "the command ended through its own SIGTERM handling");
+});
