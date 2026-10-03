@@ -1767,12 +1767,10 @@ fn dedup_hardlink_request(
     }
     let keep = decoded_targets(std::slice::from_ref(&arguments.keep))?
         .pop()
-        .expect("one target in, one target out");
-    if arguments
-        .targets
-        .iter()
-        .any(|target| target.path == arguments.keep.path)
-    {
+        .ok_or_else(|| "The file being kept could not be read from the request".to_owned())?;
+    let targets = decoded_targets(&arguments.targets)?;
+    // Compared as the bytes they name, not as the text that spelled them.
+    if targets.iter().any(|target| target.path == keep.path) {
         return Err(
             "The file being kept cannot also be one of the files being replaced".to_owned(),
         );
@@ -1781,7 +1779,7 @@ fn dedup_hardlink_request(
         plan_id: arguments.plan_id.clone(),
         journal_directory: decoded_directory(&arguments.journal_directory)?,
         keep,
-        targets: decoded_targets(&arguments.targets)?,
+        targets,
     })
 }
 
