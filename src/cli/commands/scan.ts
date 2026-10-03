@@ -1,5 +1,5 @@
 import type { RawPath } from "../../domain/models.js";
-import { rawPathFromUtf8 } from "../../domain/paths.js";
+import { rawPathFromUtf8, sanitizeText } from "../../domain/paths.js";
 import { parseSize } from "../../application/explore.js";
 import { orderedWarnings } from "../../application/scan.js";
 import type { CliContext } from "../context.js";
@@ -80,7 +80,7 @@ export async function runScan(context: CliContext, options: ScanOptions): Promis
         }),
       );
     } else {
-      context.output.stderr(`${message}\n`);
+      context.output.stderr(`${sanitizeText(message)}\n`);
     }
     return EXIT.operationalError;
   }
@@ -159,7 +159,7 @@ function refuse(context: CliContext, asJson: boolean, message: string): number {
       }),
     );
   } else {
-    context.output.stderr(`${message}\n`);
+    context.output.stderr(`${sanitizeText(message)}\n`);
   }
   return EXIT.operationalError;
 }

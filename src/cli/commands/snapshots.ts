@@ -1,3 +1,4 @@
+import { sanitizeText } from "../../domain/paths.js";
 import type { CliContext } from "../context.js";
 import { EXIT, buildEnvelope, encodeDirectoryChange, encodeSnapshot, writeEnvelope } from "../output.js";
 import { diffLines, snapshotLines } from "../text.js";
@@ -139,7 +140,7 @@ function refuse(
       }),
     );
   } else {
-    context.output.stderr(`${message}\n`);
+    context.output.stderr(`${sanitizeText(message)}\n`);
   }
   return EXIT.operationalError;
 }
