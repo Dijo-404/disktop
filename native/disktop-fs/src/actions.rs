@@ -3510,7 +3510,16 @@ fn write_all(descriptor: libc::c_int, mut bytes: &[u8]) -> std::io::Result<()> {
             )
         };
         if written < 0 {
-            return Err(std::io::Error::last_os_error());
+            let error = std::io::Error::last_os_error();
+            // A signal that arrived mid-write is not a failure of the write.
+            if error.kind() == std::io::ErrorKind::Interrupted {
+                continue;
+            }
+            return Err(error);
+        }
+        // A write that made no progress would otherwise loop for ever.
+        if written == 0 {
+            return Err(std::io::Error::other("the write made no progress"));
         }
         bytes = &bytes[written as usize..];
     }
