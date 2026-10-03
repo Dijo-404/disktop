@@ -18,16 +18,13 @@ use crate::content;
 use crate::sys::{self, EntryKind};
 use sha2::{Digest, Sha256};
 use std::io;
+use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
 use std::os::unix::io::RawFd;
 
 /// Bytes per read while streaming. The same order as the index's batch size:
 /// large enough that the syscall cost disappears, small enough to stay out of
 /// the way of everything else on the machine.
 const COPY_BYTES: usize = 256 * 1024;
-
-/// How deep a tree may be copied. A loop cannot be made with `RESOLVE_NO_SYMLINKS`,
-/// but a genuinely pathological tree should stop rather than exhaust the stack.
-const MAX_DEPTH: u32 = 256;
 
 pub struct Copied {
     /// Files written, not counting directories or links.
@@ -116,74 +113,85 @@ pub fn copy_tree(
     on_created: &mut dyn FnMut(RawFd) -> io::Result<()>,
 ) -> io::Result<Copied> {
     sys::mkdirat(destination_parent, name, permissions)?;
-    let staged = sys::open_directory_no_symlinks(destination_parent, name)?;
-    if let Err(error) = on_created(staged) {
-        sys::close(staged);
-        return Err(error);
-    }
-    sys::fchmod(staged, permissions)?;
+    let staged = owned(sys::open_directory_no_symlinks(destination_parent, name)?);
+    on_created(staged.as_raw_fd())?;
+    sys::fchmod(staged.as_raw_fd(), permissions)?;
     let mut copied = Copied { files: 0, bytes: 0 };
-    let outcome = copy_children(source, staged, 0, &mut copied);
-    // The directory's own bytes have to be durable too, or a crash could leave
-    // a published name pointing at a directory missing half its entries.
-    let _ = sys::fsync(staged);
-    sys::close(staged);
-    outcome.map(|()| copied)
+    copy_children(source, staged, &mut copied)?;
+    Ok(copied)
 }
 
-fn copy_children(
-    source: RawFd,
-    destination: RawFd,
-    depth: u32,
-    copied: &mut Copied,
-) -> io::Result<()> {
-    if depth >= MAX_DEPTH {
-        return Err(io::Error::other(
-            "the tree is deeper than Disktop will copy in one action",
-        ));
-    }
+/// One directory being copied: where it is read from, where it is written to,
+/// and the names it has left, in reverse so the next one is a `pop`.
+struct Frame {
+    source: OwnedFd,
+    destination: OwnedFd,
+    names: Vec<Vec<u8>>,
+}
 
-    // Names are read before anything is written, so what `readdir` returns is
-    // not affected by what this is creating elsewhere.
-    let mut stream = sys::Directory::from_descriptor(duplicate(source)?)?;
-    let mut names = Vec::new();
-    while let Some(name) = stream.next_name()? {
-        names.push(name);
+impl Frame {
+    fn enter(source: OwnedFd, destination: OwnedFd) -> io::Result<Frame> {
+        // Names are read before anything is written, so what `readdir` returns
+        // is not affected by what this is creating elsewhere.
+        let mut stream = sys::Directory::from_descriptor(duplicate(source.as_raw_fd())?)?;
+        let mut names = Vec::new();
+        while let Some(name) = stream.next_name()? {
+            names.push(name);
+        }
+        names.reverse();
+        Ok(Frame {
+            source,
+            destination,
+            names,
+        })
     }
-    drop(stream);
+}
 
-    for name in names {
+/// Copy everything under `source` into `destination`, depth first.
+///
+/// The directories being copied are kept on an explicit stack rather than the
+/// call stack, so no tree is deep enough to crash the helper partway through a
+/// copy; past `subtree::MAX_DEPTH` levels it stops with an error instead.
+fn copy_children(source: RawFd, destination: OwnedFd, copied: &mut Copied) -> io::Result<()> {
+    let mut stack = vec![Frame::enter(owned(duplicate(source)?), destination)?];
+    while let Some(frame) = stack.last_mut() {
+        let Some(name) = frame.names.pop() else {
+            let finished = stack.pop().expect("the frame being copied is on the stack");
+            // The directory's own entries have to be durable too, or a crash
+            // could leave a published name pointing at a directory missing
+            // half of what was copied into it.
+            let _ = sys::fsync(finished.destination.as_raw_fd());
+            continue;
+        };
+        let source = frame.source.as_raw_fd();
+        let destination = frame.destination.as_raw_fd();
         let metadata = sys::metadata_at(source, &name)?;
         match metadata.kind {
             EntryKind::Directory => {
+                // The frames on the stack are this directory's ancestors, so
+                // their count is how deep it is.
+                if stack.len() > crate::subtree::MAX_DEPTH {
+                    return Err(crate::subtree::too_deep());
+                }
                 // No mount crossing: a nested mount inside the source is
                 // another filesystem, and copying it here would quietly pull
                 // in something nobody reviewed.
-                let child = sys::open_child_directory(source, &name, false)?;
-                let result = (|| -> io::Result<()> {
-                    sys::mkdirat(destination, &name, metadata.permissions)?;
-                    let into = sys::open_directory_no_symlinks(destination, &name)?;
-                    sys::fchmod(into, metadata.permissions)?;
-                    let outcome = copy_children(child, into, depth + 1, copied);
-                    let _ = sys::fsync(into);
-                    sys::close(into);
-                    outcome
-                })();
-                sys::close(child);
-                result?;
+                let child = owned(sys::open_child_directory(source, &name, false)?);
+                sys::mkdirat(destination, &name, metadata.permissions)?;
+                let into = owned(sys::open_directory_no_symlinks(destination, &name)?);
+                sys::fchmod(into.as_raw_fd(), metadata.permissions)?;
+                stack.push(Frame::enter(child, into)?);
             }
             EntryKind::File => {
-                let descriptor = sys::openat_read_no_symlinks(source, &name)?;
-                let outcome = copy_file(
-                    descriptor,
+                let descriptor = owned(sys::openat_read_no_symlinks(source, &name)?);
+                let bytes = copy_file(
+                    descriptor.as_raw_fd(),
                     destination,
                     &name,
                     metadata.permissions,
                     Some(metadata.modified_nanoseconds),
                     &mut |_| Ok(()),
-                );
-                sys::close(descriptor);
-                let bytes = outcome?;
+                )?;
                 copied.files += 1;
                 copied.bytes += bytes;
             }
@@ -202,6 +210,11 @@ fn copy_children(
         }
     }
     Ok(())
+}
+
+/// Take ownership of a descriptor nothing else will close.
+fn owned(descriptor: RawFd) -> OwnedFd {
+    unsafe { OwnedFd::from_raw_fd(descriptor) }
 }
 
 /// A private copy of a directory descriptor, so a stream can own one without

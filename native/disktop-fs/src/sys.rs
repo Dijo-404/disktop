@@ -439,6 +439,26 @@ pub fn available_bytes_at(path: &[u8]) -> io::Result<u64> {
     Ok(stat.f_bavail.saturating_mul(unit))
 }
 
+/// Let this process hold as many descriptors as its hard limit allows.
+///
+/// Every walk over a tree keeps one directory open per level, and a copy keeps
+/// two, so a tree at the depth limit needs more than the 1024 some machines
+/// set as the soft limit. The hard limit is the administrator's ceiling and is
+/// left alone; a failure here only means a very deep tree is refused with
+/// `EMFILE` rather than handled.
+pub fn raise_descriptor_limit() {
+    let mut limit = libc::rlimit {
+        rlim_cur: 0,
+        rlim_max: 0,
+    };
+    if unsafe { libc::getrlimit(libc::RLIMIT_NOFILE, &mut limit) } == 0
+        && limit.rlim_cur < limit.rlim_max
+    {
+        limit.rlim_cur = limit.rlim_max;
+        unsafe { libc::setrlimit(libc::RLIMIT_NOFILE, &limit) };
+    }
+}
+
 /// Make a file's bytes durable before anything else depends on them existing.
 pub fn fsync(descriptor: RawFd) -> io::Result<()> {
     if unsafe { libc::fsync(descriptor) } < 0 {

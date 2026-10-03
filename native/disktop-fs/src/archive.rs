@@ -15,6 +15,7 @@
 use crate::sys::{self, EntryKind};
 use sha2::{Digest, Sha256};
 use std::io::{self, Read, Write};
+use std::os::fd::{AsRawFd, OwnedFd};
 use std::os::unix::io::{FromRawFd, RawFd};
 
 /// Enough to be worth the time on a storage tool's archive, and not so much
@@ -128,7 +129,7 @@ pub fn compress_tree(
         });
         builder.follow_symlinks(false);
         let mut entries = 0u64;
-        append_children(&mut builder, source, root, 0, &mut entries)?;
+        append_children(&mut builder, source, root, &mut entries)?;
 
         let digesting = builder.into_inner()?;
         let digest: [u8; 32] = digesting.hasher.finalize().into();
@@ -186,36 +187,62 @@ pub fn readable_as_tar(destination_parent: RawFd, name: &[u8]) -> io::Result<u64
     Ok(entries)
 }
 
-const MAX_DEPTH: u32 = 256;
+/// One directory being archived: where it is read from, the path its members
+/// get inside the archive, and the names it has left, in reverse so the next
+/// one is a `pop`.
+struct Frame {
+    source: OwnedFd,
+    prefix: Vec<u8>,
+    names: Vec<Vec<u8>>,
+}
 
+impl Frame {
+    fn enter(source: OwnedFd, prefix: Vec<u8>) -> io::Result<Frame> {
+        let mut stream = sys::Directory::from_descriptor(duplicate(source.as_raw_fd())?)?;
+        let mut names = Vec::new();
+        while let Some(name) = stream.next_name()? {
+            names.push(name);
+        }
+        names.reverse();
+        Ok(Frame {
+            source,
+            prefix,
+            names,
+        })
+    }
+}
+
+/// Append everything under `source` to the archive, each directory's header
+/// before what it holds.
+///
+/// The directories being read are kept on an explicit stack rather than the
+/// call stack, so no tree is deep enough to crash the helper partway through
+/// an archive; past `subtree::MAX_DEPTH` levels it stops with an error instead.
 fn append_children<W: Write>(
     builder: &mut tar::Builder<W>,
     source: RawFd,
-    prefix: &[u8],
-    depth: u32,
+    root: &[u8],
     entries: &mut u64,
 ) -> io::Result<()> {
-    if depth >= MAX_DEPTH {
-        return Err(io::Error::other(
-            "the tree is deeper than Disktop will archive in one action",
-        ));
-    }
-
-    let mut stream = sys::Directory::from_descriptor(duplicate(source)?)?;
-    let mut names = Vec::new();
-    while let Some(name) = stream.next_name()? {
-        names.push(name);
-    }
-    drop(stream);
-
-    for name in names {
+    let mut stack = vec![Frame::enter(owned(duplicate(source)?), root.to_vec())?];
+    while let Some(frame) = stack.last_mut() {
+        let Some(name) = frame.names.pop() else {
+            stack.pop();
+            continue;
+        };
+        let source = frame.source.as_raw_fd();
         let metadata = sys::metadata_at(source, &name)?;
-        let mut path = prefix.to_vec();
+        let mut path = frame.prefix.clone();
         path.push(b'/');
         path.extend_from_slice(&name);
 
         match metadata.kind {
             EntryKind::Directory => {
+                // The frames on the stack are this directory's ancestors, so
+                // their count is how deep it is.
+                if stack.len() > crate::subtree::MAX_DEPTH {
+                    return Err(crate::subtree::too_deep());
+                }
                 let mut header = tar::Header::new_gnu();
                 header.set_entry_type(tar::EntryType::Directory);
                 header.set_size(0);
@@ -224,24 +251,17 @@ fn append_children<W: Write>(
                 append(builder, &mut header, &path, &mut io::empty())?;
                 *entries += 1;
 
-                let child = sys::open_child_directory(source, &name, false)?;
-                let result = append_children(builder, child, &path, depth + 1, entries);
-                sys::close(child);
-                result?;
+                let child = owned(sys::open_child_directory(source, &name, false)?);
+                stack.push(Frame::enter(child, path)?);
             }
             EntryKind::File => {
-                let descriptor = sys::openat_read_no_symlinks(source, &name)?;
-                let result = (|| -> io::Result<()> {
-                    let mut header = tar::Header::new_gnu();
-                    header.set_entry_type(tar::EntryType::Regular);
-                    header.set_size(metadata.apparent_bytes);
-                    header.set_mode(metadata.permissions);
-                    header.set_mtime(metadata.modified_nanoseconds / 1_000_000_000);
-                    let mut reader = Source::new(duplicate(descriptor)?);
-                    append(builder, &mut header, &path, &mut reader)
-                })();
-                sys::close(descriptor);
-                result?;
+                let mut reader = Source::open(source, &name)?;
+                let mut header = tar::Header::new_gnu();
+                header.set_entry_type(tar::EntryType::Regular);
+                header.set_size(metadata.apparent_bytes);
+                header.set_mode(metadata.permissions);
+                header.set_mtime(metadata.modified_nanoseconds / 1_000_000_000);
+                append(builder, &mut header, &path, &mut reader)?;
                 *entries += 1;
             }
             EntryKind::Symlink => {
@@ -264,6 +284,11 @@ fn append_children<W: Write>(
         }
     }
     Ok(())
+}
+
+/// Take ownership of a descriptor nothing else will close.
+fn owned(descriptor: RawFd) -> OwnedFd {
+    unsafe { OwnedFd::from_raw_fd(descriptor) }
 }
 
 fn append<W: Write, R: Read>(

@@ -37,44 +37,61 @@ impl Subtree {
     }
 }
 
+/// How many directories deep below a reviewed one any action will go.
+///
+/// The same ceiling as the scan's walk, so a tree the index holds completely
+/// is a tree an action can review, copy, archive, and remove, and anything
+/// deeper is refused when it is planned rather than halfway through an action.
+/// Every walk over a tree keeps its directories on an explicit stack, one open
+/// descriptor per level, so this bounds descriptors and memory; the call stack
+/// does not grow with the tree at all.
+pub const MAX_DEPTH: usize = 512;
+
+/// What every tree walk says when it refuses past `MAX_DEPTH`.
+pub const TOO_DEEP: &str = "It is nested more than 512 levels deep, deeper than Disktop will \
+     review, copy, archive, or remove in one action, so it was left as it is.";
+
+/// The error a tree walk returns past `MAX_DEPTH`, recognisable by type so a
+/// caller can say what happened rather than calling it an internal failure.
+#[derive(Debug)]
+pub struct TooDeep;
+
+impl std::fmt::Display for TooDeep {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(TOO_DEEP)
+    }
+}
+
+impl std::error::Error for TooDeep {}
+
+pub fn too_deep() -> std::io::Error {
+    std::io::Error::other(TooDeep)
+}
+
+pub fn is_too_deep(error: &std::io::Error) -> bool {
+    error.get_ref().is_some_and(|inner| inner.is::<TooDeep>())
+}
+
 pub fn digest(parent: RawFd, name: &[u8], cancelled: &AtomicBool) -> Result<Subtree, Refusal> {
     let root = sys::open_child_directory(parent, name, false).map_err(|error| refusal(&error))?;
     let mut hasher = Sha256::new();
     let mut entries = 0u64;
+    // The path of the entry being digested, relative to the reviewed
+    // directory. Each frame remembers where its own directory's path ends.
     let mut relative = Vec::new();
-    walk(root, &mut relative, &mut hasher, &mut entries, cancelled)?;
-    Ok(Subtree {
-        entries,
-        digest: hasher.finalize().into(),
-    })
-}
+    let mut stack = vec![Frame::enter(root, 0, cancelled)?];
 
-fn walk(
-    descriptor: RawFd,
-    relative: &mut Vec<u8>,
-    hasher: &mut Sha256,
-    entries: &mut u64,
-    cancelled: &AtomicBool,
-) -> Result<(), Refusal> {
-    if cancelled.load(Ordering::Relaxed) {
-        sys::close(descriptor);
-        return Err(Refusal::new(
-            "cancelled",
-            "Stopped before the directory's contents were all read.",
-        ));
-    }
-    let mut stream =
-        sys::Directory::from_descriptor(descriptor).map_err(|error| refusal(&error))?;
-    let mut names = Vec::new();
-    while let Some(name) = stream.next_name().map_err(|error| refusal(&error))? {
-        names.push(name);
-    }
-    names.sort();
-    let directory = stream.descriptor();
-    for name in names {
+    while let Some(frame) = stack.last_mut() {
+        let Some(name) = frame.names.pop() else {
+            stack.pop();
+            continue;
+        };
+        let directory = frame.directory.descriptor();
+        let base = frame.base;
         let metadata = sys::metadata_at(directory, &name).map_err(|error| refusal(&error))?;
-        let length = relative.len();
-        if length > 0 {
+
+        relative.truncate(base);
+        if base > 0 {
             relative.push(b'/');
         }
         relative.extend_from_slice(&name);
@@ -84,15 +101,60 @@ fn walk(
         hasher.update(metadata.inode.to_be_bytes());
         hasher.update(metadata.apparent_bytes.to_be_bytes());
         hasher.update(metadata.modified_nanoseconds.to_be_bytes());
-        *entries += 1;
+        entries += 1;
+
         if metadata.kind == EntryKind::Directory {
+            // The frames on the stack are this directory's ancestors, so how
+            // many there are is how deep it is.
+            if stack.len() > MAX_DEPTH {
+                return Err(Refusal::new("invalid-arguments", TOO_DEEP));
+            }
             let child = sys::open_child_directory(directory, &name, false)
                 .map_err(|error| refusal(&error))?;
-            walk(child, relative, hasher, entries, cancelled)?;
+            stack.push(Frame::enter(child, relative.len(), cancelled)?);
         }
-        relative.truncate(length);
     }
-    Ok(())
+
+    Ok(Subtree {
+        entries,
+        digest: hasher.finalize().into(),
+    })
+}
+
+/// One directory being read: its stream, the names it has left in reverse
+/// byte order so the next one is a `pop`, and where its own path ends.
+struct Frame {
+    directory: sys::Directory,
+    names: Vec<Vec<u8>>,
+    base: usize,
+}
+
+impl Frame {
+    /// Takes ownership of `descriptor` whatever it returns.
+    fn enter(descriptor: RawFd, base: usize, cancelled: &AtomicBool) -> Result<Frame, Refusal> {
+        if cancelled.load(Ordering::Relaxed) {
+            sys::close(descriptor);
+            return Err(Refusal::new(
+                "cancelled",
+                "Stopped before the directory's contents were all read.",
+            ));
+        }
+        let mut directory =
+            sys::Directory::from_descriptor(descriptor).map_err(|error| refusal(&error))?;
+        let mut names = Vec::new();
+        while let Some(name) = directory.next_name().map_err(|error| refusal(&error))? {
+            names.push(name);
+        }
+        // Byte order, so the digest does not depend on the order a filesystem
+        // happens to return names in.
+        names.sort();
+        names.reverse();
+        Ok(Frame {
+            directory,
+            names,
+            base,
+        })
+    }
 }
 
 fn kind_byte(kind: EntryKind) -> u8 {
@@ -203,6 +265,57 @@ mod tests {
         let refusal = read(&sandbox).expect_err("a tree nobody can read is not reviewed");
         sandbox.chmod(b"tree/inner", 0o700);
         assert_eq!(refusal.code, "permission-denied");
+    }
+
+    /// Digest `tree` on a thread with the stack a helper worker gets, so a walk
+    /// that recursed once per level would overflow here exactly as it would in
+    /// the helper — where it takes the whole process down mid-action.
+    fn read_on_a_worker(sandbox: &Sandbox) -> Result<Subtree, Refusal> {
+        let root = sandbox.bytes();
+        std::thread::Builder::new()
+            .spawn(move || {
+                let parent = sys::open_root(&root).unwrap();
+                let outcome = digest(parent, b"tree", &AtomicBool::new(false));
+                sys::close(parent);
+                outcome
+            })
+            .unwrap()
+            .join()
+            .expect("the digest returned rather than crashing")
+    }
+
+    #[test]
+    fn a_tree_ten_thousand_levels_deep_is_refused_rather_than_crashing_the_helper() {
+        crate::testing::raise_descriptor_limit();
+        let sandbox = Sandbox::new("subtree-very-deep");
+        sandbox.deep_directory(b"tree", 10_000);
+        let refusal = read_on_a_worker(&sandbox).expect_err("too deep to review");
+        assert_eq!(refusal.code, "invalid-arguments");
+        assert!(
+            refusal.message.contains("levels deep"),
+            "{}",
+            refusal.message
+        );
+    }
+
+    #[test]
+    fn a_tree_exactly_as_deep_as_the_limit_is_reviewed() {
+        crate::testing::raise_descriptor_limit();
+        let sandbox = Sandbox::new("subtree-at-limit");
+        sandbox.deep_directory(b"tree", MAX_DEPTH);
+        let reviewed = read_on_a_worker(&sandbox).expect("a tree at the limit reads");
+        assert_eq!(
+            reviewed.entries,
+            MAX_DEPTH as u64 + 1,
+            "every level and the file"
+        );
+
+        let deeper = Sandbox::new("subtree-past-limit");
+        deeper.deep_directory(b"tree", MAX_DEPTH + 1);
+        assert_eq!(
+            read_on_a_worker(&deeper).expect_err("one level more").code,
+            "invalid-arguments"
+        );
     }
 
     #[test]
