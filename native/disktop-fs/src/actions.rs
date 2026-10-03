@@ -882,6 +882,18 @@ fn compress_one(
     if let Err(refusal) = guard.classify(&target.path) {
         return refuse(refusal.code, refusal.message, Outcome::Failed);
     }
+    // An archive written inside the tree it archives would be read back into
+    // itself as the walk reached it. The planner refuses this too; the helper
+    // does not take its word for it.
+    if named_destination.is_some() && guard::is_within(&target.path, named_destination_path) {
+        return refuse(
+            "invalid-arguments",
+            "The destination is inside the source, so the archive would be written into what it \
+             is archiving."
+                .to_owned(),
+            Outcome::Failed,
+        );
+    }
     let parent = match guard::resolve_parent(&target.path) {
         Ok(parent) => parent,
         Err(refusal) => {
@@ -4056,6 +4068,38 @@ mod tests {
             })
             .collect();
         assert!(staged.is_empty());
+    }
+
+    /// The planner refuses an archive destination inside what it archives, and
+    /// the helper does not take its word for it: archiving into the tree being
+    /// walked would read the growing archive back into itself.
+    #[test]
+    fn an_archive_destination_inside_the_source_is_refused_before_anything_is_written() {
+        let sandbox = Sandbox::new("compress-into-itself");
+        sandbox.directory(b"state");
+        sandbox.directory(b"work/tree/inner");
+        sandbox.file(b"work/tree/inner/file", 4096);
+        let request = CompressRequest {
+            plan_id: "plan-0123456789abcd".to_owned(),
+            journal_directory: sandbox.path().join("state"),
+            home_trash_directory: joined(&sandbox, b"trash-home"),
+            destination_directory: joined(&sandbox, b"work/tree/inner"),
+            source_disposition: SourceDisposition::Permanent,
+            targets: vec![reviewed(&joined(&sandbox, b"work/tree"), 4096)],
+        };
+
+        let (summary, items) =
+            collect(|report| run_compress(&request, report, &AtomicBool::new(false)));
+        summary.ok().expect("the compress ran");
+
+        assert_eq!(items[0].outcome, Outcome::Failed, "{:?}", items[0].message);
+        assert_eq!(items[0].reason, Some("invalid-arguments"));
+        let inside: Vec<_> = std::fs::read_dir(sandbox.path().join("work/tree/inner"))
+            .unwrap()
+            .flatten()
+            .map(|entry| entry.file_name())
+            .collect();
+        assert_eq!(inside, vec![std::ffi::OsString::from("file")]);
     }
 
     fn linking(sandbox: &Sandbox, keep: &[u8], targets: &[&[u8]]) -> DedupHardlinkRequest {
