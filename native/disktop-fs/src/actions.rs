@@ -36,6 +36,8 @@ const PRIVATE_FILE_MODE: u32 = 0o600;
 pub(crate) enum Checkpoint {
     /// A staging name was found free and is about to be created.
     BeforeStaging,
+    /// An output was published and the source is about to be dealt with.
+    BeforeDisposal,
 }
 
 #[cfg(test)]
@@ -1419,9 +1421,26 @@ fn dispose_of_source(
     target: &Target,
     live: &sys::Metadata,
 ) -> ItemReport {
+    // The item's intent is already in the journal, so every way out of here
+    // writes its outcome too. An item left reading `in-progress` inside an
+    // action that finished would never be looked at again.
+    let kept = |message: String| {
+        settle(
+            journal,
+            journal_id,
+            position,
+            target,
+            published_but_kept(target, message),
+        )
+    };
+    let still_there = |reason: &str| {
+        format!("{PUBLISHED} the original could not be dealt with, so it is still there: {reason}")
+    };
+
+    checkpoint(Checkpoint::BeforeDisposal);
     let parent = match guard::resolve_parent(&target.path) {
         Ok(parent) => parent,
-        Err(refusal) => return published_but_kept(target, &refusal.message),
+        Err(refusal) => return kept(still_there(&refusal.message)),
     };
 
     // The source is checked again, here, immediately before anything happens
@@ -1430,10 +1449,10 @@ fn dispose_of_source(
     // it ran is in neither the copy nor the plan. Disposing of it on the
     // strength of the earlier check would release bytes nobody reviewed.
     if let Err(refusal) = guard::revalidate(&parent, &target.expected) {
-        return published_but_kept(target, &refusal.message);
+        return kept(still_there(&refusal.message));
     }
     if let Err((_, message)) = subtree_unchanged(&parent, target) {
-        return published_but_kept(target, &message);
+        return kept(still_there(&message));
     }
 
     let removed = match context.disposition {
@@ -1441,11 +1460,11 @@ fn dispose_of_source(
             let destination =
                 match choose_trash(guard, context.home_trash, &target.path, live.device) {
                     Ok(destination) => destination,
-                    Err(refusal) => return published_but_kept(target, &refusal.message),
+                    Err(refusal) => return kept(still_there(&refusal.message)),
                 };
             let reserved = match reserve(&destination, &parent.name, &target.path) {
                 Ok(reserved) => reserved,
-                Err(refusal) => return published_but_kept(target, &refusal.message),
+                Err(refusal) => return kept(still_there(&refusal.message)),
             };
 
             // The item's destination becomes where the *source* went, not
@@ -1458,7 +1477,7 @@ fn dispose_of_source(
                 journal.record_intent(journal_id, position, &target.path, Some(&trashed))
             {
                 reserved.discard(&destination);
-                return published_but_kept(target, &error.to_string());
+                return kept(still_there(&error.to_string()));
             }
 
             match sys::renameat_no_replace(
@@ -1470,7 +1489,7 @@ fn dispose_of_source(
                 Ok(()) => Ok(()),
                 Err(error) => {
                     reserved.discard(&destination);
-                    Err(error.to_string())
+                    Err(still_there(&error.to_string()))
                 }
             }
         }
@@ -1480,10 +1499,17 @@ fn dispose_of_source(
             // what makes `undo` refuse this record rather than try to rename
             // the published output back over the original's path.
             if let Err(error) = journal.record_intent(journal_id, position, &target.path, None) {
-                return published_but_kept(target, &error.to_string());
+                return kept(still_there(&error.to_string()));
             }
-            remove_entry(parent.descriptor(), &parent.name, live.kind)
-                .map_err(|error| error.to_string())
+            // A tree removal that stops partway has removed part of the tree,
+            // and saying the original "is still there" would be wrong about
+            // the part that went. The verified copy holds all of it.
+            remove_entry(parent.descriptor(), &parent.name, live.kind).map_err(|error| {
+                format!(
+                    "{PUBLISHED} the original could not be removed completely, so part of it may \
+                     still be there: {error}"
+                )
+            })
         }
     };
 
@@ -1499,24 +1525,23 @@ fn dispose_of_source(
                 inode: live.inode,
             }),
         ),
-        Err(message) => published_but_kept(target, &message),
+        Err(message) => kept(message),
     }
 }
+
+const PUBLISHED: &str = "The output arrived and was verified, but";
 
 /// The copy arrived and the source did not go.
 ///
 /// This is `uncertain` rather than `failed`, and deliberately so: the action
 /// half happened. Saying it failed would invite somebody to run it again, and
 /// the second run would find the destination occupied by the first one's work.
-fn published_but_kept(target: &Target, reason: &str) -> ItemReport {
+fn published_but_kept(target: &Target, message: String) -> ItemReport {
     ItemReport {
         path: target.path.clone(),
         outcome: Outcome::Uncertain,
         reason: Some("source-not-disposed"),
-        message: Some(format!(
-            "The output arrived and was verified, but the original could not be dealt with, so it \
-             is still there: {reason}"
-        )),
+        message: Some(message),
         bytes: 0,
     }
 }
@@ -3331,6 +3356,49 @@ mod tests {
                 .len(),
             4096
         );
+    }
+
+    /// An item whose output was published and whose source could not then be
+    /// dealt with is uncertain, and the journal has to say so. An item left
+    /// reading `in-progress` inside an action that finished is never looked at
+    /// again: reconciliation only resolves actions that never finished.
+    #[test]
+    fn a_source_that_could_not_be_disposed_of_is_journalled_as_uncertain() {
+        let sandbox = Sandbox::new("dispose-journalled");
+        sandbox.directory(b"state");
+        sandbox.directory(b"elsewhere");
+        sandbox.directory(b"work");
+        sandbox.file(b"work/data.bin", 4096);
+        let request = moving(&sandbox, b"work/data.bin", SourceDisposition::Permanent);
+
+        let source = sandbox.path().join("work/data.bin");
+        at_checkpoint(move |at| {
+            if at == Checkpoint::BeforeDisposal {
+                use std::io::Write;
+                let mut file = std::fs::OpenOptions::new()
+                    .append(true)
+                    .open(&source)
+                    .unwrap();
+                file.write_all(b"written after the copy").unwrap();
+            }
+        });
+        let (summary, items) =
+            collect(|report| run_copy_move(&request, report, &AtomicBool::new(false)));
+        let summary = summary.ok().expect("the move ran");
+
+        assert_eq!(items[0].outcome, Outcome::Uncertain);
+        assert!(sandbox.path().join("work/data.bin").exists());
+        let record = Journal::open(&sandbox.path().join("state"))
+            .unwrap()
+            .get(&summary.journal_id)
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            record.items[0].outcome,
+            Outcome::Uncertain,
+            "the journal says what happened to the item, not that it is still running",
+        );
+        assert!(record.items[0].reason.is_some());
     }
 
     /// A crash can leave a staged copy of a read-only directory behind, and it
