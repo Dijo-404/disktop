@@ -74,22 +74,24 @@ pub fn compress_file(
 /// Read a staged `.zst` back the way a person recovering from it would, and
 /// report the digest of what comes out.
 pub fn verify_file(destination_parent: RawFd, name: &[u8]) -> io::Result<[u8; 32]> {
-    let staged = sys::openat_read_no_symlinks(destination_parent, name)?;
-    let outcome = (|| -> io::Result<[u8; 32]> {
-        let mut decoder = zstd::stream::read::Decoder::new(Source::new(staged))?;
-        let mut hasher = Sha256::new();
-        let mut buffer = vec![0u8; READ_BYTES];
-        loop {
-            let read = decoder.read(&mut buffer)?;
-            if read == 0 {
-                break;
-            }
-            hasher.update(&buffer[..read]);
+    // The decoder owns the descriptor from here on and closes it once, when it
+    // is dropped, on every path out of this function.
+    let mut decoder = zstd::stream::read::Decoder::new(Source::open(destination_parent, name)?)?;
+    digest_stream(&mut decoder)
+}
+
+/// Digest everything a reader yields, a bounded buffer at a time.
+fn digest_stream(reader: &mut dyn Read) -> io::Result<[u8; 32]> {
+    let mut hasher = Sha256::new();
+    let mut buffer = vec![0u8; READ_BYTES];
+    loop {
+        let read = reader.read(&mut buffer)?;
+        if read == 0 {
+            break;
         }
-        Ok(hasher.finalize().into())
-    })();
-    sys::close(staged);
-    outcome
+        hasher.update(&buffer[..read]);
+    }
+    Ok(hasher.finalize().into())
 }
 
 /// Archive a whole tree into `destination_parent` under `name`.
@@ -163,22 +165,8 @@ impl<W: Write> Write for Digesting<W> {
 /// taken while writing is what makes "it can be read back" a statement about
 /// the content rather than about the entry count.
 pub fn verify_tree(destination_parent: RawFd, name: &[u8]) -> io::Result<[u8; 32]> {
-    let staged = sys::openat_read_no_symlinks(destination_parent, name)?;
-    let outcome = (|| -> io::Result<[u8; 32]> {
-        let mut decoder = zstd::stream::read::Decoder::new(Source::new(staged))?;
-        let mut hasher = Sha256::new();
-        let mut buffer = vec![0u8; READ_BYTES];
-        loop {
-            let read = decoder.read(&mut buffer)?;
-            if read == 0 {
-                break;
-            }
-            hasher.update(&buffer[..read]);
-        }
-        Ok(hasher.finalize().into())
-    })();
-    sys::close(staged);
-    outcome
+    let mut decoder = zstd::stream::read::Decoder::new(Source::open(destination_parent, name)?)?;
+    digest_stream(&mut decoder)
 }
 
 /// Walk a staged `.tar.zst` as an archive, so a malformed member is found.
@@ -186,21 +174,16 @@ pub fn verify_tree(destination_parent: RawFd, name: &[u8]) -> io::Result<[u8; 32
 /// The digest says the bytes survived the round trip; this says they are still
 /// a tar anybody can unpack.
 pub fn readable_as_tar(destination_parent: RawFd, name: &[u8]) -> io::Result<u64> {
-    let staged = sys::openat_read_no_symlinks(destination_parent, name)?;
-    let outcome = (|| -> io::Result<u64> {
-        let decoder = zstd::stream::read::Decoder::new(Source::new(staged))?;
-        let mut reader = tar::Archive::new(decoder);
-        let mut entries = 0u64;
-        let mut buffer = vec![0u8; READ_BYTES];
-        for entry in reader.entries()? {
-            let mut entry = entry?;
-            while entry.read(&mut buffer)? > 0 {}
-            entries += 1;
-        }
-        Ok(entries)
-    })();
-    sys::close(staged);
-    outcome
+    let decoder = zstd::stream::read::Decoder::new(Source::open(destination_parent, name)?)?;
+    let mut reader = tar::Archive::new(decoder);
+    let mut entries = 0u64;
+    let mut buffer = vec![0u8; READ_BYTES];
+    for entry in reader.entries()? {
+        let mut entry = entry?;
+        while entry.read(&mut buffer)? > 0 {}
+        entries += 1;
+    }
+    Ok(entries)
 }
 
 const MAX_DEPTH: u32 = 256;
@@ -320,11 +303,20 @@ impl Write for Sink {
 }
 
 /// A `Read` over a descriptor this owns and closes.
+///
+/// Ownership is the whole point of the type: whatever holds a `Source` is the
+/// one thing that closes its descriptor, so nothing else may close it too.
 struct Source(std::fs::File);
 
 impl Source {
+    /// Take ownership of a descriptor nothing else will close.
     fn new(descriptor: RawFd) -> Source {
         Source(unsafe { std::fs::File::from_raw_fd(descriptor) })
+    }
+
+    /// Open a staged file for reading back, never through a symlink.
+    fn open(parent: RawFd, name: &[u8]) -> io::Result<Source> {
+        sys::openat_read_no_symlinks(parent, name).map(Source::new)
     }
 }
 
