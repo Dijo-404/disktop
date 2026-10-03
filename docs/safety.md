@@ -182,6 +182,14 @@ Every recursive removal — erasing a tree, emptying Trash, discarding a staged 
 opens each directory it descends into without crossing a mount, so a filesystem mounted
 inside a reviewed tree after review is refused rather than deleted through.
 
+Before an irreversible removal starts — an erase, emptying Trash, or a move or compress
+that removes its source permanently — the helper checks that this user may remove
+entries from every directory in the tree and from the one holding it. Disktop never
+changes permissions on a user's files to force a removal, so a tree with a read-only
+directory inside it (a Go module cache is full of them) is refused whole, naming the
+directory, instead of being removed up to that directory and no further. A move or
+compress checks this before it copies anything.
+
 ## What an action checked afterwards
 
 Every result carries a list of checks the apply made once the helper had finished. They
