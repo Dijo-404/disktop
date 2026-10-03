@@ -76,6 +76,24 @@ test("two directories are measured in one pass, in proportion to what they hold"
   );
 });
 
+test("a directory of hundreds of empty files is measured, however its row ties with theirs", async () => {
+  const root = await sandbox();
+  // On Btrfs and tmpfs a directory's own inode holds no blocks, so it ties
+  // at zero with every empty file below it and a ranked listing of the
+  // subtree puts it last.
+  const crowded = await sizedDirectory(root, "crowded", 300, 0);
+  const footprints = footprintFor(join(root, "index"));
+
+  const reading = await footprints.measure([rawPathFromUtf8(crowded)], new AbortController().signal);
+
+  assert.equal(
+    reading.measurements[0].basis,
+    "measured-allocated",
+    `${reading.measurements[0].explanation} ${JSON.stringify(reading.warnings)}`,
+  );
+  assert.equal(typeof reading.measurements[0].bytes, "bigint");
+});
+
 test("a directory that does not exist is unknown, and the ones beside it still measure", async () => {
   const root = await sandbox();
   const real = await sizedDirectory(root, "real", 2, 1024);
