@@ -84,11 +84,18 @@ scan, and findings with formula-safe CSV and script-free escaped HTML, and `disk
 completion bash|zsh|fish` is generated from the command table. The README carries a demo
 rendered from the TUI's own frames (`scripts/demo-svg.mjs`).
 
-Phase 8 has begun: the package is `disktop@1.0.0` with a minimal file list, four
-prebuilt helpers (x86-64 and ARM64, glibc and musl) built by `scripts/build-release.mjs`
-and verified against `SHA256SUMS` by the locator, a package smoke test that installs the
-packed tarball and runs it, and CI that builds the helpers and tests the tarball on each
-target. What remains for the gate is in the table below.
+Phase 8 is under way. Done and verified locally: the package is `disktop@1.0.0` with a
+minimal file list and no install script; four helpers (x86-64 and ARM64, glibc 2.28+ and
+static musl) are built by `scripts/build-release.mjs` and verified against `SHA256SUMS` by
+the locator; `npm run test:package` packs the tarball, audits it, installs it into a clean
+prefix, and runs it, including a tampered-helper refusal; every mutation, the scanner and
+index, the Node runtime, and the TUI were audited and hardened, each fix with a test that
+failed first; `npm run check`, the Rust gates, the performance budget, and `npm audit`
+(0 vulnerabilities) pass. Still required before the one publication: the CI workflows
+green on GitHub, including the ARM64 runners (the ARM64 helpers were built but could not
+be run here); the host and VM checks the support matrix lists (distribution managers,
+systemd, scoped privilege, SMART, mount topology, SSH); and, after publishing, provenance
+and a registry install verified on clean accounts.
 
 ## Supported environment and packaging
 
