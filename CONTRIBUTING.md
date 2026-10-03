@@ -14,13 +14,28 @@ npm run lint
 npm test
 npm run build
 npm run test:integration
+npm run test:recovery
 npm run test:pty
+npm run test:performance
 npm run fixtures -- standard
 npm run check
 cargo fmt --manifest-path native/disktop-fs/Cargo.toml --all -- --check
 cargo clippy --manifest-path native/disktop-fs/Cargo.toml --all-targets -- -D warnings
 cargo test --manifest-path native/disktop-fs/Cargo.toml
 ```
+
+The packed package has its own smoke test, which needs this machine's release helper in
+`vendor/bin/` and the npm registry for `terminal-kit`:
+
+```sh
+node scripts/build-release.mjs --target host
+npm run test:package
+node scripts/build-release.mjs --clean
+```
+
+A helper in `vendor/bin/` takes precedence over the `build:native` debug build, exactly as
+in an installed package, which is why the last line is there. See
+[vendor/bin/README.md](vendor/bin/README.md) for the release build itself.
 
 Early scaffolding may implement only smoke coverage. Passing a smoke test is not evidence that a feature row is complete. Add behavior-based fixtures and tests as each module is built.
 
@@ -39,13 +54,17 @@ Create destructive test trees under isolated temporary directories. Never aim cl
 
 ## Pull requests
 
-Keep a change focused on an owning module and its contracts. Include the relevant acceptance evidence in the pull request description. Update user documentation, schemas, and the support matrix alongside behavior changes. CI checks TypeScript, Rust, package layout, and Linux distribution smoke tests; all must pass before a phase gate can be claimed complete.
+Keep a change focused on an owning module and its contracts. Include the relevant acceptance evidence in the pull request description. Update user documentation, schemas, and the support matrix alongside behavior changes. CI checks TypeScript, Rust, recovery, the performance budget, the four release helpers, the packed package on x86-64, ARM64, glibc, and musl, and Linux distribution smoke tests; all must pass before a phase gate can be claimed complete.
 
 ## One initial publication
 
-`package.json` remains `private: true` before the release gate. `1.0.0` must contain the complete Linux scope and pass the full Phase 8 checklist before publication. Create a reviewed `v1.0.0` tag only after the package is changed to version `1.0.0` and `private: false`, the four helper binaries and checksums are complete, and the full acceptance matrix has evidence.
+`package.json` is the public `disktop@1.0.0` package: version `1.0.0`, `private: false`, and `files` limited to the compiled JavaScript, the four helpers and their `SHA256SUMS`, the CLI JSON schemas, `README.md`, `LICENSE`, and `CHANGELOG.md`. `tests/package/` holds the exact allowlist and fails on anything else. `1.0.0` must contain the complete Linux scope and pass the full Phase 8 checklist before publication. Create a reviewed `v1.0.0` tag only after the full acceptance matrix has evidence.
 
-Configure a GitHub `npm-publish` environment with required reviewer approval, restrict it to the release branch, and put a one-time granular npm publish token in its `NPM_TOKEN` secret. The token needs **Read and write (publish and stage)** and **Bypass two-factor authentication** for non-interactive CI publishing; give it the shortest practical expiration and revoke it after publication. [npm's token setup guide](https://docs.npmjs.com/creating-and-viewing-access-tokens/) explains these controls. Dispatch `.github/workflows/publish.yml` from the default branch while its tip is still the exact tagged commit, supplying that full SHA and the confirmation text. The workflow checks the workflow event SHA against the tag so provenance identifies the reviewed source. It also checks package metadata, tests, executable checksums, and the packed artifact before publishing that artifact with `--provenance --access public`. The token is supplied only to the final publication step and its presence check.
+Being publishable is not the same as being published. `prepublishOnly` runs `scripts/prepublish-guard.mjs`, which refuses `npm publish` anywhere but `.github/workflows/publish.yml` dispatched on the default branch for the tag matching the version. It is a seatbelt against an accidental publish from a checkout, not a control: environment variables can be set by anyone and `--ignore-scripts` skips it. What controls publication is that the only token able to publish lives in the protected environment below. The workflow publishes the exact tarball it tested with `npm publish <tarball> --ignore-scripts`, and npm runs no lifecycle scripts for a tarball anyway, so the workflow runs the guard as an explicit step instead.
+
+Configure a GitHub `npm-publish` environment with required reviewer approval, restrict it to the release branch, and put a one-time granular npm publish token in its `NPM_TOKEN` secret. The token needs **Read and write (publish and stage)** and **Bypass two-factor authentication** for non-interactive CI publishing; give it the shortest practical expiration and revoke it after publication. [npm's token setup guide](https://docs.npmjs.com/creating-and-viewing-access-tokens/) explains these controls. Dispatch `.github/workflows/publish.yml` from the default branch while its tip is still the exact tagged commit, supplying that full SHA and the confirmation text. The workflow checks the workflow event SHA against the tag so provenance identifies the reviewed source.
+
+The workflow has three jobs and one artifact. `build` checks the tag and package metadata, runs every gate, builds the four helpers with `scripts/build-release.mjs` exactly as CI does, packs the tarball once, records its SHA-256, and runs the package smoke test against that file. `verify` runs the same smoke test on the same file, checked by that SHA-256, on ARM64 glibc and on x86-64 and ARM64 musl. Only then does `publish` start; it is the only job in the `npm-publish` environment and the only one with `id-token: write`, it installs and builds nothing, and it publishes the file with the recorded SHA-256 with `--provenance --access public`. The token is supplied only to the publication step and its presence check.
 
 This one-time token is necessary because npm currently [requires the package to exist](https://github.com/npm/cli/issues/8544) before a trusted publisher can be registered. [npm's first-publication guidance](https://docs.npmjs.com/generating-provenance-statements/) supports token-backed GitHub Actions publishing with provenance. A placeholder public package would violate the one-release contract. After `1.0.0` exists, configure npm trusted publishing for `publish.yml` and restrict token publishing for any later maintenance release; no second public release is planned here.
 

@@ -6,7 +6,7 @@ import { join } from "node:path";
 import { pathToFileURL } from "node:url";
 import { test } from "node:test";
 import { NativeHelperClient } from "../../dist/native/client.js";
-import { helperTarget, locateHelper } from "../../dist/native/locator.js";
+import { CHECKSUM_FILE, helperBinaryName, helperTarget, locateHelper } from "../../dist/native/locator.js";
 
 async function sandbox() {
   return mkdtemp(join(tmpdir(), "disktop-locator-"));
@@ -23,9 +23,16 @@ test("the handshake reports the helper's own version and kernel probe", async ()
     assert.deepEqual(start.hello.supportedOperations, ["hello", "probe", "cancel", "scan", "query-index", "hash-candidates", "inspect", "trash", "erase", "empty-trash", "restore", "dedup-hardlink", "copy-move", "compress", "manager-begin", "manager-append", "manager-finish", "journal-reconcile"]);
     assert.equal(typeof start.hello.kernelCapabilities.openat2.available, "boolean");
     assert.equal(start.hello.platform, "linux");
-    // A locally built helper reports no checksum rather than inventing one.
-    assert.equal(start.location.integrity, "development-build");
-    assert.equal(start.hello.buildChecksum, null);
+    // A locally built helper reports no checksum rather than inventing one. A
+    // release binary that scripts/build-release.mjs put in vendor/bin is found
+    // first, exactly as in an installed package, and carries the one it was
+    // built with.
+    if (start.location.integrity === "development-build") {
+      assert.equal(start.hello.buildChecksum, null);
+    } else {
+      assert.equal(start.location.integrity, "checksum-verified");
+      assert.match(start.hello.buildChecksum, /^[0-9a-f]{64}$/);
+    }
   } finally {
     await start.client.close();
   }
@@ -78,46 +85,78 @@ test("an architecture with no packaged helper is an explicit capability, not a c
   assert.equal(lookup.location.integrity, "development-build");
 });
 
-test("a packaged helper runs only when its recorded checksum matches", async () => {
+/** The line `sha256sum` writes for one file: digest, two spaces, the name. */
+function checksumLine(digest, target) {
+  return `${digest}  ${helperBinaryName(target)}\n`;
+}
+
+test("a packaged helper runs only when SHA256SUMS records its checksum", async () => {
   const directory = await sandbox();
-  const target = helperTarget() ?? "linux-x64-glibc";
-  const binary = join(directory, `disktop-fs-${target}`);
+  const target = helperTarget() ?? "linux-x64-gnu";
+  const binary = join(directory, helperBinaryName(target));
   const contents = await readFile("native/disktop-fs/target/debug/disktop-fs");
+  const digest = createHash("sha256").update(contents).digest("hex");
 
   await writeFile(binary, contents);
   await chmod(binary, 0o755);
 
-  // No recorded checksum: refused rather than trusted.
+  // No checksum file: refused rather than trusted, and never handed to the
+  // development build instead.
   const unrecorded = await locateHelper(target, vendorUrl(directory));
   assert.equal(unrecorded.found, false);
-  assert.match(unrecorded.capability.explanation, /no recorded checksum/);
+  assert.match(unrecorded.capability.explanation, /no recorded checksum in SHA256SUMS/);
+
+  // A checksum file that records another target only: refused.
+  const other = target === "linux-x64-gnu" ? "linux-arm64-gnu" : "linux-x64-gnu";
+  await writeFile(join(directory, CHECKSUM_FILE), checksumLine(digest, other));
+  const elsewhere = await locateHelper(target, vendorUrl(directory));
+  assert.equal(elsewhere.found, false);
+  assert.match(elsewhere.capability.explanation, /no recorded checksum/);
 
   // A recorded checksum that does not match: refused.
-  await writeFile(join(directory, "checksums.json"), JSON.stringify({ [`disktop-fs-${target}`]: "0".repeat(64) }));
+  await writeFile(join(directory, CHECKSUM_FILE), checksumLine("0".repeat(64), target));
   const mismatched = await locateHelper(target, vendorUrl(directory));
   assert.equal(mismatched.found, false);
+  assert.equal(mismatched.capability.status, "unsupported-architecture");
   assert.match(mismatched.capability.explanation, /does not match its recorded checksum/);
 
-  // The real checksum: accepted and marked verified.
-  const digest = createHash("sha256").update(contents).digest("hex");
-  await writeFile(join(directory, "checksums.json"), JSON.stringify({ [`disktop-fs-${target}`]: digest }));
+  // The right digest on a line the strict reader cannot read is no evidence.
+  await writeFile(join(directory, CHECKSUM_FILE), `${digest} ${helperBinaryName(target)}\n`);
+  const malformed = await locateHelper(target, vendorUrl(directory));
+  assert.equal(malformed.found, false);
+  assert.match(malformed.capability.explanation, /not a well-formed checksum list/);
+
+  // The old JSON form is not read at all.
+  await writeFile(join(directory, CHECKSUM_FILE), JSON.stringify({ [helperBinaryName(target)]: digest }));
+  assert.equal((await locateHelper(target, vendorUrl(directory))).found, false);
+
+  // The real checksum, as sha256sum writes it: accepted and marked verified.
+  await writeFile(join(directory, CHECKSUM_FILE), checksumLine(digest, target));
   const verified = await locateHelper(target, vendorUrl(directory));
   assert.equal(verified.found, true);
   assert.equal(verified.location.integrity, "checksum-verified");
   assert.equal(verified.location.executablePath, binary);
+
+  // One byte changed after packing: refused, with no fallback.
+  await writeFile(binary, Buffer.concat([contents, Buffer.from([0])]));
+  const tampered = await locateHelper(target, vendorUrl(directory));
+  assert.equal(tampered.found, false);
+  assert.match(tampered.capability.explanation, /does not match its recorded checksum/);
 });
 
-test("a helper that is not executable is not run", async () => {
+test("a packaged helper that is not executable is refused, not replaced by another binary", async () => {
   const directory = await sandbox();
-  const target = helperTarget() ?? "linux-x64-glibc";
-  const binary = join(directory, `disktop-fs-${target}`);
+  const target = helperTarget() ?? "linux-x64-gnu";
+  const binary = join(directory, helperBinaryName(target));
   await writeFile(binary, await readFile("native/disktop-fs/target/debug/disktop-fs"));
   await chmod(binary, 0o644);
 
   const digest = createHash("sha256").update(await readFile(binary)).digest("hex");
-  await writeFile(join(directory, "checksums.json"), JSON.stringify({ [`disktop-fs-${target}`]: digest }));
+  await writeFile(join(directory, CHECKSUM_FILE), checksumLine(digest, target));
 
   const lookup = await locateHelper(target, vendorUrl(directory));
-  // It falls through to the development build rather than running a non-executable file.
-  assert.notEqual(lookup.found === true && lookup.location.executablePath, binary);
+  // An unpacker that dropped the mode leaves an install that says so, rather
+  // than one that quietly runs the development build or nothing at all.
+  assert.equal(lookup.found, false);
+  assert.match(lookup.capability.explanation, /not executable/);
 });
