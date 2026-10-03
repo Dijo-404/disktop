@@ -2128,6 +2128,7 @@ fn query_request(arguments: &QueryIndexArguments) -> Result<QueryRequest, String
         filter: EntryFilter {
             // Resolved against the index once the connection is open.
             under: None,
+            at: None,
             parent_id: optional_u64(filter.parent_id.as_deref(), "parentId")?
                 .map(|id| id.min(i64::MAX as u64) as i64),
             name_contains: filter.name_contains.clone(),

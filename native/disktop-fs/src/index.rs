@@ -198,14 +198,25 @@ CREATE TABLE entry (
 /// Built once, after the last row is in. Building an index over a finished
 /// table is a sort; keeping it ordered while rows arrive in walk order is a
 /// random write per row per index.
+///
+/// Every index ends in the row ID implicitly, which is the tie-break every
+/// page sorts by, so a page read from one in either direction needs no sort.
+/// - `entry_child_*`: one directory's children in each order a listing can
+///   ask for. Browsing a directory reads exactly one page of these.
+/// - `entry_allocated`, `entry_apparent`, `entry_modified`: a large subtree,
+///   or the whole scan, ranked. Ranking by name is rare enough to sort.
+/// - `entry_type`, `entry_owner`: covering indexes for the two aggregates,
+///   which also serve an equality filter on extension or owner.
 const INDEXES: &str = "
-CREATE INDEX entry_allocated ON entry(allocated_bytes, id);
-CREATE INDEX entry_apparent ON entry(apparent_bytes, id);
-CREATE INDEX entry_modified ON entry(modified_ns, id);
-CREATE INDEX entry_name ON entry(search_name, id);
-CREATE INDEX entry_extension ON entry(extension);
-CREATE INDEX entry_parent ON entry(parent_id);
-CREATE INDEX entry_owner ON entry(owner_id);
+CREATE INDEX entry_child_allocated ON entry(parent_id, allocated_bytes);
+CREATE INDEX entry_child_apparent ON entry(parent_id, apparent_bytes);
+CREATE INDEX entry_child_modified ON entry(parent_id, modified_ns);
+CREATE INDEX entry_child_name ON entry(parent_id, search_name);
+CREATE INDEX entry_allocated ON entry(allocated_bytes);
+CREATE INDEX entry_apparent ON entry(apparent_bytes);
+CREATE INDEX entry_modified ON entry(modified_ns);
+CREATE INDEX entry_type ON entry(extension, kind, shared, allocated_bytes, apparent_bytes);
+CREATE INDEX entry_owner ON entry(owner_id, kind, shared, allocated_bytes, apparent_bytes);
 ";
 
 /// A scan's writer. Rows go into a partial file that only this writer holds;
@@ -793,14 +804,22 @@ pub fn subtree_range(connection: &Connection, path: &[u8]) -> rusqlite::Result<O
     let Some((mut current, root)) = best else {
         return Ok(None);
     };
-    let mut child =
-        connection.prepare("SELECT id FROM entry WHERE parent_id = ?1 AND name = ?2")?;
+    // The searchable name narrows the lookup to an index seek, so resolving a
+    // path through a directory of half a million entries reads a handful of
+    // rows rather than all of them; the byte comparison is the one that
+    // decides, because two names can share a searchable form.
+    let mut child = connection.prepare(
+        "SELECT id FROM entry INDEXED BY entry_child_name
+         WHERE parent_id = ?1 AND search_name = ?2 AND name = ?3",
+    )?;
     for segment in path[root.len()..].split(|byte| *byte == b'/') {
         if segment.is_empty() {
             continue;
         }
         let found: Option<i64> = child
-            .query_row(params![current, segment], |row| row.get(0))
+            .query_row(params![current, searchable(segment), segment], |row| {
+                row.get(0)
+            })
             .optional()?;
         let Some(next) = found else {
             return Ok(None);
