@@ -518,3 +518,13 @@ test("a command that throws after Ctrl+C is reported as interrupted, not as a cr
   assert.equal(envelope.error.code, "cancelled");
   assert.equal(context.signals.listening(), 0);
 });
+
+test("find and explore refuse a --limit above the 1000 their message promises, like clean and history", async () => {
+  for (const args of [["find", "empty", "--limit", "5000", "--json"], ["explore", "--limit", "1001", "--json"]]) {
+    const context = actionContext();
+    const status = await runCli(args, context);
+    assert.equal(status, 2, args.join(" "));
+    assert.equal(JSON.parse(context.captured.stdout).error.code, "invalid-input", args.join(" "));
+    assert.equal(context.recordedActions.find, undefined, "nothing was searched");
+  }
+});

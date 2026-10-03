@@ -62,7 +62,7 @@ export async function runExplore(context: CliContext, options: ExploreOptions): 
       "'--cursor' takes a cursor Disktop printed. Run the command without it to start again.",
     );
   }
-  if (options.limit !== undefined && !/^[1-9][0-9]*$/.test(options.limit)) {
+  if (options.limit !== undefined && (!/^[1-9][0-9]{0,3}$/.test(options.limit) || Number(options.limit) > 1000)) {
     return refuse(context, options.asJson, "invalid-input", "'--limit' accepts a whole number of entries from 1 to 1000.");
   }
 

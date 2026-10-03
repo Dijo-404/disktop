@@ -383,7 +383,7 @@ export async function runFind(context: CliContext, options: FindOptions): Promis
       message: `'find' takes one of ${FIND_KINDS.join(", ")}, not '${options.kind}'.`,
     });
   }
-  if (options.limit !== undefined && !/^[1-9][0-9]{0,3}$/.test(options.limit)) {
+  if (options.limit !== undefined && (!/^[1-9][0-9]{0,3}$/.test(options.limit) || Number(options.limit) > 1000)) {
     return refuse(context, "find", options.asJson, {
       code: "invalid-input",
       message: "'--limit' accepts a whole number of entries from 1 to 1000.",
