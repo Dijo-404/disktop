@@ -100,11 +100,20 @@ fn stream_and_verify(source: RawFd, staged: RawFd) -> io::Result<u64> {
     Ok(offset)
 }
 
+/// The mode a directory is written with while its contents are copied into it.
+///
+/// Its own permissions are applied once everything inside it has arrived: a
+/// read-only directory — a Go module cache is full of them — could not be
+/// copied into at all if it took its final mode first.
+const WORKING_DIRECTORY_MODE: u32 = 0o700;
+
 /// Copy a whole tree into `destination_parent` under `name`.
 ///
 /// The root directory is created under the staging name; everything below it
 /// keeps its own name, because only the thing being published needs hiding
-/// until it is complete.
+/// until it is complete. The staging name must be free: a directory already
+/// there is somebody else's, and is neither written into nor reported as
+/// created.
 pub fn copy_tree(
     source: RawFd,
     destination_parent: RawFd,
@@ -112,25 +121,26 @@ pub fn copy_tree(
     permissions: u32,
     on_created: &mut dyn FnMut(RawFd) -> io::Result<()>,
 ) -> io::Result<Copied> {
-    sys::mkdirat(destination_parent, name, permissions)?;
+    sys::mkdirat_exclusive(destination_parent, name, WORKING_DIRECTORY_MODE)?;
     let staged = owned(sys::open_directory_no_symlinks(destination_parent, name)?);
     on_created(staged.as_raw_fd())?;
-    sys::fchmod(staged.as_raw_fd(), permissions)?;
     let mut copied = Copied { files: 0, bytes: 0 };
-    copy_children(source, staged, &mut copied)?;
+    copy_children(source, staged, permissions, &mut copied)?;
     Ok(copied)
 }
 
 /// One directory being copied: where it is read from, where it is written to,
-/// and the names it has left, in reverse so the next one is a `pop`.
+/// the permissions it gets once it is complete, and the names it has left, in
+/// reverse so the next one is a `pop`.
 struct Frame {
     source: OwnedFd,
     destination: OwnedFd,
+    permissions: u32,
     names: Vec<Vec<u8>>,
 }
 
 impl Frame {
-    fn enter(source: OwnedFd, destination: OwnedFd) -> io::Result<Frame> {
+    fn enter(source: OwnedFd, destination: OwnedFd, permissions: u32) -> io::Result<Frame> {
         // Names are read before anything is written, so what `readdir` returns
         // is not affected by what this is creating elsewhere.
         let mut stream = sys::Directory::from_descriptor(duplicate(source.as_raw_fd())?)?;
@@ -142,6 +152,7 @@ impl Frame {
         Ok(Frame {
             source,
             destination,
+            permissions,
             names,
         })
     }
@@ -152,11 +163,23 @@ impl Frame {
 /// The directories being copied are kept on an explicit stack rather than the
 /// call stack, so no tree is deep enough to crash the helper partway through a
 /// copy; past `subtree::MAX_DEPTH` levels it stops with an error instead.
-fn copy_children(source: RawFd, destination: OwnedFd, copied: &mut Copied) -> io::Result<()> {
-    let mut stack = vec![Frame::enter(owned(duplicate(source)?), destination)?];
+fn copy_children(
+    source: RawFd,
+    destination: OwnedFd,
+    permissions: u32,
+    copied: &mut Copied,
+) -> io::Result<()> {
+    let mut stack = vec![Frame::enter(
+        owned(duplicate(source)?),
+        destination,
+        permissions,
+    )?];
     while let Some(frame) = stack.last_mut() {
         let Some(name) = frame.names.pop() else {
             let finished = stack.pop().expect("the frame being copied is on the stack");
+            // Everything inside it has arrived, so it can take its own mode
+            // now, even one that would have refused the writes above.
+            sys::fchmod(finished.destination.as_raw_fd(), finished.permissions)?;
             // The directory's own entries have to be durable too, or a crash
             // could leave a published name pointing at a directory missing
             // half of what was copied into it.
@@ -177,10 +200,9 @@ fn copy_children(source: RawFd, destination: OwnedFd, copied: &mut Copied) -> io
                 // another filesystem, and copying it here would quietly pull
                 // in something nobody reviewed.
                 let child = owned(sys::open_child_directory(source, &name, false)?);
-                sys::mkdirat(destination, &name, metadata.permissions)?;
+                sys::mkdirat_exclusive(destination, &name, WORKING_DIRECTORY_MODE)?;
                 let into = owned(sys::open_directory_no_symlinks(destination, &name)?);
-                sys::fchmod(into.as_raw_fd(), metadata.permissions)?;
-                stack.push(Frame::enter(child, into)?);
+                stack.push(Frame::enter(child, into, metadata.permissions)?);
             }
             EntryKind::File => {
                 let descriptor = owned(sys::openat_read_no_symlinks(source, &name)?);

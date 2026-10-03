@@ -29,6 +29,42 @@ use std::sync::atomic::{AtomicBool, Ordering};
 const PRIVATE_DIRECTORY_MODE: u32 = 0o700;
 const PRIVATE_FILE_MODE: u32 = 0o600;
 
+/// The moments inside an item where another process acting at the same time
+/// matters most. A test stands in for that process here; a release build does
+/// nothing at them.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(crate) enum Checkpoint {
+    /// A staging name was found free and is about to be created.
+    BeforeStaging,
+}
+
+#[cfg(test)]
+type CheckpointHook = Box<dyn FnMut(Checkpoint)>;
+
+#[cfg(test)]
+thread_local! {
+    static CHECKPOINT: std::cell::RefCell<Option<CheckpointHook>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+fn checkpoint(at: Checkpoint) {
+    #[cfg(test)]
+    CHECKPOINT.with(|hook| {
+        if let Some(hook) = hook.borrow_mut().as_mut() {
+            hook(at);
+        }
+    });
+    #[cfg(not(test))]
+    let _ = at;
+}
+
+/// Act as another process would, at `checkpoint`, for the rest of this thread's
+/// test.
+#[cfg(test)]
+pub(crate) fn at_checkpoint(hook: impl FnMut(Checkpoint) + 'static) {
+    CHECKPOINT.with(|slot| *slot.borrow_mut() = Some(Box::new(hook)));
+}
+
 pub struct Target {
     pub path: Vec<u8>,
     pub expected: Fingerprint,
@@ -851,9 +887,9 @@ fn compress_one(
         }
     };
 
-    let publish = sys::renameat_no_replace(destination, &staged, destination, &archive_name);
+    let publish = sys::renameat_no_replace(destination, &staged.name, destination, &archive_name);
     if publish.is_err() {
-        let _ = sys::unlinkat(destination, &staged, false);
+        discard_staged(destination, &staged);
     }
     staging.forget();
     if let Err(error) = publish {
@@ -905,7 +941,7 @@ fn stage_archive(
     live: &sys::Metadata,
     archive_name: &[u8],
     record: &StagingRecord<'_>,
-) -> Result<Vec<u8>, (&'static str, String)> {
+) -> Result<Staged, (&'static str, String)> {
     for attempt in 0..64u32 {
         let mut staging = archive_name.to_vec();
         staging.extend_from_slice(
@@ -914,8 +950,9 @@ fn stage_archive(
         if sys::target_exists(destination, &staging) {
             continue;
         }
-        let staged_name = staging.clone();
-        let mut on_created = |descriptor| record.record(&staged_name, descriptor);
+        checkpoint(Checkpoint::BeforeStaging);
+        let mut created = None;
+        let mut on_created = |descriptor| record.record(&staging, descriptor, &mut created);
 
         // An archive holds everything that was inside the source, including
         // whatever was private in there, so it takes Disktop's own private mode
@@ -975,10 +1012,10 @@ fn stage_archive(
             result
         };
 
-        return match outcome {
-            Ok(()) => Ok(staging),
-            Err(error) => {
-                let _ = sys::unlinkat(destination, &staging, false);
+        return match settle_staging(destination, &staging, EntryKind::File, created, outcome) {
+            Settled::Ready(staged) => Ok(staged),
+            Settled::Taken => continue,
+            Settled::Failed(error) => {
                 record.forget();
                 Err(describe_copy(error))
             }
@@ -988,6 +1025,54 @@ fn stage_archive(
         "internal-error",
         "No staging name was free in the destination directory.".to_owned(),
     ))
+}
+
+/// Something an item created under a staging name, and the inode it got.
+///
+/// The identity is what makes removing it safe: a staging name is only ever
+/// removed while it still holds the inode this process created there, so a
+/// name somebody else took — before the create or after it — is never
+/// mistaken for Disktop's own.
+struct Staged {
+    name: Vec<u8>,
+    identity: Identity,
+    kind: EntryKind,
+}
+
+enum Settled {
+    Ready(Staged),
+    /// The name was taken between the check and the create. Nothing was
+    /// created and nothing is removed; the next name is tried.
+    Taken,
+    Failed(std::io::Error),
+}
+
+/// What a staging attempt left, and what to do about it.
+fn settle_staging(
+    destination: libc::c_int,
+    name: &[u8],
+    kind: EntryKind,
+    created: Option<Identity>,
+    outcome: std::io::Result<()>,
+) -> Settled {
+    let staged = created.map(|identity| Staged {
+        name: name.to_vec(),
+        identity,
+        kind,
+    });
+    match (outcome, staged) {
+        (Ok(()), Some(staged)) => Settled::Ready(staged),
+        (Ok(()), None) => Settled::Failed(std::io::Error::other(
+            "the staged output's identity could not be read, so it was not published",
+        )),
+        (Err(error), None) if error.raw_os_error() == Some(libc::EEXIST) => Settled::Taken,
+        (Err(error), staged) => {
+            if let Some(staged) = &staged {
+                discard_staged(destination, staged);
+            }
+            Settled::Failed(error)
+        }
+    }
 }
 
 struct MoveContext<'a> {
@@ -1121,12 +1206,12 @@ fn move_one(
     // actually decides, and it decides without destroying what they made.
     let publish = sys::renameat_no_replace(
         context.destination,
-        &staged,
+        &staged.name,
         context.destination,
         &parent.name,
     );
     if publish.is_err() {
-        discard_staged(context.destination, &staged, live.kind);
+        discard_staged(context.destination, &staged);
     }
     staging.forget();
     if let Err(error) = publish {
@@ -1194,15 +1279,22 @@ struct StagingRecord<'a> {
 }
 
 impl StagingRecord<'_> {
-    fn record(&self, name: &[u8], descriptor: libc::c_int) -> std::io::Result<()> {
+    /// Journal what was just created under `name`, and keep its identity in
+    /// `created` whether or not the journal write works: it exists either way,
+    /// and the caller is the one that has to take it back.
+    fn record(
+        &self,
+        name: &[u8],
+        descriptor: libc::c_int,
+        created: &mut Option<Identity>,
+    ) -> std::io::Result<()> {
         let metadata = sys::metadata_of(descriptor)?;
-        self.record_identity(
-            name,
-            &Identity {
-                device: metadata.device,
-                inode: metadata.inode,
-            },
-        )
+        let identity = Identity {
+            device: metadata.device,
+            inode: metadata.inode,
+        };
+        *created = Some(identity);
+        self.record_identity(name, &identity)
     }
 
     fn record_identity(&self, name: &[u8], identity: &Identity) -> std::io::Result<()> {
@@ -1221,13 +1313,13 @@ impl StagingRecord<'_> {
     }
 }
 
-/// Copy one reviewed target under a staging name, returning that name.
+/// Copy one reviewed target under a staging name, returning what was staged.
 fn stage_copy(
     parent: &guard::ResolvedParent,
     destination: libc::c_int,
     live: &sys::Metadata,
     staging: &StagingRecord<'_>,
-) -> Result<Vec<u8>, (&'static str, String)> {
+) -> Result<Staged, (&'static str, String)> {
     for attempt in 0..64u32 {
         let mut name = parent.name.clone();
         name.extend_from_slice(
@@ -1236,6 +1328,9 @@ fn stage_copy(
         if sys::target_exists(destination, &name) {
             continue;
         }
+        checkpoint(Checkpoint::BeforeStaging);
+        let mut created = None;
+        let mut on_created = |descriptor| staging.record(&name, descriptor, &mut created);
 
         let outcome = if live.kind == EntryKind::Directory {
             let source = sys::open_directory_no_symlinks(parent.descriptor(), &parent.name)
@@ -1245,7 +1340,7 @@ fn stage_copy(
                 destination,
                 &name,
                 live.permissions,
-                &mut |descriptor| staging.record(&name, descriptor),
+                &mut on_created,
             )
             .map(|_| ());
             sys::close(source);
@@ -1259,17 +1354,17 @@ fn stage_copy(
                 &name,
                 live.permissions,
                 Some(live.modified_nanoseconds),
-                &mut |descriptor| staging.record(&name, descriptor),
+                &mut on_created,
             )
             .map(|_| ());
             sys::close(source);
             result
         };
 
-        return match outcome {
-            Ok(()) => Ok(name),
-            Err(error) => {
-                discard_staged(destination, &name, live.kind);
+        return match settle_staging(destination, &name, live.kind, created, outcome) {
+            Settled::Ready(staged) => Ok(staged),
+            Settled::Taken => continue,
+            Settled::Failed(error) => {
                 staging.forget();
                 Err(describe_copy(error))
             }
@@ -1298,8 +1393,20 @@ fn describe_copy(error: std::io::Error) -> (&'static str, String) {
     )
 }
 
-fn discard_staged(destination: libc::c_int, name: &[u8], kind: EntryKind) {
-    let _ = remove_entry(destination, name, kind);
+/// Take back what an item staged, if the name still holds it.
+///
+/// A staging name is a name in a directory other people can write to. Whatever
+/// is there now is removed only if it is the very inode this process created,
+/// so a failed copy can never take somebody else's file down with it.
+fn discard_staged(destination: libc::c_int, staged: &Staged) {
+    match sys::metadata_at(destination, &staged.name) {
+        Ok(live)
+            if live.device == staged.identity.device && live.inode == staged.identity.inode =>
+        {
+            let _ = remove_staged(destination, &staged.name, staged.kind);
+        }
+        _ => {}
+    }
 }
 
 /// Trash or erase the source, once its copy is published and verified.
@@ -2219,7 +2326,6 @@ fn empty_one(
     settle(journal, journal_id, position, target, report)
 }
 
-/// Remove everything inside a directory, leaving the directory itself.
 /// Release what interrupted actions staged and never published.
 ///
 /// Only a name still holding the exact inode the helper journalled when it
@@ -2266,7 +2372,7 @@ fn release_one(left: &crate::journal::AbandonedStaging) -> Released {
         Err(error) if error.raw_os_error() == Some(libc::ENOENT) => Released::Gone,
         Err(_) => Released::Kept,
         Ok(live) if live.device == identity.device && live.inode == identity.inode => {
-            if remove_entry(parent.descriptor(), &parent.name, live.kind).is_ok() {
+            if remove_staged(parent.descriptor(), &parent.name, live.kind).is_ok() {
                 Released::Removed
             } else {
                 Released::Kept
@@ -2276,14 +2382,29 @@ fn release_one(left: &crate::journal::AbandonedStaging) -> Released {
     }
 }
 
+/// Remove everything inside a directory, leaving the directory itself.
 fn empty_directory(parent: libc::c_int, name: &[u8]) -> std::io::Result<()> {
     // `remove_children` takes the descriptor and closes it with its stream.
-    remove_children(open_for_removal(parent, name)?)
+    remove_children(open_for_removal(parent, name)?, Removal::AsFound)
 }
 
 /// Open a directory being removed: never through a symlink, never into another mount.
 fn open_for_removal(parent: libc::c_int, name: &[u8]) -> std::io::Result<libc::c_int> {
     sys::open_child_directory(parent, name, false)
+}
+
+/// Whose tree a removal is taking down, which decides what it may do to the
+/// directories in it.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Removal {
+    /// The user's own data. A directory this user may not write to stops the
+    /// removal with `EACCES`: Disktop does not change permissions on somebody's
+    /// files to get a deletion through.
+    AsFound,
+    /// Something this process staged and is taking back. A copy of a
+    /// read-only directory is read-only too once it is complete, and Disktop
+    /// owns it, so each directory is made writable before it is emptied.
+    Staged,
 }
 
 /// Remove one entry, recursively if it is a directory.
@@ -2292,11 +2413,30 @@ fn open_for_removal(parent: libc::c_int, name: &[u8]) -> std::io::Result<libc::c
 /// what makes erasing a directory safe: a link inside it to somewhere else is
 /// removed, and what it pointed at is not.
 fn remove_entry(parent: libc::c_int, name: &[u8], kind: EntryKind) -> std::io::Result<()> {
+    remove_entry_as(parent, name, kind, Removal::AsFound)
+}
+
+/// Remove something this process staged; see `Removal::Staged`.
+fn remove_staged(parent: libc::c_int, name: &[u8], kind: EntryKind) -> std::io::Result<()> {
+    remove_entry_as(parent, name, kind, Removal::Staged)
+}
+
+fn remove_entry_as(
+    parent: libc::c_int,
+    name: &[u8],
+    kind: EntryKind,
+    removal: Removal,
+) -> std::io::Result<()> {
     if kind != EntryKind::Directory {
         return sys::unlinkat(parent, name, false);
     }
     let descriptor = open_for_removal(parent, name)?;
-    remove_children(descriptor)?;
+    if removal == Removal::Staged {
+        // Through the descriptor just opened, never by name: a name can be
+        // swapped for a symlink in between, and a chmod by name would follow it.
+        let _ = sys::fchmod(descriptor, PRIVATE_DIRECTORY_MODE);
+    }
+    remove_children(descriptor, removal)?;
     sys::unlinkat(parent, name, true)
 }
 
@@ -2310,7 +2450,7 @@ fn remove_entry(parent: libc::c_int, name: &[u8], kind: EntryKind) -> std::io::R
 /// call stack, so no tree is deep enough to crash the helper halfway through a
 /// removal; past `subtree::MAX_DEPTH` levels it stops with an error instead.
 /// A directory is only ever removed once everything below it has gone.
-fn remove_children(descriptor: libc::c_int) -> std::io::Result<()> {
+fn remove_children(descriptor: libc::c_int, removal: Removal) -> std::io::Result<()> {
     struct Frame {
         directory: sys::Directory,
         names: Vec<Vec<u8>>,
@@ -2369,6 +2509,9 @@ fn remove_children(descriptor: libc::c_int) -> std::io::Result<()> {
             return Err(crate::subtree::too_deep());
         }
         let child = open_for_removal(descriptor, &name)?;
+        if removal == Removal::Staged {
+            let _ = sys::fchmod(child, PRIVATE_DIRECTORY_MODE);
+        }
         stack.push(enter(child, Some(name))?);
     }
     Ok(())
@@ -3039,5 +3182,196 @@ mod tests {
             open_for_removal(parent, b"inner").expect("a directory on the same filesystem opens");
         sys::close(inner);
         sys::close(parent);
+    }
+
+    fn mode(path: &std::path::Path) -> u32 {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::symlink_metadata(path)
+            .unwrap()
+            .permissions()
+            .mode()
+            & 0o7777
+    }
+
+    fn moving(
+        sandbox: &Sandbox,
+        relative: &[u8],
+        disposition: SourceDisposition,
+    ) -> CopyMoveRequest {
+        CopyMoveRequest {
+            plan_id: "plan-0123456789abcd".to_owned(),
+            journal_directory: sandbox.path().join("state"),
+            home_trash_directory: joined(sandbox, b"trash-home"),
+            destination_directory: joined(sandbox, b"elsewhere"),
+            source_disposition: disposition,
+            targets: vec![reviewed(&joined(sandbox, relative), 0)],
+        }
+    }
+
+    /// A Go module cache is full of directories nobody may write to. A copy
+    /// that gave each directory its mode before writing into it could not copy
+    /// one at all.
+    #[test]
+    fn a_tree_holding_a_read_only_directory_is_moved_with_its_modes() {
+        if unsafe { libc::geteuid() } == 0 {
+            return;
+        }
+        let sandbox = Sandbox::new("move-read-only");
+        sandbox.directory(b"state");
+        sandbox.directory(b"elsewhere");
+        sandbox.directory(b"work/tree/ro/inner");
+        sandbox.file(b"work/tree/ro/file", 300);
+        sandbox.file(b"work/tree/ro/inner/deeper", 200);
+        sandbox.chmod(b"work/tree/ro", 0o555);
+        sandbox.chmod(b"work/tree", 0o750);
+        let request = moving(&sandbox, b"work/tree", SourceDisposition::Trash);
+
+        let (summary, items) =
+            collect(|report| run_copy_move(&request, report, &AtomicBool::new(false)));
+
+        assert_eq!(
+            summary.ok().expect("the move ran").completed,
+            1,
+            "{:?}",
+            items[0].message
+        );
+        let arrived = sandbox.path().join("elsewhere/tree");
+        assert_eq!(mode(&arrived), 0o750, "the top keeps its mode");
+        assert_eq!(mode(&arrived.join("ro")), 0o555, "so does the one inside");
+        assert_eq!(std::fs::read(arrived.join("ro/file")).unwrap().len(), 300);
+        assert_eq!(
+            std::fs::read(arrived.join("ro/inner/deeper"))
+                .unwrap()
+                .len(),
+            200
+        );
+    }
+
+    fn staging_name(name: &str, attempt: u32) -> String {
+        format!("{name}.disktop-partial-{}-{attempt}", std::process::id())
+    }
+
+    /// The staging name is checked and then created, and somebody can take it
+    /// in between. What they put there is theirs: it is not written into, not
+    /// published as the copy, and not removed when Disktop gives up on it.
+    #[test]
+    fn a_directory_somebody_puts_at_the_staging_name_is_neither_used_nor_removed() {
+        let sandbox = Sandbox::new("staging-taken-directory");
+        sandbox.directory(b"state");
+        sandbox.directory(b"elsewhere");
+        sandbox.directory(b"work/tree");
+        sandbox.file(b"work/tree/mine", 100);
+        let request = moving(&sandbox, b"work/tree", SourceDisposition::Trash);
+
+        let theirs = sandbox
+            .path()
+            .join("elsewhere")
+            .join(staging_name("tree", 0));
+        let planted = theirs.clone();
+        at_checkpoint(move |at| {
+            if at == Checkpoint::BeforeStaging && !planted.exists() {
+                std::fs::create_dir(&planted).unwrap();
+                std::fs::write(planted.join("theirs"), b"not Disktop's").unwrap();
+            }
+        });
+        let (summary, items) =
+            collect(|report| run_copy_move(&request, report, &AtomicBool::new(false)));
+
+        assert_eq!(
+            summary.ok().expect("the move ran").completed,
+            1,
+            "{:?}",
+            items[0].message
+        );
+        assert_eq!(
+            std::fs::read(theirs.join("theirs")).unwrap(),
+            b"not Disktop's",
+            "what somebody else made is still there, untouched",
+        );
+        let published = sandbox.path().join("elsewhere/tree");
+        assert!(published.join("mine").exists());
+        assert!(
+            !published.join("theirs").exists(),
+            "their file was not published as part of the copy"
+        );
+    }
+
+    #[test]
+    fn a_file_somebody_puts_at_the_staging_name_is_not_removed() {
+        let sandbox = Sandbox::new("staging-taken-file");
+        sandbox.directory(b"state");
+        sandbox.directory(b"elsewhere");
+        sandbox.directory(b"work");
+        sandbox.file(b"work/data.bin", 4096);
+        let request = moving(&sandbox, b"work/data.bin", SourceDisposition::Trash);
+
+        let theirs = sandbox
+            .path()
+            .join("elsewhere")
+            .join(staging_name("data.bin", 0));
+        let planted = theirs.clone();
+        at_checkpoint(move |at| {
+            if at == Checkpoint::BeforeStaging && !planted.exists() {
+                std::fs::write(&planted, b"not Disktop's").unwrap();
+            }
+        });
+        let (summary, items) =
+            collect(|report| run_copy_move(&request, report, &AtomicBool::new(false)));
+
+        assert_eq!(
+            summary.ok().expect("the move ran").completed,
+            1,
+            "{:?}",
+            items[0].message
+        );
+        assert_eq!(std::fs::read(&theirs).unwrap(), b"not Disktop's");
+        assert_eq!(
+            std::fs::read(sandbox.path().join("elsewhere/data.bin"))
+                .unwrap()
+                .len(),
+            4096
+        );
+    }
+
+    /// A crash can leave a staged copy of a read-only directory behind, and it
+    /// is Disktop's own: reconciliation takes it back rather than leaving it
+    /// because its own copy refused the removal.
+    #[test]
+    fn a_staged_copy_holding_a_read_only_directory_is_released_after_a_crash() {
+        if unsafe { libc::geteuid() } == 0 {
+            return;
+        }
+        let sandbox = Sandbox::new("release-read-only");
+        sandbox.directory(b"elsewhere/staged/ro");
+        sandbox.file(b"elsewhere/staged/ro/file", 100);
+        sandbox.chmod(b"elsewhere/staged/ro", 0o555);
+        sandbox.chmod(b"elsewhere/staged", 0o555);
+        let staged = joined(&sandbox, b"elsewhere/staged");
+        let live = std::fs::symlink_metadata(sandbox.path().join("elsewhere/staged")).unwrap();
+
+        let journal = Journal::open(&sandbox.path().join("state")).unwrap();
+        let id = journal
+            .begin("plan-0123456789abcd", "copy-move", None)
+            .unwrap();
+        journal
+            .record_intent(&id, 0, b"/work/tree", Some(b"/elsewhere/tree"))
+            .unwrap();
+        use std::os::unix::fs::MetadataExt;
+        journal
+            .record_staging(
+                &id,
+                0,
+                &staged,
+                &Identity {
+                    device: live.dev(),
+                    inode: live.ino(),
+                },
+            )
+            .unwrap();
+        crate::journal::tests_support::abandon(&journal, &id);
+        journal.reconcile().unwrap();
+
+        assert_eq!(release_abandoned_staging(&journal, 1000).unwrap(), 1);
+        assert!(!sandbox.path().join("elsewhere/staged").exists());
     }
 }
