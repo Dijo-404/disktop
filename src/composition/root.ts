@@ -20,6 +20,8 @@ import type { NotificationOutcome } from "../ports/notifications.js";
 import { rawPathFromUtf8 } from "../domain/paths.js";
 import { createLinuxInventory } from "../platform/linux/inventory/index.js";
 import { createAccountNames } from "../platform/linux/accounts.js";
+import { inInitialUserNamespace, verifyRootOwnedInstall } from "../platform/linux/install-ownership.js";
+import { StartupRefused } from "../domain/errors.js";
 import { createIndexFootprint } from "../platform/linux/footprint.js";
 import { createPathProbe } from "../platform/linux/probe.js";
 import { createToolPort } from "../platform/linux/tools.js";
@@ -91,6 +93,16 @@ export interface CompositionOptions {
 
 export async function createServices(options: CompositionOptions = {}): Promise<Services> {
   const environment = options.environment ?? process.env;
+  if ((process.geteuid?.() ?? -1) === 0 && inInitialUserNamespace()) {
+    const packageRoot = dirname(dirname(dirname(realpathSync(process.argv[1] ?? ""))));
+    const install = await verifyRootOwnedInstall(packageRoot);
+    if (!install.ok) {
+      throw new StartupRefused({
+        code: "permission-denied",
+        message: `Disktop runs as root only from a root-owned install, never 'sudo npx': ${install.reason}`,
+      });
+    }
+  }
   const locations = resolveLocations(environment, options.homeDirectory ?? homedir());
   const loaded = await loadConfigFile(locations.configFile);
   const config = loaded.config;

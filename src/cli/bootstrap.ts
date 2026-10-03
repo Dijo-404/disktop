@@ -1,3 +1,4 @@
+import { StartupRefused } from "../domain/errors.js";
 import type { CliContext } from "./context.js";
 import { EXIT, buildEnvelope, writeEnvelope } from "./output.js";
 import type { CliOutput } from "./parser.js";
@@ -56,6 +57,8 @@ export async function bootstrapCli(
  */
 function reportUnexpected(args: readonly string[], output: CliOutput, error: unknown): number {
   const message = error instanceof Error ? error.message : "The command failed for an unknown reason.";
+  const failure =
+    error instanceof StartupRefused ? error.failure : { code: "internal-error" as const, message };
   if (args.includes("--json")) {
     writeEnvelope(
       output.stdout,
@@ -65,11 +68,13 @@ function reportUnexpected(args: readonly string[], output: CliOutput, error: unk
         status: "error",
         exitCode: EXIT.operationalError,
         warnings: [],
-        failure: { code: "internal-error", message },
+        failure,
       }),
     );
   } else {
-    output.stderr(`Disktop could not complete that command: ${message}\n`);
+    output.stderr(
+      error instanceof StartupRefused ? `${message}\n` : `Disktop could not complete that command: ${message}\n`,
+    );
   }
   return EXIT.operationalError;
 }
