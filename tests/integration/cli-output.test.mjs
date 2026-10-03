@@ -88,12 +88,24 @@ test("alerts check validates and reports 0, 1, or 3 and nothing else", () => {
   }
 });
 
-test("an unbuilt command still emits a schema-valid error envelope on stdout", () => {
-  const result = disktop(["report", "--json"]);
+test("a refused command still emits a schema-valid error envelope on stdout", () => {
+  // --json claims stdout for the envelope, so a report with nowhere else to go is refused.
+  const result = disktop(["report", "--format", "json", "--json"]);
   const envelope = envelopeFrom(result);
   validate("error", envelope);
+  validate("report", envelope);
   assert.equal(result.status, 2);
-  assert.equal(envelope.error.code, "not-implemented");
+  assert.equal(envelope.error.code, "invalid-input");
+});
+
+test("disktop report describes this machine as a document that validates", () => {
+  const result = disktop(["report", "--format", "json"]);
+  assert.ok([0, 3].includes(result.status), `unexpected exit ${result.status}: ${result.stderr}`);
+  const document = JSON.parse(result.stdout);
+  validate("report-document", document);
+  assert.deepEqual(document.sections, ["capacity"]);
+  assert.equal(document.status === "complete", result.status === 0);
+  assert.ok(document.capacity.filesystems.length > 0);
 });
 
 test("structured output goes to stdout and diagnostics stay on stderr", () => {

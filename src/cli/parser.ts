@@ -192,7 +192,20 @@ export const COMMANDS: readonly CommandSpec[] = [
     options: [JSON_OPTION, UNITS_OPTION, { name: "yes", summary: "Confirm the restore without a terminal", kind: "flag" }],
     implemented: true,
   },
-  { path: ["report"], summary: "Export JSON, CSV, or HTML", options: [JSON_OPTION], implemented: false },
+  {
+    path: ["report"],
+    summary: "Export a JSON, CSV, or HTML report",
+    options: [
+      JSON_OPTION,
+      UNITS_OPTION,
+      { name: "format", summary: "What to write", kind: "value", placeholder: "json|csv|html", choices: ["json", "csv", "html"] },
+      { name: "output", summary: "Write to this new file instead of stdout", kind: "value", placeholder: "FILE" },
+      { name: "path", summary: "Include the stored scan that covers this path", kind: "value", placeholder: "PATH" },
+      { name: "limit", summary: "Largest entries to list, up to 1000", kind: "value", placeholder: "COUNT" },
+      { name: "findings", summary: "Also run the detectors and include what they found", kind: "flag" },
+    ],
+    implemented: true,
+  },
   { path: ["timer"], summary: "Install or remove the opt-in alert timer", operand: { name: "ACTION", required: true }, options: [JSON_OPTION], implemented: true },
   { path: ["completion"], summary: "Generate a shell completion script", operand: { name: "SHELL", required: true }, options: [], implemented: false },
 ];

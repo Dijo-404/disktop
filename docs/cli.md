@@ -1,6 +1,6 @@
 # CLI contract
 
-Status: planned `1.0.0` command surface. `devices`, the `--json` dashboard, `alerts check`, `scan`, `explore`, `snapshots list|diff`, `clean`, `clean plan`, `clean apply`, `history`, `undo`, and `find duplicates|stale|empty|broken`, and `timer install|uninstall` are implemented; `report` and `completion` are declared in the parser and refuse with `not-implemented`. The JSON output contract in [`schemas/cli/v1/`](../schemas/cli/v1/) is normative and is validated by `tests/contract/cli-schema.test.mjs` against examples and by `tests/integration/cli-output.test.mjs` against what the CLI actually writes on a running host. The parser and generated help are normative now; completions become normative when they are implemented. See [PLAN.md](../PLAN.md#cli-and-outputs).
+Status: planned `1.0.0` command surface. `devices`, the `--json` dashboard, `alerts check`, `scan`, `explore`, `snapshots list|diff`, `clean`, `clean plan`, `clean apply`, `history`, `undo`, `find duplicates|stale|empty|broken`, `timer install|uninstall`, and `report` are implemented; `completion` is declared in the parser and refuses with `not-implemented`. The JSON output contract in [`schemas/cli/v1/`](../schemas/cli/v1/) is normative and is validated by `tests/contract/cli-schema.test.mjs` against examples and by `tests/integration/cli-output.test.mjs` against what the CLI actually writes on a running host. The parser and generated help are normative now; completions become normative when they are implemented. See [PLAN.md](../PLAN.md#cli-and-outputs).
 
 ## What works today
 
@@ -19,6 +19,7 @@ Status: planned `1.0.0` command surface. `devices`, the `--json` dashboard, `ale
 | `disktop history [--cursor CURSOR] [--limit COUNT] [--json]` | The durable action journal, newest first, with interrupted records resolved as it is read. A cursor the journal did not issue is an input error. |
 | `disktop timer install\|uninstall [--json]` | The opt-in hourly systemd user timer that runs only `alerts check --notify`. |
 | `disktop undo ACTION_ID --yes [--json]` | Puts back what one Trash action moved. |
+| `disktop report --format json\|csv\|html [--output FILE] [--path PATH] [--limit COUNT] [--findings] [--json]` | One standalone report: capacity, and optionally a stored scan and what the detectors found. Written to stdout, or to a new file that is never put over an existing one. See [Reports](#reports). |
 | `disktop find empty\|broken [--path PATH] [--limit COUNT] [--json]` | Empty directories and dangling symlinks, read out of the most recent scan covering the path. |
 | `disktop find duplicates [--path PATH] [--min-size SIZE] [--keep oldest\|newest\|in-path] [--keep-under PATH] [--limit COUNT] [--json]` | Groups of files holding the same bytes, with the copy a keep rule would keep. Reads content; changes nothing. |
 | `disktop find stale [--path PATH] [--older-than DAYS] [--limit COUNT] [--json]` | Files not modified for a threshold, with a statement of what that measures on this mount. |
@@ -66,7 +67,7 @@ disktop clean apply PLAN_ID --yes --json
 disktop clean apply PLAN_ID --yes --permanent --json
 disktop history --json
 disktop undo ACTION_ID --yes --json
-disktop report --format json|csv|html --output FILE
+disktop report --format json|csv|html [--output FILE] [--path PATH] [--findings]
 disktop alerts check --threshold 90 --json
 disktop timer install|uninstall
 disktop completion bash|zsh|fish
@@ -236,6 +237,155 @@ A search that hits a cap, cannot read a file, or is cancelled reports
 pruned is refused by name with the command that would make a new one; it is never
 answered with no duplicates.
 
+## Reports
+
+`disktop report` exports what Disktop knows as one document a person or a program can
+keep: a JSON document, a CSV table, or a standalone HTML page. It reads; it changes
+nothing, and it adds no reading of its own — every number in it comes from the same
+services `disktop --json`, `explore`, and `clean` use.
+
+```text
+disktop report --format json|csv|html [--output FILE] [--path PATH] [--limit COUNT]
+               [--findings] [--units iec|si] [--json]
+```
+
+A report has up to three sections, and each one says whether it is complete:
+
+- **Capacity**, always: every filesystem with its size, available bytes, the share used
+  counted the way `df` counts it, the share of inodes used where the filesystem reports
+  inodes, every alert, and every block device. This is the dashboard's joined view.
+- **Scan**, with `--path PATH`: the newest stored scan whose root covers the path — its
+  scope, totals, completeness, and warnings — plus the `--limit` largest entries under
+  the path by allocated bytes (50 by default, at most 1000) and the bytes per file
+  extension under it. The totals are the whole scan's; the entries and type totals are
+  the path's. Without `--path` there is no scan section, and the report says so: the
+  working directory is never assumed, so a report run from a timer or a script does not
+  quietly depend on where it was started. A path no stored scan covers is an input error
+  naming the `disktop scan` that would cover it. When the scan's index has been pruned or
+  cannot be read, the section keeps the stored summary, leaves out the entries rather
+  than listing none, and is incomplete.
+- **Findings**, with `--findings`: what every detector found, with sizes measured, as
+  `disktop clean` lists it — every detector with its capability, including the ones that
+  could not look, and per-category totals that count each byte once. A denied detector
+  makes the section incomplete exactly as it makes `clean` exit `3`.
+
+An unknown size is reported as unknown in every format, never as zero, and a short
+section carries its warnings into every format.
+
+### Where it goes
+
+Without `--output` the report is the whole of stdout, so it can be piped or redirected;
+warnings go to stderr. With `--output FILE` it is written to a new file:
+
+1. the content is written to a staging file Disktop creates exclusively, with mode
+   `0600`, in the same directory;
+2. it is flushed to the device;
+3. it is published under `FILE` with `link`, which fails rather than replace anything
+   already there — a file, a directory, or a symlink, dangling or not — and the staging
+   name is removed;
+4. the directory is flushed, so the new name survives a power cut as well as a crash.
+
+A crash leaves at most a hidden `.disktop-report-*.partial` staging file, never a
+truncated report under the name you asked for. On a filesystem that has no hard links,
+such as vfat or exFAT on a USB stick, Disktop claims the name with an exclusive create
+and renames the finished staging file over the empty file it has just made, so the
+promise not to replace anything still holds. A report starts out readable by its owner
+alone, because it lists names of files somebody owns; `chmod` it to share it.
+
+An existing `FILE` is refused with exit `2` before anything slow runs, and there is no
+option to overwrite one: move the old report away or name a new one. Run as root,
+Disktop writes no file itself, so `--output` is refused; redirect stdout instead,
+`disktop report --format html > report.html`, and the shell you chose does the writing.
+
+With `--json`, stdout carries one [`report.json`](../schemas/cli/v1/report.json) envelope
+describing what was written — the format, the output path with its bytes, the bytes
+written, and the sections included — so the report itself needs `--output`; `--json`
+without it is refused as ambiguous. The exit status is `0` when every included section
+is complete, `3` when any is not (or the file was written but its directory could not be
+flushed), `2` for an input or operational error, and `130` when Ctrl+C stopped the report
+before it was written, in which case nothing is written at all.
+
+### JSON
+
+`--format json` writes one [`report-document.json`](../schemas/cli/v1/report-document.json)
+document. It is not a CLI envelope: it is versioned on its own (`schemaVersion`), names
+the `document` it is (`disktop-report`), when it was `generatedAt`, and the
+`generator`'s name and version. Its `status` is `incomplete` when any section is, and
+each section carries its own `complete` and `warnings`. A section that was not asked for
+is `{ "included": false, "reason": "..." }`. Filesystems, devices, alerts, entries, type
+totals, and findings use the same shapes as `--json` output, so every integer that can
+exceed 2^53 is a decimal string and every path carries `bytesBase64` beside its
+sanitized `display`.
+
+### CSV
+
+`--format csv` writes RFC 4180: UTF-8 with no byte-order mark, every record ending in
+CRLF, a field quoted when it holds a comma, a quote, or a line break, and every quote
+inside it doubled. Every row has the same columns, so the file loads as one table:
+
+```text
+section,id,kind,path_display,path_bytes_base64,allocated_bytes,apparent_bytes,shared_bytes,
+size_bytes,size_basis,total_bytes,free_bytes,available_bytes,used_percent,
+inodes_used_percent,threshold_percent,entries,modified_at,status,detail
+```
+
+`section` says what a row is, and a row fills only the columns that apply to it. An
+empty cell means "does not apply" or "not known", never zero: an unmeasured finding has
+an empty `size_bytes` beside `size_basis` `unknown`, and a filesystem that reports no
+inode counts has an empty `inodes_used_percent`. Byte columns are exact decimal integers;
+a spreadsheet may display a large one rounded, and the file still holds it exactly.
+
+| `section` | One row per | Columns it fills |
+| --- | --- | --- |
+| `report` | fact about the report: `id` is `schema-version`, `generated-at`, `generator`, `status`, or a section name with `kind` `section` | `status` (`complete`, `incomplete`, or `omitted`), `detail` |
+| `capability` | capability of the capacity reading (`id` `capacity`) and of the detectors (`id` `findings`) | `status`, `detail` |
+| `filesystem` | filesystem, with its first mount point | `id`, `kind` (type), path, `total_bytes`, `free_bytes`, `available_bytes`, `used_percent`, `inodes_used_percent`, `status` (`read-only` or `read-write`), `detail` |
+| `mount` | further mount point of a filesystem | `id`, path |
+| `device` | block device | `id`, `kind` (`ssd`, `hdd`, `unknown`), `total_bytes`, `entries` (partitions), `detail` |
+| `alert` | alert | `id` (filesystem), `kind`, `used_percent`, `threshold_percent`, `detail` |
+| `scan` | included scan | `id` (scan), `kind` (accounting), path (the `--path`), `allocated_bytes`, `apparent_bytes`, `shared_bytes` (whole scan), `entries` (scanned), `modified_at` (when scanned), `status`, `detail` |
+| `scan-root`, `excluded-mount` | root of the scan, mount it did not enter | `id` (scan), path |
+| `entry` | listed entry, largest first | `id`, `kind`, path, `allocated_bytes`, `apparent_bytes`, `entries` (a directory's children), `modified_at`, `status` (`shared-hardlink`, `broken-symlink`) |
+| `entry-limit` | listing cut at `--limit` | `entries` (the limit), `detail` |
+| `type-total` | file extension, `id` empty for none | `id`, `allocated_bytes`, `apparent_bytes`, `entries` |
+| `finding` | finding | `id`, `kind` (category), `size_bytes`, `size_basis`, `entries` (paths), `status` (capability), `detail` |
+| `finding-path` | path of a finding, so a finding's size is counted on one row | `id` (finding), path |
+| `provider` | detector asked | `id`, `kind` (`ran`, `did-not-run`), `entries` (findings), `status` (capability), `detail` |
+| `category-total` | finding category | `id`, `size_bytes`, `entries` (findings), `detail` |
+| `warning` | warning | `id` (code), `kind` (the section it belongs to), path, `detail` |
+
+"Path" is the pair `path_display` and `path_bytes_base64`. `path_display` is the
+sanitized form, safe to show; `path_bytes_base64` is the name's exact bytes and the only
+column a program should treat as the name.
+
+Every cell is sanitized first, so no control character survives into one: a newline in a
+filename is its Control Picture `␊`, not a record break. A cell that would then begin
+with `=`, `+`, `-`, or `@` — `=cmd|' /C calc'!A0`, `@SUM(A1)`, `+1`, `-1` — is prefixed
+with an apostrophe so a spreadsheet shows it as text rather than evaluating it; tab and
+carriage return are covered by the same rule, though sanitizing has already turned them
+into `␉` and `␍`. A cell that already begins with an apostrophe gains one more. To get a
+cell's original text back, remove exactly one leading apostrophe from any cell that has
+one; nothing else changes. Base64 of an absolute path always begins with `L`, so the
+bytes column is never touched.
+
+### HTML
+
+`--format html` writes one standalone page: no script, no external stylesheet, font, or
+image, and no link that leaves the page. Its first element after the character set is a
+`Content-Security-Policy` of `default-src 'none'; style-src 'unsafe-inline'`, so even a
+mistake in escaping could neither run a script nor fetch anything; inline styles are the
+only thing it allows. Every value on the page — names, mount sources, device models,
+finding titles, explanations, warnings — is sanitized and then has `&`, `<`, `>`, `"`,
+and `'` escaped, in text and in attributes alike. A name shown with substitutions,
+because it was not valid UTF-8 or held a character that had to be replaced, is marked
+`†`, and its exact bytes in base64 are in its tooltip, because two different names can
+be shown the same.
+
+Sizes are shown in the `--units` you chose with the exact byte count in a tooltip;
+capacity is drawn as bars whose width is the used percentage, red where an alert has
+been raised; a page follows the reader's light or dark preference. Incomplete sections
+are badged and their warnings listed at the top.
+
 ## Machine output
 
 - Every `--json` command writes exactly one `envelope.json` object to stdout: `schemaVersion`, `command`, `generatedAt`, `status`, `exitCode`, optional `warnings`, and then `data` or, when the status is `error`, `error`. An incomplete result must carry at least one warning.
@@ -243,7 +393,7 @@ answered with no duplicates.
 - Objects are closed to unknown fields, so new output requires a schema change in the same commit.
 - Structured output goes to stdout. Progress, diagnostics, and permission messages go to stderr. A failed JSON command still emits a schema-compatible error object when possible.
 - Every scan result includes scope, completeness, scanned entry count, inaccessible directory count, excluded mounts, and warnings. A missing optional tool or denied permission is a capability state, not an empty successful result.
-- CSV export quotes and escapes fields and prefixes dangerous spreadsheet-leading cells (`=`, `+`, `-`, `@`). HTML export escapes all file and provider text. Export formats label allocated versus apparent bytes, estimates, and partial scans.
+- CSV export quotes and escapes fields and prefixes an apostrophe to any cell a spreadsheet would evaluate (one starting `=`, `+`, `-`, `@`, tab, or carriage return) and to one already starting with an apostrophe, so the rule can be undone. HTML export escapes all file and provider text and can neither run a script nor load anything. Export formats label allocated versus apparent bytes, estimates, and partial results. See [Reports](#reports).
 - Human-readable units can switch between SI and IEC; the underlying byte values do not change.
 
 ## Exit status

@@ -1,0 +1,17 @@
+{
+  "schemaVersion": "1",
+  "command": "report",
+  "generatedAt": "2026-09-29T08:15:04.117Z",
+  "status": "complete",
+  "exitCode": 0,
+  "data": {
+    "format": "html",
+    "output": {
+      "bytesBase64": "L2hvbWUvZXhhbXBsZS9yZXBvcnRzL2Rpc2t0b3AtMjAyNi0wOS0yOS5odG1s",
+      "display": "/home/example/reports/disktop-2026-09-29.html",
+      "utf8": "/home/example/reports/disktop-2026-09-29.html"
+    },
+    "bytesWritten": "48213",
+    "sections": ["capacity", "scan"]
+  }
+}

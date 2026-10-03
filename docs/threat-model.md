@@ -87,10 +87,23 @@ newline, or a leading `=` reaches a terminal, a log, an HTML report, and a CSV c
 Display text is sanitized at the boundary where it is created, not at each use: C0
 controls and DEL become Unicode Control Pictures, C1 controls, the line and paragraph
 separators, and the bidirectional marks, overrides and isolates become `<U+XXXX>`,
-invalid UTF-8 becomes U+FFFD, HTML escapes every value, and CSV prefixes a cell starting
-`=`, `+`, `-`, or `@`. The lossless bytes travel separately and are what the operation
-uses. The schemas reject a display string containing any of those characters, so this
-cannot regress silently.
+invalid UTF-8 becomes U+FFFD, HTML escapes every value, and CSV prefixes an apostrophe to
+a cell starting `=`, `+`, `-`, `@`, tab, or carriage return. The lossless bytes travel
+separately and are what the operation uses. The schemas reject a display string
+containing any of those characters, so this cannot regress silently.
+
+An exported HTML report is a page somebody opens in a browser, holding names other
+people chose. It contains no script and loads nothing, and it carries a
+`Content-Security-Policy` of `default-src 'none'; style-src 'unsafe-inline'`, so a
+mistake in escaping still could not run a script or send anything anywhere.
+`tests/unit/reports.test.mjs` and `tests/integration/report.test.mjs` export trees of
+hostile names in every format and check each property.
+
+**Clobber a file through a report.** `--output` names a file, and that name can be a
+file somebody did not mean to lose or a symlink planted to point at one. A report is
+staged under a fresh name and published with `link`, which refuses any existing name,
+symlinks included, so nothing is ever replaced or written through. As root, Disktop
+writes no report file at all; the person redirects stdout instead.
 
 What this does *not* give is uniqueness: distinct byte sequences can render identically,
 and a file named `\u2400` looks like one containing a NUL byte. Two targets can therefore

@@ -1,0 +1,23 @@
+{
+  "schemaVersion": "1",
+  "command": "report",
+  "generatedAt": "2026-09-29T08:15:04.117Z",
+  "status": "incomplete",
+  "exitCode": 3,
+  "warnings": [
+    {
+      "code": "provider-denied",
+      "message": "diagnostic.open-deleted was denied: lsof could not be run by this user."
+    }
+  ],
+  "data": {
+    "format": "csv",
+    "output": {
+      "bytesBase64": "L2hvbWUvZXhhbXBsZS9yZXBvcnQuY3N2",
+      "display": "/home/example/report.csv",
+      "utf8": "/home/example/report.csv"
+    },
+    "bytesWritten": "9007199254740993",
+    "sections": ["capacity", "scan", "findings"]
+  }
+}

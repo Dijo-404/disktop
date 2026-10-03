@@ -132,12 +132,10 @@ test("an incomplete inventory reports 3 and says what it missed", async () => {
   assert.equal(envelope.warnings.length, 1);
 });
 
-test("a declared but unbuilt command refuses in the same envelope shape", async () => {
+test("a declared but unbuilt command refuses and says so", async () => {
   const context = fakeContext();
-  assert.equal(await runCli(["report", "--json"], context), 2);
-  const envelope = JSON.parse(context.captured.stdout);
-  assert.equal(envelope.status, "error");
-  assert.equal(envelope.error.code, "not-implemented");
+  assert.equal(await runCli(["report", "--format", "json"], context), 0, "report is built");
+  assert.equal(JSON.parse(context.captured.stdout).document, "disktop-report");
 
   const text = fakeContext();
   assert.equal(await runCli(["completion", "bash"], text), 2);
