@@ -258,3 +258,37 @@ test("an exception thrown while the TUI runs restores the terminal before the re
   assert.match(stdout, /START\nRESTORED/, "the terminal is restored");
   assert.match(stderr, /boom/, "and the reason is reported where it can be read");
 });
+
+test("Ctrl+C typed at a terminal stops a scan through the helper, which survives to report it", async (context) => {
+  if (!haveScript(context)) {
+    return;
+  }
+  // A real Ctrl+C is a SIGINT to the terminal's whole foreground process
+  // group. The helper must not be in it: killed outright, it could not finish
+  // and report the scan, and in an apply it could not journal the item it was
+  // on. /usr is large on every Linux host and only read.
+  const home = mkdtempSync(join(tmpdir(), "disktop-pty-"));
+  try {
+    const result = await drivePty(
+      "node dist/bin/disktop.js scan /usr --json",
+      "\u0003",
+      {
+        TERM: "xterm-256color",
+        HOME: home,
+        XDG_CACHE_HOME: join(home, "cache"),
+        XDG_DATA_HOME: join(home, "data"),
+        XDG_STATE_HOME: join(home, "state"),
+        XDG_CONFIG_HOME: join(home, "config"),
+      },
+      700,
+    );
+    const output = result.stdout.replace(/\r/g, "");
+    const envelope = JSON.parse(output.slice(output.indexOf("{")));
+    assert.equal(result.status, 130, `exit ${result.status}: ${JSON.stringify(envelope.error ?? envelope.warnings)}`);
+    assert.equal(envelope.command, "scan");
+    assert.equal(envelope.status, "incomplete");
+    assert.ok(envelope.warnings.some((warning) => warning.code === "cancelled"), "the helper stopped the walk and said so");
+  } finally {
+    rmSync(home, { recursive: true, force: true });
+  }
+});

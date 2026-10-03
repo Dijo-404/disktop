@@ -128,7 +128,12 @@ export class NativeHelperClient {
     const bounds = { ...DEFAULT_CLIENT_LIMITS, ...limits };
     let child: ChildProcessWithoutNullStreams;
     try {
-      child = spawn(location.executablePath, [], { stdio: ["pipe", "pipe", "pipe"], shell: false });
+      // `detached` puts the helper in its own process group. Ctrl+C at a
+      // terminal signals the whole foreground group; the helper must not be in
+      // it, or it would die mid-item instead of being asked, by request ID, to
+      // stop after the item it is on and report. It still ends when Disktop
+      // does: a closed stdin is how it learns the client has gone.
+      child = spawn(location.executablePath, [], { stdio: ["pipe", "pipe", "pipe"], shell: false, detached: true });
     } catch (error) {
       return {
         started: false,

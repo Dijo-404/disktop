@@ -1,4 +1,6 @@
 import assert from "node:assert/strict";
+import { spawn } from "node:child_process";
+import { readFileSync } from "node:fs";
 import { createHash } from "node:crypto";
 import { getEventListeners } from "node:events";
 import { chmod, mkdtemp, readFile, writeFile } from "node:fs/promises";
@@ -343,4 +345,43 @@ test("a packaged helper that is not executable is refused, not replaced by anoth
   // than one that quietly runs the development build or nothing at all.
   assert.equal(lookup.found, false);
   assert.match(lookup.capability.explanation, /not executable/);
+});
+
+test("the helper is in its own process group, and still ends when Disktop is killed outright", async () => {
+  // A child Node process starts the real helper on a long scan, says the
+  // helper's pid, and is then SIGKILLed: nothing of it runs to close anything.
+  const script = `
+    import { NativeHelperClient } from "./dist/native/client.js";
+    import { readFileSync, readdirSync } from "node:fs";
+    const start = await NativeHelperClient.start();
+    if (!start.started) { console.log("NOSTART " + start.capability.explanation); process.exit(1); }
+    const children = readdirSync("/proc/self/task").flatMap((task) => readFileSync("/proc/self/task/" + task + "/children", "utf8").trim().split(/\\s+/)).filter(Boolean);
+    const indexDirectory = Buffer.from(process.argv[1]).toString("base64");
+    void start.client.request("scan", { roots: [Buffer.from("/usr").toString("base64")], crossFilesystems: false, excludes: [], accounting: "allocated", indexDirectory }).catch(() => {});
+    console.log("PIDS " + children.join(","));
+    setInterval(() => {}, 1000);
+  `;
+  const directory = await sandbox();
+  const child = spawn(process.execPath, ["--input-type=module", "-e", script, join(directory, "index")], { cwd: process.cwd() });
+  const pids = await new Promise((resolve, reject) => {
+    let output = "";
+    child.stdout.setEncoding("utf8").on("data", (chunk) => {
+      output += chunk;
+      const match = /PIDS ([\d,]+)/.exec(output);
+      if (match) resolve(match[1].split(",").map(Number));
+      if (output.includes("NOSTART")) reject(new Error(output));
+    });
+    child.on("error", reject);
+  });
+  const helper = pids[0];
+  const groupOf = (pid) => Number(readFileSync(`/proc/${pid}/stat`, "utf8").split(") ")[1].split(" ")[2]);
+  assert.notEqual(groupOf(helper), groupOf(child.pid), "the helper is not in the client's process group");
+  assert.equal(groupOf(helper), helper, "it leads its own");
+
+  child.kill("SIGKILL");
+  const deadline = Date.now() + 15_000;
+  while (isRunning(helper) && Date.now() < deadline) {
+    await new Promise((resolve) => setTimeout(resolve, 100));
+  }
+  assert.equal(isRunning(helper), false, "the helper saw its stdin close and ended");
 });
