@@ -49,6 +49,11 @@ plan_expiry_minutes = 60
 # itself. There is no setting that widens cleanup past this.
 additional_allowed_roots = []
 
+[managers]
+# How much journal a vacuum keeps, in bytes. Only sealed, archived journal
+# files are removed; the one being written stays. 16 MiB to 1 TiB.
+journal_keep_bytes = 536870912
+
 [providers]
 # Directories holding AppImages, which no package manager knows about. These
 # are read, never cleaned: an AppImage is only offered for the Trash when it

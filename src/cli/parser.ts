@@ -47,6 +47,7 @@ export const COMMANDS: readonly CommandSpec[] = [
       JSON_OPTION,
       UNITS_OPTION,
       { name: "threshold", summary: "Used percentage that raises an alert", kind: "value", placeholder: "PERCENT" },
+      { name: "notify", summary: "Also notify the desktop when one is reached", kind: "flag" },
     ],
     implemented: true,
   },
@@ -82,6 +83,7 @@ export const COMMANDS: readonly CommandSpec[] = [
       { name: "limit", summary: "Entries per page, up to 1000", kind: "value", placeholder: "COUNT" },
       { name: "cursor", summary: "Continue from a previous page", kind: "value", placeholder: "CURSOR" },
       { name: "type-totals", summary: "Also report bytes per file extension", kind: "flag" },
+      { name: "owners", summary: "Also report bytes per owning user", kind: "flag" },
     ],
     implemented: true,
   },
@@ -145,7 +147,7 @@ export const COMMANDS: readonly CommandSpec[] = [
         summary: "The operation the plan fixes",
         kind: "value",
         placeholder: "OPERATION",
-        choices: ["trash", "permanent", "empty-trash", "move", "compress", "hardlink"],
+        choices: ["trash", "permanent", "empty-trash", "move", "compress", "hardlink", "manager"],
       },
       { name: "destination", summary: "Move or compress: the directory to publish into", kind: "value", placeholder: "PATH" },
       { name: "keep-path", summary: "Hardlink: which copy of a group survives", kind: "value", placeholder: "PATH" },
@@ -172,7 +174,17 @@ export const COMMANDS: readonly CommandSpec[] = [
     ],
     implemented: true,
   },
-  { path: ["history"], summary: "Inspect the action journal", options: [JSON_OPTION, UNITS_OPTION], implemented: true },
+  {
+    path: ["history"],
+    summary: "Inspect the action journal",
+    options: [
+      JSON_OPTION,
+      UNITS_OPTION,
+      { name: "cursor", summary: "Continue from a previous page", kind: "value", placeholder: "CURSOR" },
+      { name: "limit", summary: "Records per page, up to 200", kind: "value", placeholder: "COUNT" },
+    ],
+    implemented: true,
+  },
   {
     path: ["undo"],
     summary: "Put back what a Trash action moved",
@@ -181,7 +193,7 @@ export const COMMANDS: readonly CommandSpec[] = [
     implemented: true,
   },
   { path: ["report"], summary: "Export JSON, CSV, or HTML", options: [JSON_OPTION], implemented: false },
-  { path: ["timer"], summary: "Install or remove the opt-in alert timer", operand: { name: "ACTION", required: true }, options: [], implemented: false },
+  { path: ["timer"], summary: "Install or remove the opt-in alert timer", operand: { name: "ACTION", required: true }, options: [JSON_OPTION], implemented: true },
   { path: ["completion"], summary: "Generate a shell completion script", operand: { name: "SHELL", required: true }, options: [], implemented: false },
 ];
 

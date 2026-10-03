@@ -101,7 +101,12 @@ export function createFootprintService(
         complete = false;
       }
 
-      const merged = deduplicateFindings(found);
+      const wanted = request.categories;
+      const merged = deduplicateFindings(
+        wanted === undefined || wanted.length === 0
+          ? found
+          : found.filter((entry) => wanted.includes(entry.category)),
+      );
       const measurement = request.measureSizes
         ? await measure(merged.kept, footprints, signal)
         : { findings: merged.kept, warnings: [], measured: true };

@@ -365,3 +365,24 @@ test("an abort partway through stops the run and says it was cancelled", async (
     `detectors behind the running four should not have been asked: ${summary.providers.length}`,
   );
 });
+
+test("a category filter narrows the findings of a provider that spans several categories", async () => {
+  const spanning = {
+    id: "managers",
+    version: 1,
+    categories: ["package-cache", "log"],
+    probe: async () => AVAILABLE,
+    discover: async () => ({
+      findings: [
+        finding({ id: "managers:apt.clean", providerId: "managers", category: "package-cache", paths: [] }),
+        finding({ id: "managers:journald.vacuum", providerId: "managers", category: "log", paths: [] }),
+      ],
+      warnings: [],
+      complete: true,
+    }),
+  };
+  const service = createFootprintService([spanning], environment(), measuring);
+  const summary = await service.discover({ measureSizes: false, categories: ["log"] }, new AbortController().signal);
+  assert.deepEqual(summary.findings.map((entry) => entry.id), ["managers:journald.vacuum"]);
+  assert.deepEqual(summary.categoryTotals.map((total) => total.category), ["log"]);
+});

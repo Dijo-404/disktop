@@ -23,7 +23,10 @@ export type FindingCategory =
   | "swap"
   | "temporary"
   | "diagnostic"
-  | "per-user-usage";
+  | "per-user-usage"
+  | "package-cache"
+  | "container-data"
+  | "old-kernel";
 
 export const FINDING_CATEGORIES: readonly FindingCategory[] = [
   "dev-environment",
@@ -43,6 +46,9 @@ export const FINDING_CATEGORIES: readonly FindingCategory[] = [
   "temporary",
   "diagnostic",
   "per-user-usage",
+  "package-cache",
+  "container-data",
+  "old-kernel",
 ];
 
 /**
@@ -85,6 +91,8 @@ export interface Finding {
   readonly paths: readonly RawPath[];
   /** A bounded manager selection, never a shell line. */
   readonly managerScope?: string;
+  /** The manager action a plan for this finding would fix. */
+  readonly managerAction?: string;
   readonly size: FindingSize;
   readonly confidence: FindingConfidence;
   readonly capability: Capability;

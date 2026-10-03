@@ -9,6 +9,7 @@ import { runDevices } from "./commands/devices.js";
 import { runExplore } from "./commands/explore.js";
 import { runScan } from "./commands/scan.js";
 import { runSnapshots } from "./commands/snapshots.js";
+import { runTimer } from "./commands/timer.js";
 
 /** Resolve one argument list to an exit status. Nothing here touches a device. */
 export async function runCli(args: readonly string[], context: CliContext): Promise<number> {
@@ -65,6 +66,7 @@ export async function runCli(args: readonly string[], context: CliContext): Prom
       ...(optional(parsed, "limit")),
       ...(optional(parsed, "cursor")),
       typeTotals: parsed.flags.has("type-totals"),
+      owners: parsed.flags.has("owners"),
     } as Parameters<typeof runExplore>[1]);
   }
   if (name === "clean") {
@@ -96,7 +98,11 @@ export async function runCli(args: readonly string[], context: CliContext): Prom
     });
   }
   if (name === "history") {
-    return runHistory(withUnits, asJson);
+    return runHistory(withUnits, {
+      asJson,
+      ...(optional(parsed, "cursor")),
+      ...(optional(parsed, "limit")),
+    });
   }
   if (name === "undo") {
     return runUndo(withUnits, {
@@ -125,13 +131,20 @@ export async function runCli(args: readonly string[], context: CliContext): Prom
       ...(optional(parsed, "to")),
     });
   }
+  if (name === "timer") {
+    return runTimer(withUnits, { asJson, action: parsed.operand ?? "" });
+  }
   if (name === "alerts check") {
     const threshold = parseThreshold(parsed.values.get("threshold"));
     if (threshold === "invalid") {
       withUnits.output.stderr("'--threshold' accepts a whole percentage from 0 to 100.\n");
       return EXIT.operationalError;
     }
-    return runAlertsCheck(withUnits, { asJson, ...(threshold === undefined ? {} : { thresholdPercent: threshold }) });
+    return runAlertsCheck(withUnits, {
+      asJson,
+      notify: parsed.flags.has("notify"),
+      ...(threshold === undefined ? {} : { thresholdPercent: threshold }),
+    });
   }
 
   // The root command: JSON or a redirected stdout means no interactive surface.

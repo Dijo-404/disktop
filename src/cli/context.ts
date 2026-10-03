@@ -7,10 +7,18 @@ import type { PlanService } from "../application/plan-action.js";
 import type { UndoService } from "../application/undo.js";
 import type { ScanService } from "../application/scan.js";
 import type { SnapshotService } from "../application/snapshots.js";
-import type { RawPath, Warning } from "../domain/models.js";
+import type { Alert, RawPath, Warning } from "../domain/models.js";
+import type { NotificationOutcome } from "../ports/notifications.js";
+import type { TimerService } from "../application/timer.js";
 import type { Accounting } from "../ports/scan.js";
 import type { RetentionLimits } from "../ports/snapshots.js";
 import type { CliOutput } from "./parser.js";
+
+export interface AlertNotifications {
+  /** Whether config.toml's alerts.notify asks for it without the flag. */
+  readonly enabled: boolean;
+  notify(alerts: readonly Alert[]): Promise<NotificationOutcome | undefined>;
+}
 
 /** The CLI shows what the application already decided; it owns no settings of its own. */
 export type CliSettings = DashboardSettings;
@@ -80,6 +88,9 @@ export interface CliContext {
   /** Reviewing, applying, undoing, and finding. The only path to a mutation. */
   readonly actions: ActionServices;
   readonly signals: InterruptSource;
+  /** Absent where nothing can show a notification. */
+  readonly notifications?: AlertNotifications;
+  readonly timer?: TimerService;
   /**
    * What went wrong before any command ran — a configuration file that could
    * not be applied, most of all. A command that lists findings has to say so:

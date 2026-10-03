@@ -1,4 +1,4 @@
-import type { ActionPlan, ActionResult } from "../domain/actions.js";
+import type { ActionPlan, ActionResult, SubtreeManifest } from "../domain/actions.js";
 import type { Bytes, RawPath } from "../domain/models.js";
 
 /**
@@ -8,10 +8,24 @@ import type { Bytes, RawPath } from "../domain/models.js";
  * refused to do. Neither takes a path, because neither decides what to act on
  * — the plan and the journal already did.
  */
+export interface ApplyOptions {
+  /** Whether somebody is at a terminal to answer an authentication prompt. */
+  readonly interactive?: boolean;
+}
+
 export interface ActionPort {
-  apply(plan: ActionPlan, signal: AbortSignal): Promise<ActionResult>;
+  apply(plan: ActionPlan, signal: AbortSignal, options?: ApplyOptions): Promise<ActionResult>;
   /** Put back what one Trash action moved, identified by its journal record. */
   restore(journalId: string, signal: AbortSignal): Promise<ActionResult>;
+}
+
+export type InspectOutcome =
+  | { readonly kind: "inspected"; readonly subtree: SubtreeManifest }
+  | { readonly kind: "refused"; readonly code: string; readonly message: string };
+
+/** What is inside reviewed directories, keyed by each path's `bytesBase64`. */
+export interface InspectPort {
+  inspect(paths: readonly RawPath[], signal: AbortSignal): Promise<ReadonlyMap<string, InspectOutcome>>;
 }
 
 export type ItemOutcome = "in-progress" | "completed" | "skipped" | "failed" | "uncertain";
@@ -23,6 +37,22 @@ export interface JournalItem {
   readonly outcome: ItemOutcome;
   readonly message?: string;
   readonly bytes: Bytes;
+}
+
+export interface JournalManagerCommand {
+  readonly tool: string;
+  readonly arguments: readonly string[];
+  readonly state: "pending" | "started" | "finished" | "uncertain";
+  readonly exitCode?: bigint;
+  readonly output?: string;
+}
+
+export interface JournalManager {
+  readonly adapter: string;
+  readonly action: string;
+  readonly privilege: "user" | "root";
+  readonly estimatedBytes?: Bytes;
+  readonly commands: readonly JournalManagerCommand[];
 }
 
 export interface JournalRecord {
@@ -40,11 +70,12 @@ export interface JournalRecord {
   readonly completed: bigint;
   readonly skipped: bigint;
   readonly failed: bigint;
-  readonly selectedBytes: Bytes;
+  readonly selectedBytes?: Bytes;
   readonly bytesMovedToTrash: Bytes;
   readonly freeBytesBefore?: Bytes;
   readonly freeBytesAfter?: Bytes;
   readonly items: readonly JournalItem[];
+  readonly manager?: JournalManager;
 }
 
 export interface JournalPage {

@@ -1,3 +1,4 @@
+import { describeCommand, type ManagerScope } from "./managers.js";
 import type { Bytes, RawPath } from "./models.js";
 
 /** Reviewed operations are fixed before an apply request is accepted. */
@@ -19,9 +20,17 @@ export interface EntryFingerprint {
   readonly modifiedNanoseconds: bigint;
 }
 
+export interface SubtreeManifest {
+  readonly entries: bigint;
+  /** SHA-256 over every entry below a directory, as 64 lowercase hex characters. */
+  readonly digest: string;
+}
+
 export interface PlannedEntry {
   readonly path: RawPath;
   readonly expected: EntryFingerprint;
+  /** What a reviewed directory held; absent for anything that is not one. */
+  readonly subtree?: SubtreeManifest;
   /**
    * What this entry measured at review time. The helper renames a subtree in
    * one syscall rather than re-measuring it, so this is the number a result
@@ -74,11 +83,16 @@ export interface ActionPlan {
   readonly permission: ActionPermission;
   /** Absent for a manager plan, which cannot promise a count. */
   readonly exactItemCount?: bigint;
-  /** The sum of what the entries measured at review time. */
-  readonly selectedBytes: Bytes;
+  /**
+   * The sum of what the entries measured at review time, or a manager's own
+   * estimate. Absent only for a manager plan whose manager could not say.
+   */
+  readonly selectedBytes?: Bytes;
   readonly entries?: readonly PlannedEntry[];
   /** A bounded manager selection, never a shell line. */
   readonly managerScope?: string;
+  /** What a manager plan fixes; its commands follow from it and are never stored. */
+  readonly manager?: ManagerScope;
   readonly regenerationCost?: string;
   /**
    * Where a move or compress publishes its output, and absent for every other
@@ -121,7 +135,9 @@ export interface VerificationCheck {
     | "destination-present"
     | "source-disposed"
     | "free-space-read"
-    | "digest-matched";
+    | "digest-matched"
+    | "manager-command"
+    | "manager-verified";
   readonly outcome: "passed" | "failed" | "unavailable";
   readonly detail: string;
 }
@@ -131,8 +147,8 @@ export interface ActionResult {
   readonly completed: bigint;
   readonly skipped: bigint;
   readonly failed: bigint;
-  /** What the plan reviewed, whatever became of it. */
-  readonly selectedBytes: Bytes;
+  /** What the plan reviewed, whatever became of it; absent for a manager that could not say. */
+  readonly selectedBytes?: Bytes;
   /** The reviewed size of what actually moved. Usually frees nothing yet. */
   readonly bytesMovedToTrash: Bytes;
   /** Space available before the first item and after the last, when readable. */
@@ -154,6 +170,7 @@ export interface PlanInput {
   readonly expiryMinutes: number;
   readonly entries: readonly PlannedEntry[];
   readonly managerScope?: string;
+  readonly manager?: ManagerScope;
   readonly regenerationCost?: string;
   readonly destination?: RawPath;
   readonly sourceDisposition?: SourceDisposition;
@@ -174,7 +191,7 @@ export const ACTION_OPERATIONS: readonly ActionOperation[] = [
   "manager",
 ];
 
-const IRREVERSIBLE: readonly ActionOperation[] = ["permanent", "empty-trash", "dedup-hardlink"];
+const IRREVERSIBLE: readonly ActionOperation[] = ["permanent", "empty-trash", "dedup-hardlink", "manager"];
 
 /**
  * Whether what an operation does can be taken back.
@@ -229,8 +246,14 @@ export function buildPlan(input: PlanInput): ActionPlan {
   if (!manager && input.entries.length === 0) {
     throw new RangeError("A plan needs at least one reviewed entry");
   }
-  if (manager && (input.managerScope === undefined || input.managerScope.trim() === "")) {
+  if (manager && input.manager === undefined) {
     throw new RangeError("A manager plan needs the bounded selection it would run");
+  }
+  if (manager && input.entries.length > 0) {
+    throw new RangeError("A manager plan names a manager's own items, not paths");
+  }
+  if (!manager && input.manager !== undefined) {
+    throw new RangeError(`A '${input.operation}' plan runs no manager`);
   }
   if (input.expiryMinutes <= 0) {
     throw new RangeError("A plan has to expire at some point after it was made");
@@ -280,7 +303,13 @@ export function buildPlan(input: PlanInput): ActionPlan {
     warnings.push(IRREVERSIBLE_WARNING);
   }
 
-  const selectedBytes = input.entries.reduce((total, entry) => total + entry.reviewedBytes, 0n);
+  const selectedBytes = manager
+    ? input.manager?.estimatedBytes
+    : input.entries.reduce((total, entry) => total + entry.reviewedBytes, 0n);
+  const managerSummary =
+    input.manager === undefined
+      ? input.managerScope
+      : input.manager.commands.map((command) => describeCommand(command, input.manager?.privilege ?? "root")).join("; ");
   const expiresAt = new Date(input.createdAt.getTime() + input.expiryMinutes * 60_000);
 
   return {
@@ -292,13 +321,16 @@ export function buildPlan(input: PlanInput): ActionPlan {
     ...(input.findingId === undefined ? {} : { findingId: input.findingId }),
     scopeSummary: input.scopeSummary,
     reversibility,
-    permission: manager ? "manager-privilege" : "user",
-    // A manager reports what it did; it cannot promise a count beforehand, and
-    // a number here would read as one.
-    ...(manager ? {} : { exactItemCount: BigInt(input.entries.length) }),
-    selectedBytes,
+    permission: input.manager?.privilege === "root" ? "manager-privilege" : "user",
+    ...(manager
+      ? input.manager?.count.kind === "exact"
+        ? { exactItemCount: input.manager.count.value }
+        : {}
+      : { exactItemCount: BigInt(input.entries.length) }),
+    ...(selectedBytes === undefined ? {} : { selectedBytes }),
     ...(manager ? {} : { entries: [...input.entries] }),
-    ...(input.managerScope === undefined ? {} : { managerScope: input.managerScope }),
+    ...(managerSummary === undefined ? {} : { managerScope: managerSummary }),
+    ...(input.manager === undefined ? {} : { manager: input.manager }),
     ...(input.regenerationCost === undefined ? {} : { regenerationCost: input.regenerationCost }),
     ...(input.destination === undefined ? {} : { destination: input.destination }),
     ...(input.sourceDisposition === undefined
@@ -316,7 +348,8 @@ export function buildPlan(input: PlanInput): ActionPlan {
  * item by item and applied to whatever is there now.
  */
 export function isExpired(plan: ActionPlan, now: Date): boolean {
-  return now.getTime() >= Date.parse(plan.expiresAt);
+  const expiry = Date.parse(plan.expiresAt);
+  return Number.isNaN(expiry) || now.getTime() >= expiry;
 }
 
 /**
@@ -347,6 +380,17 @@ function defaultRandom(): string {
  */
 export function verify(plan: ActionPlan, result: Omit<ActionResult, "verification">): readonly VerificationCheck[] {
   const checks: VerificationCheck[] = [];
+  const readable = result.freeBytesBefore !== undefined && result.freeBytesAfter !== undefined;
+  const freeSpace: VerificationCheck = {
+    check: "free-space-read",
+    outcome: readable ? "passed" : "unavailable",
+    detail: readable
+      ? "Free space was read before the first item and after the last. Other processes write to the same filesystem, so the change is not only this action's doing."
+      : "Free space could not be read, so Disktop cannot say what changed on the filesystem.",
+  };
+  if (plan.operation === "manager") {
+    return [freeSpace];
+  }
 
   if (plan.destination !== undefined) {
     // Node does not stat the destination: the helper published each item with
@@ -381,14 +425,7 @@ export function verify(plan: ActionPlan, result: Omit<ActionResult, "verificatio
         : `${unfinished} of the reviewed items were not: ${result.skipped} skipped and ${result.failed} failed.`,
   });
 
-  const readable = result.freeBytesBefore !== undefined && result.freeBytesAfter !== undefined;
-  checks.push({
-    check: "free-space-read",
-    outcome: readable ? "passed" : "unavailable",
-    detail: readable
-      ? "Free space was read before the first item and after the last. Other processes write to the same filesystem, so the change is not only this action's doing."
-      : "Free space could not be read, so Disktop cannot say what changed on the filesystem.",
-  });
+  checks.push(freeSpace);
 
   return checks;
 }

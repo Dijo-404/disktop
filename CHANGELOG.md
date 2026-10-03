@@ -4,6 +4,39 @@ All public changes will be recorded here when the first complete Linux release i
 
 ## Unreleased
 
+### Phase 6: manager cleanup, alerts, and the gaps earlier phases left
+
+- `disktop clean` now lists what package and container managers can clean: apt, dnf, and
+  pacman caches, archived journal files, disabled Snap revisions, unused Flatpak
+  runtimes, dangling Docker and Podman images, stopped containers, anonymous volumes,
+  Docker build cache, old kernels, and tmpfiles-policy temporary and crash files. Each
+  finding shows the exact command it would run.
+- `disktop clean plan managers:<action>` reviews one into a manager plan from a live
+  preview; `clean apply --yes --permanent` runs it. Commands are derived from the plan's
+  items by a fixed template and never stored. Root commands ask `sudo` or `pkexec` for
+  that command only, and a refused password is reported, never worked around.
+- A named Docker or Podman volume is reported and never offered; only volumes the engine
+  marked anonymous are selectable. Old kernels keep the running and the newest one, and
+  a purge is offered only when a simulated removal takes exactly those packages.
+- The helper journals manager actions with `manager-begin`, `manager-append`, and
+  `manager-finish`. A command that started and never reported back is `uncertain`.
+- Running as root, Disktop changes no file itself and still runs reviewed manager
+  actions.
+- `disktop explore PATH --owners` reports bytes per owning user under any scanned path,
+  and says when a total is a floor.
+- `disktop alerts check --notify` (or `alerts.notify`) sends a desktop notification.
+  `disktop timer install|uninstall` manages an hourly user timer that runs only the alert
+  check.
+- `disktop history --cursor --limit` reaches every page.
+- Fixed gaps from earlier phases: a stored plan whose expiry was not a date never
+  expired; a tool's stderr and a helper message reached the terminal unsanitized;
+  Ctrl+C did not reach a duplicate search; a hardlink group spanning filesystems was
+  only refused item by item; a crash left a partial copy nobody was told about; a
+  directory with a mount below it could be a target; a reviewed directory was checked
+  only by its own identity, so a change further down went unnoticed (plans now carry a
+  digest of the whole subtree, taken with the new `inspect` operation, and emptying Trash
+  checks it too); and a detector could ask an allowlisted tool to change something.
+
 ### Phase 5: advanced analysis and the actions that publish something
 
 - `disktop find duplicates` reports groups of files that hold the same bytes, with the

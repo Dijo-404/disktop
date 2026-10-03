@@ -7,7 +7,13 @@
     "journalDirectory": "L2hvbWUvZXhhbXBsZS8ubG9jYWwvc3RhdGUvZGlza3RvcA==",
     "homeTrashDirectory": "L2hvbWUvZXhhbXBsZS8ubG9jYWwvc2hhcmUvVHJhc2g=",
     "trashDirectories": [
-      "L2hvbWUvZXhhbXBsZS8ubG9jYWwvc2hhcmUvVHJhc2g="
+      {
+        "path": "L2hvbWUvZXhhbXBsZS8ubG9jYWwvc2hhcmUvVHJhc2g=",
+        "subtree": {
+          "entries": "7",
+          "digest": "9c4e0000000000000000000000000000000000000000000000000000000077d1"
+        }
+      }
     ]
   }
 }

@@ -119,6 +119,25 @@ pub struct ItemRecord {
     pub bytes: u64,
 }
 
+pub struct CommandRecord {
+    pub position: u64,
+    pub tool: String,
+    pub arguments: Vec<String>,
+    /// `pending`, `started`, `finished`, or `uncertain` once reconciliation
+    /// finds one that started and never finished.
+    pub state: String,
+    pub exit_code: Option<i64>,
+    pub output: Option<String>,
+}
+
+pub struct ManagerRecord {
+    pub adapter: String,
+    pub action: String,
+    pub privilege: String,
+    pub estimated_bytes: Option<u64>,
+    pub commands: Vec<CommandRecord>,
+}
+
 pub struct ActionRecord {
     pub id: String,
     pub plan_id: String,
@@ -134,6 +153,14 @@ pub struct ActionRecord {
     pub free_bytes_before: Option<u64>,
     pub free_bytes_after: Option<u64>,
     pub items: Vec<ItemRecord>,
+    pub manager: Option<ManagerRecord>,
+}
+
+pub struct AbandonedStaging {
+    pub action_id: String,
+    pub position: u64,
+    pub path: Vec<u8>,
+    pub identity: Option<Identity>,
 }
 
 pub struct JournalPage {
@@ -173,6 +200,7 @@ impl Journal {
         // journal write that fails is an item whose outcome nobody recorded.
         connection.busy_timeout(BUSY_TIMEOUT)?;
         connection.execute_batch(SCHEMA)?;
+        migrate(&connection)?;
         // The journal names every path Disktop has acted on, so it is private
         // to the user who owns it whichever process created it first.
         make_private(&path, 0o600);
@@ -245,6 +273,76 @@ impl Journal {
                 identity.map(|identity| clamp(identity.device)),
                 identity.map(|identity| clamp(identity.inode)),
             ],
+        )?;
+        Ok(())
+    }
+
+    /// Name what an item staged, so a crash before it is published can be found.
+    pub fn record_staging(
+        &self,
+        action_id: &str,
+        position: u64,
+        path: &[u8],
+        identity: &Identity,
+    ) -> rusqlite::Result<()> {
+        self.connection.execute(
+            "UPDATE action_item SET staging = ?3, staging_device = ?4, staging_inode = ?5
+              WHERE action_id = ?1 AND position = ?2",
+            params![
+                action_id,
+                clamp(position),
+                path,
+                clamp(identity.device),
+                clamp(identity.inode)
+            ],
+        )?;
+        Ok(())
+    }
+
+    pub fn clear_staging(&self, action_id: &str, position: u64) -> rusqlite::Result<()> {
+        self.connection.execute(
+            "UPDATE action_item SET staging = NULL, staging_device = NULL, staging_inode = NULL
+              WHERE action_id = ?1 AND position = ?2",
+            params![action_id, clamp(position)],
+        )?;
+        Ok(())
+    }
+
+    /// Staged outputs whose item reconciliation could not settle.
+    pub fn abandoned_staging(&self) -> rusqlite::Result<Vec<AbandonedStaging>> {
+        let mut statement = self.connection.prepare(
+            "SELECT action_id, position, staging, staging_device, staging_inode FROM action_item
+              WHERE staging IS NOT NULL AND outcome = 'uncertain' ORDER BY action_id, position",
+        )?;
+        statement
+            .query_map([], |row| {
+                let device: Option<i64> = row.get(3)?;
+                let inode: Option<i64> = row.get(4)?;
+                Ok(AbandonedStaging {
+                    action_id: row.get(0)?,
+                    position: unclamp(row.get(1)?),
+                    path: row.get(2)?,
+                    identity: device.zip(inode).map(|(device, inode)| Identity {
+                        device: unclamp(device),
+                        inode: unclamp(inode),
+                    }),
+                })
+            })?
+            .collect()
+    }
+
+    pub fn resolve_staging(
+        &self,
+        action_id: &str,
+        position: u64,
+        note: &str,
+    ) -> rusqlite::Result<()> {
+        self.connection.execute(
+            "UPDATE action_item
+                SET staging = NULL, staging_device = NULL, staging_inode = NULL,
+                    reason = CASE WHEN reason IS NULL THEN ?3 ELSE reason || ' ' || ?3 END
+              WHERE action_id = ?1 AND position = ?2",
+            params![action_id, clamp(position), note],
         )?;
         Ok(())
     }
@@ -337,8 +435,14 @@ impl Journal {
                     "Disktop stopped around this operation and cannot tell whether it happened."
                 ],
             )?;
+            self.connection.execute(
+                "UPDATE manager_command SET state = 'uncertain'
+                  WHERE action_id = ?1 AND state = 'started'",
+                params![id],
+            )?;
             let uncertain: i64 = self.connection.query_row(
-                "SELECT count(*) FROM action_item WHERE action_id = ?1 AND outcome = 'uncertain'",
+                "SELECT (SELECT count(*) FROM action_item WHERE action_id = ?1 AND outcome = 'uncertain')
+                      + (SELECT count(*) FROM manager_command WHERE action_id = ?1 AND state = 'uncertain')",
                 params![id],
                 |row| row.get(0),
             )?;
@@ -397,6 +501,7 @@ impl Journal {
             None => Ok(None),
             Some(mut record) => {
                 record.items = self.items(&record.id)?;
+                record.manager = self.manager(&record.id)?;
                 Ok(Some(record))
             }
         }
@@ -424,6 +529,7 @@ impl Journal {
         records.truncate(limit as usize);
         for record in &mut records {
             record.items = self.items(&record.id)?;
+            record.manager = self.manager(&record.id)?;
         }
 
         let next_cursor = match (overflow, records.last()) {
@@ -436,6 +542,163 @@ impl Journal {
             records,
             next_cursor,
         })
+    }
+
+    /// Record a manager action, its commands, and its items, in one transaction.
+    #[allow(clippy::too_many_arguments)]
+    pub fn begin_manager(
+        &self,
+        plan_id: &str,
+        adapter: &str,
+        action: &str,
+        privilege: &str,
+        commands: &[(String, Vec<String>)],
+        items: &[(Vec<u8>, u64)],
+        estimated_bytes: Option<u64>,
+        free_bytes_before: Option<u64>,
+    ) -> rusqlite::Result<String> {
+        self.connection.execute_batch("BEGIN IMMEDIATE")?;
+        let outcome = (|| {
+            let id = self.begin(plan_id, "manager", free_bytes_before)?;
+            self.connection.execute(
+                "INSERT INTO manager_action (action_id, adapter, manager_action, privilege, estimated_bytes)
+                 VALUES (?1, ?2, ?3, ?4, ?5)",
+                params![id, adapter, action, privilege, estimated_bytes.map(clamp)],
+            )?;
+            for (position, (tool, arguments)) in commands.iter().enumerate() {
+                let encoded = serde_json::to_string(arguments)
+                    .map_err(|error| rusqlite::Error::ToSqlConversionFailure(Box::new(error)))?;
+                self.connection.execute(
+                    "INSERT INTO manager_command (action_id, position, tool, arguments, state)
+                     VALUES (?1, ?2, ?3, ?4, 'pending')",
+                    params![id, clamp(position as u64), tool, encoded],
+                )?;
+            }
+            for (position, (path, bytes)) in items.iter().enumerate() {
+                self.connection.execute(
+                    "INSERT INTO action_item (action_id, position, path, outcome, bytes)
+                     VALUES (?1, ?2, ?3, 'in-progress', ?4)",
+                    params![id, clamp(position as u64), path, clamp(*bytes)],
+                )?;
+            }
+            Ok(id)
+        })();
+        match outcome {
+            Ok(id) => {
+                self.connection.execute_batch("COMMIT")?;
+                Ok(id)
+            }
+            Err(error) => {
+                let _ = self.connection.execute_batch("ROLLBACK");
+                Err(error)
+            }
+        }
+    }
+
+    /// Who holds an action open, and what state it is in.
+    pub fn owner(&self, action_id: &str) -> rusqlite::Result<Option<(i64, State)>> {
+        self.connection
+            .query_row(
+                "SELECT owner_pid, state FROM action WHERE id = ?1",
+                params![action_id],
+                |row| {
+                    let state: String = row.get(1)?;
+                    Ok((row.get(0)?, State::parse(&state)))
+                },
+            )
+            .optional()
+    }
+
+    pub fn command_state(
+        &self,
+        action_id: &str,
+        position: u64,
+    ) -> rusqlite::Result<Option<String>> {
+        self.connection
+            .query_row(
+                "SELECT state FROM manager_command WHERE action_id = ?1 AND position = ?2",
+                params![action_id, clamp(position)],
+                |row| row.get(0),
+            )
+            .optional()
+    }
+
+    pub fn set_command(
+        &self,
+        action_id: &str,
+        position: u64,
+        state: &str,
+        exit_code: Option<i64>,
+        output: Option<&str>,
+    ) -> rusqlite::Result<()> {
+        self.connection.execute(
+            "UPDATE manager_command SET state = ?3, exit_code = coalesce(?4, exit_code),
+                    output = coalesce(?5, output)
+              WHERE action_id = ?1 AND position = ?2",
+            params![action_id, clamp(position), state, exit_code, output],
+        )?;
+        Ok(())
+    }
+
+    pub fn add_observed(
+        &self,
+        action_id: &str,
+        position: u64,
+        path: &[u8],
+    ) -> rusqlite::Result<()> {
+        self.connection.execute(
+            "INSERT INTO action_item (action_id, position, path, outcome, bytes)
+             VALUES (?1, ?2, ?3, 'completed', 0)",
+            params![action_id, clamp(position), path],
+        )?;
+        Ok(())
+    }
+
+    pub fn manager(&self, action_id: &str) -> rusqlite::Result<Option<ManagerRecord>> {
+        let header = self
+            .connection
+            .query_row(
+                "SELECT adapter, manager_action, privilege, estimated_bytes FROM manager_action
+                  WHERE action_id = ?1",
+                params![action_id],
+                |row| {
+                    let estimated: Option<i64> = row.get(3)?;
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, String>(2)?,
+                        estimated,
+                    ))
+                },
+            )
+            .optional()?;
+        let Some((adapter, action, privilege, estimated)) = header else {
+            return Ok(None);
+        };
+        let mut statement = self.connection.prepare(
+            "SELECT position, tool, arguments, state, exit_code, output FROM manager_command
+              WHERE action_id = ?1 ORDER BY position",
+        )?;
+        let commands = statement
+            .query_map(params![action_id], |row| {
+                let encoded: String = row.get(2)?;
+                Ok(CommandRecord {
+                    position: unclamp(row.get(0)?),
+                    tool: row.get(1)?,
+                    arguments: serde_json::from_str(&encoded).unwrap_or_default(),
+                    state: row.get(3)?,
+                    exit_code: row.get(4)?,
+                    output: row.get(5)?,
+                })
+            })?
+            .collect::<rusqlite::Result<Vec<CommandRecord>>>()?;
+        Ok(Some(ManagerRecord {
+            adapter,
+            action,
+            privilege,
+            estimated_bytes: estimated.map(unclamp),
+            commands,
+        }))
     }
 
     fn items(&self, action_id: &str) -> rusqlite::Result<Vec<ItemRecord>> {
@@ -488,6 +751,7 @@ fn read_action(row: &rusqlite::Row<'_>) -> rusqlite::Result<ActionRecord> {
         free_bytes_before: before.map(unclamp),
         free_bytes_after: after.map(unclamp),
         items: Vec::new(),
+        manager: None,
     })
 }
 
@@ -519,11 +783,71 @@ CREATE TABLE IF NOT EXISTS action_item (
   bytes INTEGER NOT NULL DEFAULT 0,
   moved_device INTEGER,
   moved_inode INTEGER,
+  staging BLOB,
+  staging_device INTEGER,
+  staging_inode INTEGER,
   PRIMARY KEY (action_id, position)
 );
 
 CREATE INDEX IF NOT EXISTS action_started ON action(started_at DESC, id DESC);
+
+CREATE TABLE IF NOT EXISTS manager_action (
+  action_id TEXT PRIMARY KEY REFERENCES action(id) ON DELETE CASCADE,
+  adapter TEXT NOT NULL,
+  manager_action TEXT NOT NULL,
+  privilege TEXT NOT NULL,
+  estimated_bytes INTEGER
+);
+
+CREATE TABLE IF NOT EXISTS manager_command (
+  action_id TEXT NOT NULL REFERENCES action(id) ON DELETE CASCADE,
+  position INTEGER NOT NULL,
+  tool TEXT NOT NULL,
+  arguments TEXT NOT NULL,
+  state TEXT NOT NULL,
+  exit_code INTEGER,
+  output TEXT,
+  PRIMARY KEY (action_id, position)
+);
 ";
+
+/// Add the columns a journal written by an earlier build does not have.
+fn migrate(connection: &Connection) -> rusqlite::Result<()> {
+    let columns: Vec<String> = connection
+        .prepare("PRAGMA table_info(action_item)")?
+        .query_map([], |row| row.get(1))?
+        .collect::<rusqlite::Result<Vec<String>>>()?;
+    for (name, kind) in [
+        ("staging", "BLOB"),
+        ("staging_device", "INTEGER"),
+        ("staging_inode", "INTEGER"),
+    ] {
+        if !columns.iter().any(|column| column == name) {
+            connection
+                .execute_batch(&format!("ALTER TABLE action_item ADD COLUMN {name} {kind}"))?;
+        }
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+impl Journal {
+    pub fn connection_for_tests(&self) -> &Connection {
+        &self.connection
+    }
+}
+
+#[cfg(test)]
+pub mod tests_support {
+    use super::*;
+
+    pub fn abandon(journal: &Journal, id: &str) {
+        journal
+            .connection
+            .execute("UPDATE action SET owner_pid = 0 WHERE id = ?1", params![id])
+            .unwrap();
+    }
+}
 
 /// Whether some other live process holds this record open. A process ID the
 /// kernel has since handed to something else reads as alive, which only delays
@@ -612,6 +936,114 @@ fn decode_cursor(cursor: &str) -> rusqlite::Result<(i64, String)> {
 mod tests {
     use super::*;
     use crate::testing::Sandbox;
+
+    const OLD_SCHEMA: &str = "
+CREATE TABLE action (id TEXT PRIMARY KEY, plan_id TEXT NOT NULL, operation TEXT NOT NULL,
+  started_at INTEGER NOT NULL, finished_at INTEGER, state TEXT NOT NULL,
+  completed INTEGER NOT NULL DEFAULT 0, skipped INTEGER NOT NULL DEFAULT 0,
+  failed INTEGER NOT NULL DEFAULT 0, selected_bytes INTEGER NOT NULL DEFAULT 0,
+  trashed_bytes INTEGER NOT NULL DEFAULT 0, free_before INTEGER, free_after INTEGER,
+  owner_pid INTEGER NOT NULL DEFAULT 0);
+CREATE TABLE action_item (action_id TEXT NOT NULL REFERENCES action(id) ON DELETE CASCADE,
+  position INTEGER NOT NULL, path BLOB NOT NULL, destination BLOB, outcome TEXT NOT NULL,
+  reason TEXT, bytes INTEGER NOT NULL DEFAULT 0, moved_device INTEGER, moved_inode INTEGER,
+  PRIMARY KEY (action_id, position));
+";
+
+    use super::tests_support::abandon;
+
+    #[test]
+    fn a_journal_written_before_staging_was_recorded_opens_and_records_it() {
+        let sandbox = Sandbox::new("journal-migrate");
+        let connection = Connection::open(journal_path(sandbox.path())).unwrap();
+        connection.execute_batch(OLD_SCHEMA).unwrap();
+        drop(connection);
+
+        let journal = Journal::open(sandbox.path()).unwrap();
+        let id = journal
+            .begin("plan-0123456789ab", "copy-move", None)
+            .unwrap();
+        journal
+            .record_intent(&id, 0, b"/src/a", Some(b"/dst/a"))
+            .unwrap();
+        journal
+            .record_staging(
+                &id,
+                0,
+                b"/dst/a.disktop-partial-1-0",
+                &Identity {
+                    device: 1,
+                    inode: 2,
+                },
+            )
+            .unwrap();
+    }
+
+    #[test]
+    fn only_an_uncertain_item_with_a_staged_name_is_abandoned() {
+        let sandbox = Sandbox::new("journal-abandoned");
+        let journal = Journal::open(sandbox.path()).unwrap();
+        let id = journal
+            .begin("plan-0123456789ab", "copy-move", None)
+            .unwrap();
+        journal
+            .record_intent(&id, 0, b"/src/a", Some(b"/dst/a"))
+            .unwrap();
+        journal
+            .record_staging(
+                &id,
+                0,
+                b"/dst/a.disktop-partial-1-0",
+                &Identity {
+                    device: 1,
+                    inode: 2,
+                },
+            )
+            .unwrap();
+        journal
+            .record_intent(&id, 1, b"/src/b", Some(b"/dst/b"))
+            .unwrap();
+        journal
+            .record_staging(
+                &id,
+                1,
+                b"/dst/b.disktop-partial-1-1",
+                &Identity {
+                    device: 1,
+                    inode: 3,
+                },
+            )
+            .unwrap();
+        journal.clear_staging(&id, 1).unwrap();
+        assert!(
+            journal.abandoned_staging().unwrap().is_empty(),
+            "nothing is abandoned while its owner runs"
+        );
+
+        abandon(&journal, &id);
+        journal.reconcile().unwrap();
+        let abandoned = journal.abandoned_staging().unwrap();
+        assert_eq!(abandoned.len(), 1);
+        assert_eq!(abandoned[0].path, b"/dst/a.disktop-partial-1-0");
+        assert_eq!(
+            abandoned[0].identity,
+            Some(Identity {
+                device: 1,
+                inode: 2
+            })
+        );
+
+        journal.resolve_staging(&id, 0, "released").unwrap();
+        assert!(journal.abandoned_staging().unwrap().is_empty());
+        let record = journal.get(&id).unwrap().unwrap();
+        assert!(
+            record.items[0]
+                .reason
+                .as_deref()
+                .unwrap()
+                .contains("released")
+        );
+    }
 
     #[test]
     fn a_finished_action_reads_back_with_its_items() {

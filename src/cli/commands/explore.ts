@@ -13,7 +13,8 @@ import {
   encodeTypeTotal,
   writeEnvelope,
 } from "../output.js";
-import { entryLines, typeTotalLines, warningLines } from "../text.js";
+import { entryLines, ownerLines, typeTotalLines, warningLines } from "../text.js";
+import type { Warning } from "../../domain/models.js";
 
 export interface ExploreOptions {
   readonly asJson: boolean;
@@ -29,6 +30,7 @@ export interface ExploreOptions {
   readonly limit?: string;
   readonly cursor?: string;
   readonly typeTotals: boolean;
+  readonly owners?: boolean;
 }
 
 const AVAILABLE = { status: "available", explanation: "The index answered from a stored scan." } as const;
@@ -83,6 +85,7 @@ export async function runExplore(context: CliContext, options: ExploreOptions): 
     limit: boundedLimit(options.limit === undefined ? undefined : Number(options.limit)),
     ...(options.cursor === undefined ? {} : { cursor: options.cursor }),
     includeTypeTotals: options.typeTotals,
+    ...(options.owners === true ? { includeOwnerTotals: true } : {}),
   });
 
   if (outcome.kind === "unavailable") {
@@ -98,7 +101,10 @@ export async function runExplore(context: CliContext, options: ExploreOptions): 
   const complete = snapshot.completeness.complete;
   const status = complete ? "complete" : "incomplete";
   const exitCode = complete ? EXIT.complete : EXIT.incomplete;
-  const warnings = complete ? [] : snapshot.completeness.warnings;
+  const warnings = [
+    ...(complete ? [] : snapshot.completeness.warnings),
+    ...(outcome.page.owners === undefined ? [] : ownerWarnings(snapshot, outcome.page.namesRead === true)),
+  ];
 
   if (options.asJson) {
     writeEnvelope(
@@ -118,6 +124,17 @@ export async function runExplore(context: CliContext, options: ExploreOptions): 
           entries: outcome.page.entries.map(encodeIndexedEntry),
           ...(outcome.page.nextCursor === undefined ? {} : { nextCursor: outcome.page.nextCursor }),
           ...(outcome.page.typeTotals === undefined ? {} : { typeTotals: outcome.page.typeTotals.map(encodeTypeTotal) }),
+          ...(outcome.page.owners === undefined
+            ? {}
+            : {
+                owners: outcome.page.owners.map((owner) => ({
+                  ownerId: owner.ownerId.toString(10),
+                  ...(owner.name === undefined ? {} : { name: owner.name }),
+                  entries: owner.entries.toString(10),
+                  allocatedBytes: owner.allocatedBytes.toString(10),
+                  apparentBytes: owner.apparentBytes.toString(10),
+                })),
+              }),
           completeness: encodeCompleteness(snapshot.completeness),
         },
       }),
@@ -135,6 +152,12 @@ export async function runExplore(context: CliContext, options: ExploreOptions): 
       context.output.stdout(`${line}\n`);
     }
   }
+  if (outcome.page.owners !== undefined) {
+    context.output.stdout("\n");
+    for (const line of ownerLines(outcome.page.owners, context.settings.units)) {
+      context.output.stdout(`${line}\n`);
+    }
+  }
   if (outcome.page.nextCursor !== undefined) {
     context.output.stderr(`More entries remain. Continue with --cursor ${outcome.page.nextCursor}\n`);
   }
@@ -145,6 +168,20 @@ export async function runExplore(context: CliContext, options: ExploreOptions): 
 }
 
 /** The newest snapshot one of whose roots is the path or an ancestor of it. */
+function ownerWarnings(snapshot: SnapshotSummary, namesRead: boolean): Warning[] {
+  const warnings: Warning[] = [];
+  if (snapshot.completeness.inaccessibleDirectories > 0n || !snapshot.completeness.complete) {
+    warnings.push({
+      code: "owners-floor",
+      message: `The scan could not read ${snapshot.completeness.inaccessibleDirectories} director${snapshot.completeness.inaccessibleDirectories === 1n ? "y" : "ies"}, so each owner's total is a floor. Reading them needs an administrator scan: a read-only 'disktop scan' run as root from a root-owned install.`,
+    });
+  }
+  if (!namesRead) {
+    warnings.push({ code: "passwd-unreadable", message: "Account names could not be read, so owners are listed by their numeric id." });
+  }
+  return warnings;
+}
+
 export async function newestCovering(
   context: CliContext,
   wanted: RawPath,

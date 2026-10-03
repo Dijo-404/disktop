@@ -1,5 +1,6 @@
 import { CapabilityUnavailable } from "../domain/errors.js";
 import type { Capability, IndexedEntry } from "../domain/models.js";
+import type { AccountNamesPort } from "../ports/accounts.js";
 import type {
   EntryFilter,
   EntryQuery,
@@ -21,12 +22,24 @@ export interface ExploreRequest {
   readonly limit?: number;
   readonly cursor?: string;
   readonly includeTypeTotals?: boolean;
+  readonly includeOwnerTotals?: boolean;
+}
+
+export interface OwnerShare {
+  readonly ownerId: bigint;
+  readonly name?: string;
+  readonly entries: bigint;
+  readonly allocatedBytes: bigint;
+  readonly apparentBytes: bigint;
 }
 
 export interface ExplorePage {
   readonly entries: readonly IndexedEntry[];
   readonly nextCursor?: string;
   readonly typeTotals?: readonly TypeTotal[];
+  readonly owners?: readonly OwnerShare[];
+  /** False when account names could not be read, so owners are ids only. */
+  readonly namesRead?: boolean;
 }
 
 export type ExploreOutcome =
@@ -44,7 +57,7 @@ export interface ExploreService {
  * the totals for its whole subtree, so ranking by size needs no second pass
  * and nothing here ever holds the tree.
  */
-export function createExploreService(index: FileIndexPort): ExploreService {
+export function createExploreService(index: FileIndexPort, accounts?: AccountNamesPort): ExploreService {
   return {
     async page(request) {
       const query: EntryQuery = {
@@ -55,16 +68,27 @@ export function createExploreService(index: FileIndexPort): ExploreService {
         limit: boundedLimit(request.limit),
         ...(request.cursor === undefined ? {} : { cursor: request.cursor }),
         ...(request.includeTypeTotals === undefined ? {} : { includeTypeTotals: request.includeTypeTotals }),
+        ...(request.includeOwnerTotals === undefined ? {} : { includeOwnerTotals: request.includeOwnerTotals }),
       };
 
       try {
         const page = await index.query(query);
+        const names = page.ownerTotals === undefined ? undefined : await (accounts?.names() ?? new Map<bigint, string>());
         return {
           kind: "page",
           page: {
             entries: page.entries,
             ...(page.nextCursor === undefined ? {} : { nextCursor: page.nextCursor }),
             ...(page.typeTotals === undefined ? {} : { typeTotals: page.typeTotals }),
+            ...(page.ownerTotals === undefined || names === undefined
+              ? {}
+              : {
+                  owners: page.ownerTotals.map((owner) => {
+                    const name = names.get(owner.ownerId);
+                    return { ownerId: owner.ownerId, ...(name === undefined ? {} : { name }), entries: owner.entries, allocatedBytes: owner.allocatedBytes, apparentBytes: owner.apparentBytes };
+                  }),
+                  namesRead: names.size > 0,
+                }),
           },
         };
       } catch (error) {

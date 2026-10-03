@@ -48,8 +48,13 @@ pub fn copy_file(
     name: &[u8],
     permissions: u32,
     modified_nanoseconds: Option<u64>,
+    on_created: &mut dyn FnMut(RawFd) -> io::Result<()>,
 ) -> io::Result<u64> {
     let staged = sys::openat_create_exclusive(destination_parent, name, permissions)?;
+    if let Err(error) = on_created(staged) {
+        sys::close(staged);
+        return Err(error);
+    }
     // The umask masked the mode the create asked for, so the bits are set
     // again here; otherwise a copy of a 0o666 file arrives as 0o644.
     let outcome = sys::fchmod(staged, permissions)
@@ -108,9 +113,14 @@ pub fn copy_tree(
     destination_parent: RawFd,
     name: &[u8],
     permissions: u32,
+    on_created: &mut dyn FnMut(RawFd) -> io::Result<()>,
 ) -> io::Result<Copied> {
     sys::mkdirat(destination_parent, name, permissions)?;
     let staged = sys::open_directory_no_symlinks(destination_parent, name)?;
+    if let Err(error) = on_created(staged) {
+        sys::close(staged);
+        return Err(error);
+    }
     sys::fchmod(staged, permissions)?;
     let mut copied = Copied { files: 0, bytes: 0 };
     let outcome = copy_children(source, staged, 0, &mut copied);
@@ -170,6 +180,7 @@ fn copy_children(
                     &name,
                     metadata.permissions,
                     Some(metadata.modified_nanoseconds),
+                    &mut |_| Ok(()),
                 );
                 sys::close(descriptor);
                 let bytes = outcome?;
@@ -246,5 +257,55 @@ fn pread(descriptor: RawFd, buffer: &mut [u8], offset: u64) -> io::Result<usize>
         if error.kind() != io::ErrorKind::Interrupted {
             return Err(error);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::testing::Sandbox;
+
+    #[test]
+    fn the_caller_learns_what_was_created_before_a_byte_is_copied() {
+        let sandbox = Sandbox::new("transfer-created");
+        sandbox.file(b"source.bin", 4096);
+        let parent = sys::open_root(&sandbox.bytes()).unwrap();
+        let source = sys::openat_read_no_symlinks(parent, b"source.bin").unwrap();
+        let mut seen = None;
+        copy_file(
+            source,
+            parent,
+            b"copy.bin",
+            0o600,
+            None,
+            &mut |descriptor| {
+                let metadata = sys::metadata_of(descriptor)?;
+                seen = Some((metadata.inode, metadata.apparent_bytes));
+                Ok(())
+            },
+        )
+        .unwrap();
+        let copied = sys::metadata_at(parent, b"copy.bin").unwrap();
+        sys::close(source);
+        sys::close(parent);
+        assert_eq!(
+            seen,
+            Some((copied.inode, 0)),
+            "the hook ran on the new, still empty file"
+        );
+    }
+
+    #[test]
+    fn a_hook_that_fails_stops_the_copy() {
+        let sandbox = Sandbox::new("transfer-hook-fails");
+        sandbox.file(b"source.bin", 4096);
+        let parent = sys::open_root(&sandbox.bytes()).unwrap();
+        let source = sys::openat_read_no_symlinks(parent, b"source.bin").unwrap();
+        let outcome = copy_file(source, parent, b"copy.bin", 0o600, None, &mut |_| {
+            Err(io::Error::other("the journal refused"))
+        });
+        sys::close(source);
+        sys::close(parent);
+        assert!(outcome.is_err());
     }
 }

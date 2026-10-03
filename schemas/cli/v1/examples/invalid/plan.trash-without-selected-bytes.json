@@ -1,0 +1,47 @@
+{
+  "schemaVersion": "1",
+  "command": "clean plan",
+  "generatedAt": "2026-10-01T08:41:19.004Z",
+  "status": "complete",
+  "exitCode": 0,
+  "data": {
+    "plan": {
+      "id": "plan-20261001T084119004Z-9f2c1ab0",
+      "operation": "trash",
+      "createdAt": "2026-10-01T08:41:19.004Z",
+      "expiresAt": "2026-10-01T09:41:19.004Z",
+      "providerId": "cache.language",
+      "findingId": "cache.language:cargo-registry",
+      "scopeSummary": "1 directory, starting at /home/example/.cargo/registry",
+      "reversibility": "undo-from-trash",
+      "permission": "user",
+      "exactItemCount": "1",
+      "entries": [
+        {
+          "path": {
+            "bytesBase64": "L2hvbWUvZXhhbXBsZS8uY2FyZ28vcmVnaXN0cnk=",
+            "display": "/home/example/.cargo/registry",
+            "utf8": "/home/example/.cargo/registry"
+          },
+          "expected": {
+            "device": "66306",
+            "inode": "1179651",
+            "mountId": "29",
+            "kind": "directory",
+            "apparentBytes": "4096",
+            "modifiedNanoseconds": "1758000000123456789"
+          },
+          "reviewedBytes": "7314112512",
+          "subtree": {
+            "entries": "1284",
+            "digest": "5f2c00000000000000000000000000000000000000000000000000000000a1b9"
+          }
+        }
+      ],
+      "regenerationCost": "Re-downloaded on the next build that needs a crate.",
+      "warnings": [
+        "~/.cargo/registry holds downloaded crate sources and their index."
+      ]
+    }
+  }
+}

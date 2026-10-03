@@ -67,9 +67,10 @@ list of targets and asserts that the record never reads as complete, that no ite
 left claiming to be running after reconciliation, that nothing left its original path
 without the journal accounting for it, and that reconciling twice changes nothing.
 
-Two limits survive this phase and are documented rather than papered over. A reviewed
-directory is revalidated by its own identity, which catches an entry added to it and
-does not catch a file changed further below. And the last-component rename race in
+One limit survives and is documented rather than papered over. (A second one, that a
+reviewed directory was revalidated only by its own identity, was closed later: plans
+now carry a digest of everything below a directory, checked again before it is
+touched.) The last-component rename race in
 [threat-model.md](../threat-model.md) is unchanged: the helper narrows the window to
 one `statx` and one syscall against a parent descriptor it opened itself, and refuses
 a parent any user can write to without a sticky bit, but it does not claim to have

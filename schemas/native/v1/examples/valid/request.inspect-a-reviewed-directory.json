@@ -1,0 +1,10 @@
+{
+  "protocolVersion": 1,
+  "requestId": "inspect-1",
+  "operation": "inspect",
+  "arguments": {
+    "paths": [
+      "L2hvbWUvZXhhbXBsZS8uY2FjaGUvcGlw"
+    ]
+  }
+}

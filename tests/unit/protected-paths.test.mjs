@@ -168,3 +168,13 @@ test("a destination is refused when the context nobody could read is incomplete"
   assert.equal(verdict.allowed, false);
   assert.equal(verdict.code, "invalid-plan");
 });
+
+test("a directory with another filesystem mounted below it is refused", () => {
+  const nested = { ...context, mountRoots: [...context.mountRoots, rawPathFromUtf8("/home/example/projects/data")] };
+  const refused = classifyGenericTarget(rawPathFromUtf8("/home/example/projects"), nested);
+  assert.equal(refused.allowed, false);
+  assert.equal(refused.code, "protected-path");
+  assert.match(refused.reason, /mount point below it/);
+  assert.deepEqual(classifyGenericTarget(rawPathFromUtf8("/home/example/projects-old"), nested), { allowed: true });
+  assert.deepEqual(classifyGenericTarget(rawPathFromUtf8("/home/example/projects/data/cache"), nested), { allowed: true });
+});

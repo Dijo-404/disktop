@@ -38,6 +38,7 @@ const PLAN = {
         modifiedNanoseconds: 1_759_190_400_123_456_789n,
       },
       reviewedBytes: 7_314_112_512n,
+      subtree: { entries: 1284n, digest: "5f2c".padEnd(64, "0") },
     },
   ],
   regenerationCost: "Re-downloaded on the next build that needs a crate.",
@@ -114,7 +115,8 @@ function actionContext(overrides = {}) {
         }
       );
     },
-    async history() {
+    async history(cursor, limit) {
+      recorded.history = { cursor, limit };
       return overrides.history ?? { records: [RECORD], reconciled: 0n };
     },
     async restore(journalId) {
@@ -232,6 +234,7 @@ test("applying a confirmed plan reports the three numbers separately", async () 
     planId: PLAN.id,
     confirmed: true,
     acknowledgePermanent: false,
+    interactive: false,
   });
 });
 
@@ -327,4 +330,90 @@ test("find refuses a kind that is not one of the four", async () => {
   assert.equal(status, 2);
   assert.equal(envelopeOf(context, "find").error.code, "invalid-input");
   assert.equal(context.recordedActions.find, undefined);
+});
+
+test("Ctrl+C during 'find duplicates' aborts the signal the search was given", async () => {
+  const handlers = new Set();
+  let received;
+  const context = fakeContext({
+    actions: {
+      async find(_request, signal) {
+        received = signal;
+        for (const handler of handlers) handler();
+        return { kind: "duplicates", result: { kind: "found", groups: [], reclaimableBytes: 0n, complete: true, warnings: [], candidatesRead: 0n, filesHashed: 0n } };
+      },
+    },
+  });
+  context.signals = { listen: (handler) => handlers.add(handler), stop: (handler) => handlers.delete(handler) };
+  await runCli(["find", "duplicates", "--json"], context);
+  assert.ok(received, "the search was handed a signal");
+  assert.equal(received.aborted, true);
+  assert.equal(handlers.size, 0, "the interrupt listener is removed afterwards");
+});
+
+test("history reaches the page a cursor names, at the size asked for", async () => {
+  const context = actionContext({ history: { records: [RECORD], reconciled: 0n, nextCursor: "c0ffee" } });
+  const status = await runCli(["history", "--cursor", "abc123", "--limit", "5", "--json"], context);
+  assert.equal(status, 0);
+  assert.deepEqual(context.recordedActions.history, { cursor: "abc123", limit: 5 });
+  assert.equal(envelopeOf(context, "history").data.nextCursor, "c0ffee");
+});
+
+test("history in text says how to reach the next page", async () => {
+  const context = actionContext({ history: { records: [RECORD], reconciled: 0n, nextCursor: "c0ffee" } });
+  await runCli(["history"], context);
+  assert.match(context.captured.stdout, /disktop history --cursor c0ffee/);
+});
+
+for (const limit of ["0", "201", "ten"]) {
+  test(`history --limit ${limit} is an input error`, async () => {
+    const context = actionContext();
+    const status = await runCli(["history", "--limit", limit, "--json"], context);
+    assert.equal(status, 2);
+    assert.equal(envelopeOf(context, "history").error.code, "invalid-input");
+  });
+}
+
+test("a cursor the journal did not issue is an input error from history, not a crash", async () => {
+  const context = actionContext();
+  context.actions.history = async () => {
+    const error = new Error("The journal cursor is not one this journal issued.");
+    error.failure = { code: "invalid-plan", message: "The journal could not be read: The journal cursor is not one this journal issued." };
+    throw error;
+  };
+  const status = await runCli(["history", "--cursor", "zz", "--json"], context);
+  assert.equal(status, 2);
+  const envelope = envelopeOf(context, "history");
+  assert.equal(envelope.command, "history");
+  assert.equal(envelope.error.code, "invalid-input");
+});
+
+test("apply tells the pipeline whether a password prompt can be answered", async () => {
+  const atTerminal = actionContext();
+  atTerminal.interactive = true;
+  await runCli(["clean", "apply", PLAN.id, "--yes"], atTerminal);
+  assert.equal(atTerminal.recordedActions.apply.interactive, true);
+
+  const scripted = actionContext();
+  scripted.interactive = true;
+  await runCli(["clean", "apply", PLAN.id, "--yes", "--json"], scripted);
+  assert.equal(scripted.recordedActions.apply.interactive, false, "--json never prompts");
+});
+
+test("an action this machine cannot carry out says why, without claiming it is about files", async () => {
+  const context = actionContext({
+    applyOutcome: { kind: "unavailable", capability: { status: "missing-tool", explanation: "Disktop has no apt adapter on this machine." } },
+  });
+  const status = await runCli(["clean", "apply", PLAN.id, "--yes", "--json"], context);
+  assert.equal(status, 2);
+  const message = envelopeOf(context, "apply").error.message;
+  assert.match(message, /no apt adapter/);
+  assert.doesNotMatch(message, /change files/);
+});
+
+test("a manager finding is planned as a manager action without naming --operation", async () => {
+  const context = actionContext();
+  await runCli(["clean", "plan", "managers:apt.clean", "--json"], context);
+  assert.equal(context.recordedActions.plan.operation, "manager");
+  assert.equal(context.recordedActions.plan.findingId, "managers:apt.clean");
 });

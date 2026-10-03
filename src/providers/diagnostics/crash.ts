@@ -56,7 +56,7 @@ export function createCrashProvider(options: CrashOptions = {}): FindingProvider
               "A core file is a copy of a process's memory, so these can hold documents, keys, or session tokens.",
               owned
                 ? "This directory belongs to you, so it can go through the ordinary reviewed Trash action."
-                : "This directory belongs to the system crash reporter, which is what should remove its own files.",
+                : "This directory belongs to the system crash reporter. Disktop offers its own tmpfiles.d age policy for it as managers:tmpfiles.clean-crash.",
             ],
             paths: [root],
             actions: owned ? ["trash"] : [],

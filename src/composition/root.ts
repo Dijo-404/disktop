@@ -1,5 +1,8 @@
-import { homedir } from "node:os";
-import { join } from "node:path";
+import { realpathSync } from "node:fs";
+import { homedir, release } from "node:os";
+import { dirname, join } from "node:path";
+import { createTimerService, type TimerService } from "../application/timer.js";
+import { createSystemdUserTimer } from "../platform/linux/notifications/systemd-timer.js";
 import { createDashboardService, type DashboardService, type DashboardSettings } from "../application/dashboard.js";
 import { createExploreService, type ExploreService } from "../application/explore.js";
 import { createApplyService, type ApplyService } from "../application/apply-action.js";
@@ -10,15 +13,33 @@ import { createPlanService, type PlanService } from "../application/plan-action.
 import { createUndoService, type UndoService } from "../application/undo.js";
 import { createScanService, type ScanService } from "../application/scan.js";
 import { createSnapshotService, type SnapshotService } from "../application/snapshots.js";
-import type { RawPath, Warning } from "../domain/models.js";
+import type { Alert, RawPath, Warning } from "../domain/models.js";
+import { notifyAlerts } from "../application/alert-notifier.js";
+import { createNotifySend } from "../platform/linux/notifications/notify-send.js";
+import type { NotificationOutcome } from "../ports/notifications.js";
 import { rawPathFromUtf8 } from "../domain/paths.js";
 import { createLinuxInventory } from "../platform/linux/inventory/index.js";
+import { createAccountNames } from "../platform/linux/accounts.js";
+import { inInitialUserNamespace, verifyRootOwnedInstall } from "../platform/linux/install-ownership.js";
+import { StartupRefused } from "../domain/errors.js";
 import { createIndexFootprint } from "../platform/linux/footprint.js";
 import { createPathProbe } from "../platform/linux/probe.js";
 import { createToolPort } from "../platform/linux/tools.js";
 import { createPackageInventory } from "../platform/linux/packages/index.js";
 import { createBuiltInProviders } from "../providers/index.js";
 import { createNativeActions } from "../platform/linux/actions/index.js";
+import { createContainerAdapter } from "../platform/linux/managers/containers.js";
+import { createManagerExecutor } from "../platform/linux/managers/execute.js";
+import { createFlatpakAdapter } from "../platform/linux/managers/flatpak.js";
+import { createManagerInventory } from "../platform/linux/managers/index.js";
+import { createJournaldAdapter } from "../platform/linux/managers/journald.js";
+import { createKernelAdapter } from "../platform/linux/managers/kernels.js";
+import { createPackageCacheAdapters } from "../platform/linux/managers/package-cache.js";
+import { createSnapAdapter } from "../platform/linux/managers/snap.js";
+import { createTmpfilesAdapter } from "../platform/linux/managers/tmpfiles.js";
+import { createCommandRunner } from "../platform/linux/privilege.js";
+import { resolveTrustedExecutable } from "../platform/linux/process.js";
+import type { ActionPort } from "../ports/actions.js";
 import { createNativeScanner } from "../platform/linux/scan/index.js";
 import { NativeHelperClient } from "../native/client.js";
 import type { Accounting } from "../ports/scan.js";
@@ -58,6 +79,11 @@ export interface Services {
   };
   readonly settings: DashboardSettings;
   readonly startupWarnings: readonly Warning[];
+  readonly timer: TimerService;
+  readonly alertNotifications: {
+    readonly enabled: boolean;
+    notify(alerts: readonly Alert[]): Promise<NotificationOutcome | undefined>;
+  };
 }
 
 export interface CompositionOptions {
@@ -67,6 +93,16 @@ export interface CompositionOptions {
 
 export async function createServices(options: CompositionOptions = {}): Promise<Services> {
   const environment = options.environment ?? process.env;
+  if ((process.geteuid?.() ?? -1) === 0 && inInitialUserNamespace()) {
+    const packageRoot = dirname(dirname(dirname(realpathSync(process.argv[1] ?? ""))));
+    const install = await verifyRootOwnedInstall(packageRoot);
+    if (!install.ok) {
+      throw new StartupRefused({
+        code: "permission-denied",
+        message: `Disktop runs as root only from a root-owned install, never 'sudo npx': ${install.reason}`,
+      });
+    }
+  }
   const locations = resolveLocations(environment, options.homeDirectory ?? homedir());
   const loaded = await loadConfigFile(locations.configFile);
   const config = loaded.config;
@@ -151,9 +187,46 @@ export async function createServices(options: CompositionOptions = {}): Promise<
     homeTrashDirectory,
     start: () => NativeHelperClient.start(),
   });
-  const explore = createExploreService(scanner);
+  const installed = async (tool: string): Promise<boolean> => (await resolveTrustedExecutable(tool)) !== undefined;
+  const managerAdapters = [
+    ...createPackageCacheAdapters({ tools, paths: discovery.paths, installed }),
+    createJournaldAdapter({ tools, keepBytes: BigInt(config.managers.journalKeepBytes) }),
+    createSnapAdapter({ tools, paths: discovery.paths }),
+    createFlatpakAdapter({ tools, home: options.homeDirectory ?? homedir() }),
+    createContainerAdapter("docker", { tools }),
+    createContainerAdapter("podman", { tools }),
+    createKernelAdapter({
+      tools,
+      runningRelease: release,
+      installed,
+      kernelReleases: async () =>
+        new Set(
+          (await discovery.paths.list(rawPathFromUtf8("/lib/modules")))
+            .map((entry) => entry.utf8?.slice(entry.utf8.lastIndexOf("/") + 1))
+            .filter((name): name is string => name !== undefined),
+        ),
+    }),
+    createTmpfilesAdapter({ tools, installed }),
+  ];
+  const managers = createManagerInventory(managerAdapters);
+  const managerExecutor = createManagerExecutor({
+    adapters: managerAdapters,
+    runner: createCommandRunner(),
+    journalDirectory: locations.stateDirectory,
+    start: () => NativeHelperClient.start(),
+  });
+  const routedActions: ActionPort = {
+    apply: (plan, signal, applyOptions) =>
+      plan.operation === "manager"
+        ? managerExecutor.apply(plan, signal, applyOptions)
+        : actions.apply(plan, signal, applyOptions),
+    restore: (journalId, signal) => actions.restore(journalId, signal),
+  };
+
+  const explore = createExploreService(scanner, createAccountNames());
+  const notifier = createNotifySend({ environment });
   const footprint = createFootprintService(
-    createBuiltInProviders({ packages: createPackageInventory(tools) }),
+    createBuiltInProviders({ packages: createPackageInventory(tools), managers }),
     discovery,
     footprints,
   );
@@ -166,6 +239,8 @@ export async function createServices(options: CompositionOptions = {}): Promise<
       paths: discovery.paths,
       footprints,
       store: planStore,
+      inspect: actions,
+      managers,
       settings: {
         home,
         // Home is the scope cleanup acts inside; it is never a target itself,
@@ -180,17 +255,19 @@ export async function createServices(options: CompositionOptions = {}): Promise<
         ],
         trashDirectory: rawPathFromUtf8(homeTrashDirectory),
         expiryMinutes: config.cleanup.planExpiryMinutes,
+        effectiveUserId: process.geteuid?.() ?? -1,
       },
       now: () => new Date(),
       ruleHashFor: (findingId) => ruleHashesByFinding.get(findingId),
     }),
     apply: createApplyService({
       store: planStore,
-      actions,
+      actions: routedActions,
       now: () => new Date(),
       currentRuleHashes: () => ruleHashes,
+      effectiveUserId: process.geteuid?.() ?? -1,
     }),
-    undo: createUndoService({ journal: actions, actions }),
+    undo: createUndoService({ journal: actions, actions: routedActions }),
     find: createFindService(explore, createDuplicateService(scanner), inventory),
     scan: createScanService(scanner, {
       crossFilesystems: config.scan.crossFilesystems,
@@ -209,5 +286,13 @@ export async function createServices(options: CompositionOptions = {}): Promise<
     findDefaults: { staleAfterDays: config.find.staleAfterDays },
     settings,
     startupWarnings,
+    timer: createTimerService({
+      port: createSystemdUserTimer({ unitDirectory: join(dirname(locations.configDirectory), "systemd", "user") }),
+      entry: () => ({ node: process.execPath, script: realpathSync(process.argv[1] ?? "") }),
+    }),
+    alertNotifications: {
+      enabled: config.alerts.notify,
+      notify: (alerts) => notifyAlerts(notifier, alerts),
+    },
   };
 }

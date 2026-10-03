@@ -1,6 +1,6 @@
 # CLI contract
 
-Status: planned `1.0.0` command surface. `devices`, the `--json` dashboard, `alerts check`, `scan`, `explore`, `snapshots list|diff`, `clean`, `clean plan`, `clean apply`, `history`, `undo`, and `find duplicates|stale|empty|broken` are implemented; `report`, `timer`, and `completion` are declared in the parser and refuse with `not-implemented`. The JSON output contract in [`schemas/cli/v1/`](../schemas/cli/v1/) is normative and is validated by `tests/contract/cli-schema.test.mjs` against examples and by `tests/integration/cli-output.test.mjs` against what the CLI actually writes on a running host. The parser and generated help are normative now; completions become normative when they are implemented. See [PLAN.md](../PLAN.md#cli-and-outputs).
+Status: planned `1.0.0` command surface. `devices`, the `--json` dashboard, `alerts check`, `scan`, `explore`, `snapshots list|diff`, `clean`, `clean plan`, `clean apply`, `history`, `undo`, and `find duplicates|stale|empty|broken`, and `timer install|uninstall` are implemented; `report` and `completion` are declared in the parser and refuse with `not-implemented`. The JSON output contract in [`schemas/cli/v1/`](../schemas/cli/v1/) is normative and is validated by `tests/contract/cli-schema.test.mjs` against examples and by `tests/integration/cli-output.test.mjs` against what the CLI actually writes on a running host. The parser and generated help are normative now; completions become normative when they are implemented. See [PLAN.md](../PLAN.md#cli-and-outputs).
 
 ## What works today
 
@@ -9,14 +9,15 @@ Status: planned `1.0.0` command surface. `devices`, the `--json` dashboard, `ale
 | `disktop` | Opens the 80×24 dashboard when stdin and stdout are both terminals, and prints the text dashboard otherwise. |
 | `disktop --json` | One `dashboard.json` envelope: capability, filesystems, and alerts. |
 | `disktop devices [--json]` | Physical disks counted once with their partitions, plus every mounted filesystem joined to its backing disk. |
-| `disktop alerts check [--threshold PERCENT] [--json]` | Space and inode thresholds. Exits `1` when one is reached. |
+| `disktop alerts check [--threshold PERCENT] [--notify] [--json]` | Space and inode thresholds. Exits `1` when one is reached. `--notify`, or `alerts.notify` in the configuration, also sends one desktop notification; one that could not be sent is a warning and never changes the exit status. |
 | `disktop scan [PATH] [--json]` | Walks `PATH` (the working directory by default) through the helper, writes the detailed index, and saves a snapshot. `--accounting allocated\|apparent`, `--cross-filesystems`, `--throttle RATE`, `--max-depth DEPTH`. Ctrl+C stops it at a directory boundary and still reports what was measured. |
-| `disktop explore [PATH] [--json]` | One page of `PATH` and everything below it, from the most recent scan covering it. `--sort`, `--order`, `--kind`, `--min-size`, `--max-size`, `--ext`, `--name`, `--older-than DAYS`, `--limit`, `--cursor`, `--type-totals`. |
+| `disktop explore [PATH] [--json]` | One page of `PATH` and everything below it, from the most recent scan covering it. `--sort`, `--order`, `--kind`, `--min-size`, `--max-size`, `--ext`, `--name`, `--older-than DAYS`, `--limit`, `--cursor`, `--type-totals`, `--owners`. |
 | `disktop snapshots list\|diff [--json]` | Lists saved snapshots, or compares two of them (`--from`, `--to`; the two most recent by default). |
 | `disktop clean [--json]` | Lists what every detector found, and changes nothing. `--dry-run` is accepted and redundant. `--category CATEGORY` narrows the list, `--limit COUNT` shortens it, and `--no-sizes` skips measurement so every size stays unknown. |
-| `disktop clean plan [FINDING_ID] [--path PATH] [--operation trash\|permanent\|empty-trash] [--json]` | Reviews one finding or path into a stored, expiring plan. Changes nothing. `--operation empty-trash` needs no subject and can name only this user's own Trash. |
+| `disktop clean plan [FINDING_ID] [--path PATH] [--operation trash\|permanent\|empty-trash\|move\|compress\|hardlink\|manager] [--json]` | Reviews one finding or path into a stored, expiring plan. Changes nothing. `--operation empty-trash` needs no subject and can name only this user's own Trash. A `managers:` finding is planned as a manager action without naming the operation. |
 | `disktop clean apply PLAN_ID --yes [--permanent] [--json]` | Applies an already-reviewed plan, revalidating every item against the identity the plan recorded. |
-| `disktop history [--json]` | The durable action journal, with interrupted records resolved as it is read. |
+| `disktop history [--cursor CURSOR] [--limit COUNT] [--json]` | The durable action journal, newest first, with interrupted records resolved as it is read. A cursor the journal did not issue is an input error. |
+| `disktop timer install\|uninstall [--json]` | The opt-in hourly systemd user timer that runs only `alerts check --notify`. |
 | `disktop undo ACTION_ID --yes [--json]` | Puts back what one Trash action moved. |
 | `disktop find empty\|broken [--path PATH] [--limit COUNT] [--json]` | Empty directories and dangling symlinks, read out of the most recent scan covering the path. |
 | `disktop find duplicates [--path PATH] [--min-size SIZE] [--keep oldest\|newest\|in-path] [--keep-under PATH] [--limit COUNT] [--json]` | Groups of files holding the same bytes, with the copy a keep rule would keep. Reads content; changes nothing. |
@@ -76,8 +77,8 @@ The parser in `src/cli/parser.ts` will define commands and options once, and dri
 ## Listing what was found
 
 `disktop clean` runs every detector and prints what they found. It applies
-nothing: `clean plan` and `clean apply` still refuse with `not-implemented`,
-and no detector can delete.
+nothing, and no detector can delete; acting on a finding is `clean plan` and
+`clean apply`.
 
 Four rules shape the output. Every detector appears in `providers` with its
 capability, including the ones that could not look; `ran` is false when it
@@ -251,7 +252,7 @@ answered with no duplicates.
 | --- | --- |
 | `0` | Requested operation completed. |
 | `1` | `alerts check` reached its capacity or inode threshold. |
-| `2` | Invalid input, unavailable capability, permission failure, or other operational error. The scaffold also uses this for unimplemented commands. |
+| `2` | Invalid input, unavailable capability, permission failure, an unimplemented command, or another operational error. |
 | `3` | Scan or action ended incomplete, including partial results. |
 | `130` | Interrupted before a completed or partial result could be reported. |
 
@@ -259,8 +260,58 @@ An alert threshold is an expected monitoring outcome, so `1` is reserved for tha
 
 An inventory is incomplete whenever anything could not be read: a mount whose `statfs` was denied, a missing `lsblk`, an unparsable `mountinfo` line, or a configuration file that could not be applied. Each one adds a warning naming what was missed, and no missing reading is ever reported as a zero.
 
+## Manager actions
+
+`disktop clean` lists what package and container managers can clean, as findings whose
+id starts with `managers:` and whose `managerScope` is the exact command line they would
+run. `disktop clean plan managers:<action>` asks the manager again, now, and stores a
+plan holding the action, its items, and its parameters. The command is derived from
+those by a fixed template every time the plan is read, so an edited plan file cannot
+name a different program or option, and the plan's JSON shows the derived argument
+vectors under `manager.commands`.
+
+A manager plan is irreversible and needs `--permanent` at apply time. Apply runs a live
+preflight first: an item that is gone or in use again is skipped, and a kernel purge is
+refused outright if the running kernel has become one of the reviewed packages or the
+simulated removal now takes anything else. A command that needs root is run as
+`sudo -- /usr/bin/TOOL ARGS` (with `-n` when there is no terminal or `--json` was given)
+or, interactively without sudo, `pkexec`. Nothing else is escalated. A refused password
+skips the rest of the action, is recorded, and exits `3`.
+
+Counts and sizes are what the manager says, labelled `exact`, `estimated`, or
+`unknown`; `selectedBytes` is absent when the manager could not say beforehand. The
+result's free-space readings are the measurement.
+
+What is offered, and never more: package files apt, dnf, or pacman downloaded; archived
+journal files beyond `managers.journal_keep_bytes`; disabled Snap revisions; Flatpak
+runtimes Flatpak itself judges unused; dangling images, stopped containers, and
+anonymous volumes for Docker and Podman, never forced; Docker build cache nothing refers
+to; kernels that are neither running nor the newest, only when a simulated removal takes
+exactly their packages; and what systemd-tmpfiles' own age rules allow, for temporary
+files and, under `/var/crash` and `/var/lib/systemd/coredump`, crash files. A named
+volume is reported and never offered.
+
+Run as root, Disktop plans and applies no change to a file itself; reviewed manager
+actions still run.
+
+## Who owns the bytes
+
+`disktop explore PATH --owners` adds bytes per owning user under `PATH`, over regular
+files, from the scan that covers it, with account names from `/etc/passwd` where it can
+be read. A scan that could not open some directories makes every total a floor: the
+result exits `3` and says so, and names the read-only administrator scan that would
+complete it — `disktop scan` run as root from a root-owned install, never `sudo npx`.
+
 ## Configuration and scheduled alerts
 
-Configuration is planned at `$XDG_CONFIG_HOME/disktop/config.toml` with the standard home fallback. It will contain excludes, units, thresholds, provider settings, and bounded declarative cleanup rules. Rules never contain shell commands and pass through the same preview and apply path.
+`timer install` writes `disktop-alerts.service` and `disktop-alerts.timer` under
+`$XDG_CONFIG_HOME/systemd/user`, each starting with a `# Managed by Disktop` line, and
+enables the timer. The service runs `alerts check --notify` hourly and nothing else; it
+never cleans. Install refuses to overwrite a unit that does not carry the marker, and
+reports an install whose units were written but not enabled as incomplete. `timer
+uninstall` disables the timer and removes only marked units; it is safe to run twice.
+Neither command elevates anything.
 
-`timer install` adds an opt-in systemd **user** timer for `alerts check`, optionally using `notify-send`. It never schedules cleanup. `timer uninstall` removes only Disktop-owned user units. Neither command elevates the whole CLI.
+Configuration is `$XDG_CONFIG_HOME/disktop/config.toml` with the standard home fallback;
+[config.example.toml](config.example.toml) documents every key. Rules never contain
+shell commands and pass through the same preview and apply path.

@@ -2,7 +2,7 @@ import type { ActionPlan, ActionResult, PlannedEntry } from "../../../domain/act
 import { CapabilityUnavailable } from "../../../domain/errors.js";
 import type { OperationFailure, OperationFailureCode } from "../../../domain/errors.js";
 import type { RawPath } from "../../../domain/models.js";
-import { rawPathFromBytes, rawPathFromUtf8 } from "../../../domain/paths.js";
+import { rawPathFromBytes, rawPathFromUtf8, sanitizeText } from "../../../domain/paths.js";
 import type { HelperEvent, HelperStart, NativeHelperClient } from "../../../native/client.js";
 import {
   parseActionResult,
@@ -13,6 +13,8 @@ import {
 import type {
   ActionJournalPort,
   ActionPort,
+  InspectOutcome,
+  InspectPort,
   JournalItem,
   JournalPage,
   JournalRecord,
@@ -38,7 +40,9 @@ const PAGE_SIZE = 50;
  * a redundancy in it. One helper is started per operation and shut down after
  * it, so nothing is left running between commands.
  */
-export function createNativeActions(options: NativeActionOptions): ActionPort & ActionJournalPort {
+export function createNativeActions(
+  options: NativeActionOptions,
+): ActionPort & ActionJournalPort & InspectPort {
   const journalDirectory = rawPathFromUtf8(options.journalDirectory).bytesBase64;
   const homeTrashDirectory = rawPathFromUtf8(options.homeTrashDirectory).bytesBase64;
 
@@ -91,7 +95,10 @@ export function createNativeActions(options: NativeActionOptions): ActionPort & 
               // The helper recognises this user's own Trash from this rather
               // than taking Node's word for which directories it may empty.
               homeTrashDirectory,
-              trashDirectories: (plan.entries ?? []).map((entry) => entry.path.bytesBase64),
+              trashDirectories: (plan.entries ?? []).map((entry) => ({
+                path: entry.path.bytesBase64,
+                subtree: encodeSubtree(entry),
+              })),
             }
           : {
               planId: plan.id,
@@ -103,6 +110,27 @@ export function createNativeActions(options: NativeActionOptions): ActionPort & 
         signal,
       );
       return { ...result, planId: plan.id };
+    },
+
+    async inspect(paths, signal) {
+      const client = await connect(options.start);
+      try {
+        let terminal: HelperEvent | undefined;
+        for await (const event of client.stream(
+          "inspect",
+          { paths: paths.map((path) => path.bytesBase64) },
+          signal,
+        )) {
+          terminal = event;
+        }
+        if (terminal === undefined) {
+          throw new Error("The helper closed before it said what the directories hold.");
+        }
+        refuseError(terminal, client);
+        return parseInspection(terminal.result);
+      } finally {
+        await client.close();
+      }
     },
 
     async restore(journalId, signal) {
@@ -231,7 +259,47 @@ function encodeTarget(entry: PlannedEntry): Record<string, unknown> {
       modifiedNanoseconds: entry.expected.modifiedNanoseconds.toString(10),
     },
     reviewedBytes: entry.reviewedBytes.toString(10),
+    ...(entry.subtree === undefined
+      ? {}
+      : { subtree: { entries: entry.subtree.entries.toString(10), digest: entry.subtree.digest } }),
   };
+}
+
+function encodeSubtree(entry: PlannedEntry): { readonly entries: string; readonly digest: string } {
+  if (entry.subtree === undefined) {
+    throw new Error(`${entry.path.display} reached apply without what it held at review`);
+  }
+  return { entries: entry.subtree.entries.toString(10), digest: entry.subtree.digest };
+}
+
+function parseInspection(result: unknown): ReadonlyMap<string, InspectOutcome> {
+  const paths = (result as { paths?: unknown } | undefined)?.paths;
+  if (!Array.isArray(paths)) {
+    throw new Error("The helper's inspection named no paths.");
+  }
+  const answers = new Map<string, InspectOutcome>();
+  for (const answer of paths as Record<string, unknown>[]) {
+    const path = answer["path"];
+    if (typeof path !== "string") {
+      throw new Error("The helper's inspection named a path it did not encode.");
+    }
+    const subtree = answer["subtree"] as { entries?: unknown; digest?: unknown } | undefined;
+    const refusal = answer["refusal"] as { code?: unknown; message?: unknown } | undefined;
+    if (
+      subtree !== undefined &&
+      typeof subtree.entries === "string" &&
+      /^[0-9]{1,20}$/.test(subtree.entries) &&
+      typeof subtree.digest === "string" &&
+      /^[0-9a-f]{64}$/.test(subtree.digest)
+    ) {
+      answers.set(path, { kind: "inspected", subtree: { entries: BigInt(subtree.entries), digest: subtree.digest } });
+    } else if (refusal !== undefined && typeof refusal.code === "string" && typeof refusal.message === "string") {
+      answers.set(path, { kind: "refused", code: refusal.code, message: sanitizeText(refusal.message) });
+    } else {
+      throw new Error("The helper answered an inspection in a shape Disktop does not recognise.");
+    }
+  }
+  return answers;
 }
 
 /**
@@ -241,14 +309,14 @@ function encodeTarget(entry: PlannedEntry): Record<string, unknown> {
  * and whether that matched the plan is a question `apply-action.ts` asks from
  * the side the plan is on.
  */
-function toResult(result: ReturnType<typeof parseActionResult>): ActionResult {
+export function toResult(result: ReturnType<typeof parseActionResult>): ActionResult {
   return {
     planId: "",
     verification: [],
     completed: result.completed,
     skipped: result.skipped,
     failed: result.failed,
-    selectedBytes: result.selectedBytes,
+    ...(result.selectedBytes === undefined ? {} : { selectedBytes: result.selectedBytes }),
     bytesMovedToTrash: result.bytesMovedToTrash,
     ...(result.freeBytesBefore === undefined ? {} : { freeBytesBefore: result.freeBytesBefore }),
     ...(result.freeBytesAfter === undefined ? {} : { freeBytesAfter: result.freeBytesAfter }),
@@ -271,11 +339,30 @@ function toJournalRecord(record: NativeJournalRecord): JournalRecord {
     completed: record.completed,
     skipped: record.skipped,
     failed: record.failed,
-    selectedBytes: record.selectedBytes,
+    ...(record.selectedBytes === undefined ? {} : { selectedBytes: record.selectedBytes }),
     bytesMovedToTrash: record.bytesMovedToTrash,
     ...(record.freeBytesBefore === undefined ? {} : { freeBytesBefore: record.freeBytesBefore }),
     ...(record.freeBytesAfter === undefined ? {} : { freeBytesAfter: record.freeBytesAfter }),
     items: record.items.map(toJournalItem),
+    ...(record.manager === undefined
+      ? {}
+      : {
+          manager: {
+            adapter: record.manager.adapter,
+            action: record.manager.action,
+            privilege: record.manager.privilege,
+            ...(record.manager.estimatedBytes === undefined
+              ? {}
+              : { estimatedBytes: record.manager.estimatedBytes }),
+            commands: record.manager.commands.map((command) => ({
+              tool: command.tool,
+              arguments: command.arguments,
+              state: command.state,
+              ...(command.exitCode === undefined ? {} : { exitCode: command.exitCode }),
+              ...(command.output === undefined ? {} : { output: sanitizeText(command.output) }),
+            })),
+          },
+        }),
   };
 }
 
@@ -284,7 +371,7 @@ function toJournalItem(item: NativeJournalItem): JournalItem {
     path: decodePath(item.path),
     ...(item.destination === undefined ? {} : { destination: decodePath(item.destination) }),
     outcome: item.outcome,
-    ...(item.message === undefined ? {} : { message: item.message }),
+    ...(item.message === undefined ? {} : { message: sanitizeText(item.message) }),
     bytes: item.bytes,
   };
 }
@@ -310,6 +397,7 @@ const FAILURE_CODES: Readonly<Record<string, OperationFailureCode>> = {
   "changed-target": "changed-target",
   "unsafe-parent": "protected-path",
   "expired-plan": "invalid-plan",
+  "different-filesystem": "invalid-plan",
   "no-safe-trash": "unsupported",
   "invalid-arguments": "invalid-plan",
   "unknown-request": "invalid-plan",
@@ -325,7 +413,7 @@ const FAILURE_CODES: Readonly<Record<string, OperationFailureCode>> = {
  * else is a refusal about this particular request, and reaches the caller as a
  * failure it is expected to report rather than as a crash.
  */
-function refuseError(event: HelperEvent, client: NativeHelperClient): void {
+export function refuseError(event: HelperEvent, client: Pick<NativeHelperClient, "diagnostics">): void {
   if (event.event !== "error") {
     return;
   }
@@ -348,7 +436,7 @@ function refuseError(event: HelperEvent, client: NativeHelperClient): void {
   throw new Error(explanation);
 }
 
-async function connect(start: () => Promise<HelperStart>): Promise<NativeHelperClient> {
+export async function connect(start: () => Promise<HelperStart>): Promise<NativeHelperClient> {
   const started = await start();
   if (!started.started) {
     throw new CapabilityUnavailable(started.capability);

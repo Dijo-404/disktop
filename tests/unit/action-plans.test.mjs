@@ -73,13 +73,25 @@ test("a plan with nothing in it is refused rather than stored", () => {
   assert.throws(() => buildPlan(input({ entries: [] })), /at least one/i);
 });
 
-test("a plan that only a manager could carry out needs no entries but needs a scope", () => {
+test("a plan that only a manager could carry out needs no entries but needs a scope", async () => {
+  const { managerScope } = await import("../../dist/domain/managers.js");
   const plan = buildPlan(
-    input({ operation: "manager", entries: [], managerScope: "flatpak uninstall --unused" }),
+    input({
+      operation: "manager",
+      entries: [],
+      manager: managerScope({
+        action: "flatpak.remove-unused-system",
+        items: [],
+        parameters: {},
+        count: { kind: "unknown" },
+        preview: "none",
+      }),
+    }),
   );
-  assert.equal(plan.managerScope, "flatpak uninstall --unused");
+  assert.equal(plan.managerScope, "sudo flatpak uninstall --system --unused --noninteractive -y");
   assert.equal(plan.exactItemCount, undefined, "a manager cannot promise an exact count");
   assert.equal(plan.permission, "manager-privilege");
+  assert.throws(() => buildPlan(input({ operation: "manager", entries: [], managerScope: "flatpak uninstall --unused" })), RangeError);
 });
 
 test("an irreversible plan always carries the warning that says so", () => {
@@ -274,4 +286,9 @@ test("a rule hash that is not a hash is refused rather than stored", () => {
       }),
     RangeError,
   );
+});
+
+test("a plan whose expiry is not a date counts as expired", () => {
+  const stored = { ...buildPlan(input()), expiresAt: "never" };
+  assert.equal(isExpired(stored, new Date("2026-10-01T09:00:00.000Z")), true);
 });
