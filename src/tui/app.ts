@@ -154,8 +154,10 @@ class TerminalRestoration {
     };
 
     process.on("exit", this.#onExit);
-    process.on("uncaughtException", this.#onException);
-    process.on("unhandledRejection", this.#onException);
+    // Prepended, so the terminal is restored before any other handler writes
+    // a report that would otherwise land on the alternate screen and vanish.
+    process.prependListener("uncaughtException", this.#onException);
+    process.prependListener("unhandledRejection", this.#onException);
     for (const signal of this.#signals) {
       process.on(signal, this.#onSignal);
     }
