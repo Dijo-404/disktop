@@ -127,10 +127,31 @@ function homeRelative(display: string, home: string | undefined, theme: Theme): 
   return home !== undefined && home !== "/" && display.startsWith(`${home}/`) ? `${theme.glyphs.home}${display.slice(home.length)}` : display;
 }
 
+/** The smallest terminal a plan can be reviewed in: what it does has to fit on screen. */
+export const REVIEW_MINIMUM = { columns: 60, rows: 20 } as const;
+
+export function reviewFits(size: { readonly columns: number; readonly rows: number }): boolean {
+  return size.columns >= REVIEW_MINIMUM.columns && size.rows >= REVIEW_MINIMUM.rows;
+}
+
 function reviewDialog(dialog: Extract<Dialog, { kind: "review" }>, context: ViewContext, home: string | undefined): DialogOutput {
   const { theme, width, height, state } = context;
   const plan = dialog.plan;
   const inner = boxInner(width);
+  // A plan is confirmed only where it can be read in full: target, operation,
+  // undo, and the field to type into. Below that size it says so and offers
+  // no confirmation; the controller refuses one as well.
+  if (!reviewFits({ columns: width, rows: height + 4 })) {
+    const times = theme.unicode ? "×" : "x";
+    const content = wrap(
+      `Make the terminal larger to review this plan: it needs ${REVIEW_MINIMUM.columns}${times}${REVIEW_MINIMUM.rows} and this is ${width}${times}${height + 4}. Nothing has been applied.`,
+      inner,
+    ).map((text) => new LineBuilder(inner).add(text, "warn").build());
+    return {
+      lines: boxed("Review plan", content, width, height, theme, "warn", footer([["esc", "cancel"]], inner)),
+      hints: [["esc", "cancel"]],
+    };
+  }
   const irreversible = needsTypedConfirmation(plan);
   const content: ScreenLine[] = [];
 
@@ -198,6 +219,11 @@ function reviewDialog(dialog: Extract<Dialog, { kind: "review" }>, context: View
     content.push({ spans: [] });
     for (const command of plan.manager.commands.slice(0, 3)) {
       content.push(new LineBuilder(inner).add("$ ", "muted").add(describeCommand(command, plan.manager.privilege), "strong").build());
+    }
+    // Every command this plan runs is counted, even when not every one fits.
+    if (plan.manager.commands.length > 3) {
+      const more = plan.manager.commands.length - 3;
+      content.push(new LineBuilder(inner).add(`  and ${more} more of the same, ${groupDigits(BigInt(plan.manager.commands.length))} in all`, "warn").build());
     }
   }
   for (const warning of plan.warnings) {

@@ -95,3 +95,11 @@ test("a filter that cannot mean anything is refused with the reason", () => {
     assert.match(parsed.message, /\S/);
   }
 });
+
+test("flags and keycaps are two cells, as terminals draw them", () => {
+  assert.equal(cellWidth("🇯🇵"), 2);
+  assert.equal(cellWidth("1️⃣"), 2);
+  assert.equal(cellWidth("#️⃣"), 2);
+  assert.equal(cellWidth("flag-🇯🇵-japan.txt"), 17);
+  assert.equal(cellWidth("©"), 1, "a text-presentation symbol stays one cell");
+});

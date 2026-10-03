@@ -60,7 +60,8 @@ disktop undo ACTION_ID --yes  # put a Trash action back
 
 ## The terminal UI
 
-Run `disktop` in a terminal of at least 80×24 (it keeps working down to 40×10).
+Run `disktop` in a terminal of at least 80×24. It keeps working down to 40×10, but a
+plan is only reviewed and confirmed at 60×20 or larger, where all of it fits.
 
 | Tab | What it shows |
 | --- | --- |

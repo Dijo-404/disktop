@@ -94,8 +94,10 @@ function graphemeWidth(grapheme: string): number {
   if (isWide(first)) {
     return 2;
   }
-  // A text-presentation symbol followed by VS16 is drawn as emoji.
-  if (grapheme.includes("\ufe0f") && first >= 0x2000) {
+  // A pair of regional indicators is a flag; a keycap is a character, VS16,
+  // and U+20E3; anything followed by VS16 asks for emoji presentation. All
+  // three are drawn two cells wide.
+  if ((first >= 0x1f1e6 && first <= 0x1f1ff) || grapheme.includes("\u20e3") || grapheme.includes("\ufe0f")) {
     return 2;
   }
   return 1;
