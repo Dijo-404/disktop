@@ -20,11 +20,41 @@ use sha2::{Digest, Sha256};
 use std::io;
 use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
 use std::os::unix::io::RawFd;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 /// Bytes per read while streaming. The same order as the index's batch size:
 /// large enough that the syscall cost disappears, small enough to stay out of
 /// the way of everything else on the machine.
 const COPY_BYTES: usize = 256 * 1024;
+
+/// What a copy or an archive stops with when its action is cancelled,
+/// recognisable by type so the item can be reported as stopped rather than
+/// failed. Nothing has been published when it is returned, and whatever was
+/// staged is the caller's to take back.
+#[derive(Debug)]
+pub struct Cancelled;
+
+impl std::fmt::Display for Cancelled {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("the action was cancelled while this was being written")
+    }
+}
+
+impl std::error::Error for Cancelled {}
+
+pub fn is_cancelled(error: &io::Error) -> bool {
+    error.get_ref().is_some_and(|inner| inner.is::<Cancelled>())
+}
+
+/// Stop here if somebody cancelled. Asked between chunks and between
+/// entries, so a copy of something large stops promptly rather than only once
+/// it has finished.
+pub fn check(cancelled: &AtomicBool) -> io::Result<()> {
+    if cancelled.load(Ordering::Relaxed) {
+        return Err(io::Error::other(Cancelled));
+    }
+    Ok(())
+}
 
 pub struct Copied {
     /// Files written, not counting directories or links.
@@ -46,6 +76,7 @@ pub fn copy_file(
     permissions: u32,
     modified_nanoseconds: Option<u64>,
     on_created: &mut dyn FnMut(RawFd) -> io::Result<()>,
+    cancelled: &AtomicBool,
 ) -> io::Result<u64> {
     let staged = sys::openat_create_exclusive(destination_parent, name, permissions)?;
     if let Err(error) = on_created(staged) {
@@ -55,7 +86,7 @@ pub fn copy_file(
     // The umask masked the mode the create asked for, so the bits are set
     // again here; otherwise a copy of a 0o666 file arrives as 0o644.
     let outcome = sys::fchmod(staged, permissions)
-        .and_then(|()| stream(source, staged))
+        .and_then(|()| stream(source, staged, cancelled))
         .and_then(|(bytes, written)| {
             // The modification time comes across after the last write, which
             // would otherwise have set it to now. A copy of a file is the same
@@ -77,12 +108,13 @@ pub fn copy_file(
 }
 
 /// Copy every byte, returning how many there were and their digest.
-fn stream(source: RawFd, staged: RawFd) -> io::Result<(u64, [u8; 32])> {
+fn stream(source: RawFd, staged: RawFd, cancelled: &AtomicBool) -> io::Result<(u64, [u8; 32])> {
     let mut buffer = vec![0u8; COPY_BYTES];
     let mut hasher = Sha256::new();
     let mut offset = 0u64;
 
     loop {
+        check(cancelled)?;
         let read = pread(source, &mut buffer, offset)?;
         if read == 0 {
             break;
@@ -125,12 +157,13 @@ pub fn copy_tree(
     name: &[u8],
     permissions: u32,
     on_created: &mut dyn FnMut(RawFd) -> io::Result<()>,
+    cancelled: &AtomicBool,
 ) -> io::Result<Copied> {
     sys::mkdirat_exclusive(destination_parent, name, WORKING_DIRECTORY_MODE)?;
     let staged = owned(sys::open_directory_no_symlinks(destination_parent, name)?);
     on_created(staged.as_raw_fd())?;
     let mut copied = Copied { files: 0, bytes: 0 };
-    copy_children(source, staged, permissions, &mut copied)?;
+    copy_children(source, staged, permissions, &mut copied, cancelled)?;
     Ok(copied)
 }
 
@@ -173,6 +206,7 @@ fn copy_children(
     destination: OwnedFd,
     permissions: u32,
     copied: &mut Copied,
+    cancelled: &AtomicBool,
 ) -> io::Result<()> {
     let mut stack = vec![Frame::enter(
         owned(duplicate(source)?),
@@ -192,6 +226,7 @@ fn copy_children(
             sys::fsync(finished.destination.as_raw_fd())?;
             continue;
         };
+        check(cancelled)?;
         let source = frame.source.as_raw_fd();
         let destination = frame.destination.as_raw_fd();
         let metadata = sys::metadata_at(source, &name)?;
@@ -219,6 +254,7 @@ fn copy_children(
                     metadata.permissions,
                     Some(metadata.modified_nanoseconds),
                     &mut |_| Ok(()),
+                    cancelled,
                 )?;
                 copied.files += 1;
                 copied.bytes += bytes;
@@ -324,6 +360,7 @@ mod tests {
                 seen = Some((metadata.inode, metadata.apparent_bytes));
                 Ok(())
             },
+            &AtomicBool::new(false),
         )
         .unwrap();
         let copied = sys::metadata_at(parent, b"copy.bin").unwrap();
@@ -342,11 +379,40 @@ mod tests {
         sandbox.file(b"source.bin", 4096);
         let parent = sys::open_root(&sandbox.bytes()).unwrap();
         let source = sys::openat_read_no_symlinks(parent, b"source.bin").unwrap();
-        let outcome = copy_file(source, parent, b"copy.bin", 0o600, None, &mut |_| {
-            Err(io::Error::other("the journal refused"))
-        });
+        let outcome = copy_file(
+            source,
+            parent,
+            b"copy.bin",
+            0o600,
+            None,
+            &mut |_| Err(io::Error::other("the journal refused")),
+            &AtomicBool::new(false),
+        );
         sys::close(source);
         sys::close(parent);
         assert!(outcome.is_err());
+    }
+
+    /// A cancelled copy stops at the next chunk with an error the caller can
+    /// recognise, rather than running to the end of a large file first.
+    #[test]
+    fn a_cancelled_copy_stops_and_says_why() {
+        let sandbox = Sandbox::new("transfer-cancelled");
+        sandbox.file(b"source.bin", 4 * COPY_BYTES);
+        let parent = sys::open_root(&sandbox.bytes()).unwrap();
+        let source = sys::openat_read_no_symlinks(parent, b"source.bin").unwrap();
+        let outcome = copy_file(
+            source,
+            parent,
+            b"copy.bin",
+            0o600,
+            None,
+            &mut |_| Ok(()),
+            &AtomicBool::new(true),
+        );
+        sys::close(source);
+        sys::close(parent);
+        let error = outcome.expect_err("a cancelled copy does not finish");
+        assert!(is_cancelled(&error), "{error}");
     }
 }

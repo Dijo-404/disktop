@@ -234,8 +234,16 @@ pub fn run_trash(
         &request.targets,
         report,
         cancelled,
-        |guard, journal, journal_id, position, target| {
-            trash_one(guard, &home_trash, journal, journal_id, position, target)
+        |guard, journal, journal_id, position, target, cancelled| {
+            trash_one(
+                guard,
+                &home_trash,
+                journal,
+                journal_id,
+                position,
+                target,
+                cancelled,
+            )
         },
     )
 }
@@ -315,8 +323,10 @@ pub fn run_dedup_hardlink(
         &request.targets,
         report,
         cancelled,
-        |guard, journal, journal_id, position, target| {
-            hardlink_one(guard, &keep, journal, journal_id, position, target)
+        |guard, journal, journal_id, position, target, cancelled| {
+            hardlink_one(
+                guard, &keep, journal, journal_id, position, target, cancelled,
+            )
         },
     );
     sys::close(keep.descriptor);
@@ -351,6 +361,7 @@ fn hardlink_one(
     journal_id: &str,
     position: u64,
     target: &Target,
+    cancelled: &AtomicBool,
 ) -> ItemReport {
     let refuse = |code: &'static str, message: String, outcome: Outcome| ItemReport {
         path: target.path.clone(),
@@ -377,7 +388,7 @@ fn hardlink_one(
             return refuse(refusal.code, refusal.message, outcome);
         }
     };
-    if let Err((code, message)) = subtree_unchanged(&parent, target) {
+    if let Err((code, message)) = subtree_unchanged(&parent, target, cancelled) {
         return refuse(code, message, outcome_for(code));
     }
 
@@ -761,7 +772,7 @@ pub fn run_copy_move(
         &request.targets,
         report,
         cancelled,
-        |guard, journal, journal_id, position, target| {
+        |guard, journal, journal_id, position, target, cancelled| {
             move_one(
                 guard,
                 &MoveContext {
@@ -774,6 +785,7 @@ pub fn run_copy_move(
                 journal_id,
                 position,
                 target,
+                cancelled,
             )
         },
     );
@@ -839,7 +851,7 @@ pub fn run_compress(
         &request.targets,
         report,
         cancelled,
-        |guard, journal, journal_id, position, target| {
+        |guard, journal, journal_id, position, target, cancelled| {
             compress_one(
                 guard,
                 named,
@@ -850,6 +862,7 @@ pub fn run_compress(
                 journal_id,
                 position,
                 target,
+                cancelled,
             )
         },
     );
@@ -870,6 +883,7 @@ fn compress_one(
     journal_id: &str,
     position: u64,
     target: &Target,
+    cancelled: &AtomicBool,
 ) -> ItemReport {
     let refuse = |code: &'static str, message: String, outcome: Outcome| ItemReport {
         path: target.path.clone(),
@@ -908,7 +922,7 @@ fn compress_one(
             return refuse(refusal.code, refusal.message, outcome);
         }
     };
-    if let Err((code, message)) = subtree_unchanged(&parent, target) {
+    if let Err((code, message)) = subtree_unchanged(&parent, target, cancelled) {
         return refuse(code, message, outcome_for(code));
     }
     if live.kind != EntryKind::File && live.kind != EntryKind::Directory {
@@ -991,7 +1005,14 @@ fn compress_one(
         position,
         directory: &destination_path,
     };
-    let staged = match stage_archive(&parent, destination, &live, &archive_name, &staging) {
+    let staged = match stage_archive(
+        &parent,
+        destination,
+        &live,
+        &archive_name,
+        &staging,
+        cancelled,
+    ) {
         Ok(staged) => staged,
         Err((code, message)) => {
             return settle(
@@ -999,13 +1020,13 @@ fn compress_one(
                 journal_id,
                 position,
                 target,
-                refuse(code, message, Outcome::Failed),
+                refuse(code, message, outcome_for(code)),
             );
         }
     };
 
     checkpoint(Checkpoint::Staged);
-    if let Err((code, message)) = still_as_reviewed(target) {
+    if let Err((code, message)) = still_as_reviewed(target, cancelled) {
         discard_staged(destination, &staged);
         staging.forget();
         return settle(
@@ -1015,7 +1036,7 @@ fn compress_one(
             target,
             refuse(
                 code,
-                changed_while_staged("compressed", message),
+                changed_while_staged(code, "compressed", message),
                 outcome_for(code),
             ),
         );
@@ -1075,6 +1096,7 @@ fn stage_archive(
     live: &sys::Metadata,
     archive_name: &[u8],
     record: &StagingRecord<'_>,
+    cancelled: &AtomicBool,
 ) -> Result<Staged, (&'static str, String)> {
     for attempt in 0..64u32 {
         let staging = staging_name(archive_name, attempt);
@@ -1099,13 +1121,14 @@ fn stage_archive(
                 &staging,
                 PRIVATE_FILE_MODE,
                 &mut on_created,
+                cancelled,
             )
             .and_then(|written| {
                 // Read back the way somebody recovering from it would, and
                 // compared over the archive's whole content. An archive that
                 // will not decompress to what went into it is not an archive,
                 // however well the write went.
-                let recovered = archive::verify_tree(destination, &staging)?;
+                let recovered = archive::verify_tree(destination, &staging, cancelled)?;
                 if recovered != written {
                     return Err(std::io::Error::new(
                         std::io::ErrorKind::InvalidData,
@@ -1114,7 +1137,7 @@ fn stage_archive(
                 }
                 // And it is still a tar anybody can unpack, not only a stream
                 // that happens to decompress.
-                archive::readable_as_tar(destination, &staging)?;
+                archive::readable_as_tar(destination, &staging, cancelled)?;
                 Ok(())
             });
             sys::close(source);
@@ -1128,9 +1151,10 @@ fn stage_archive(
                 &staging,
                 PRIVATE_FILE_MODE,
                 &mut on_created,
+                cancelled,
             )
             .and_then(|written| {
-                let recovered = archive::verify_file(destination, &staging)?;
+                let recovered = archive::verify_file(destination, &staging, cancelled)?;
                 if recovered != written {
                     return Err(std::io::Error::new(
                         std::io::ErrorKind::InvalidData,
@@ -1220,6 +1244,7 @@ fn move_one(
     journal_id: &str,
     position: u64,
     target: &Target,
+    cancelled: &AtomicBool,
 ) -> ItemReport {
     let refuse = |code: &'static str, message: String, outcome: Outcome| ItemReport {
         path: target.path.clone(),
@@ -1258,7 +1283,7 @@ fn move_one(
             return refuse(refusal.code, refusal.message, outcome);
         }
     };
-    if let Err((code, message)) = subtree_unchanged(&parent, target) {
+    if let Err((code, message)) = subtree_unchanged(&parent, target, cancelled) {
         return refuse(code, message, outcome_for(code));
     }
     if live.kind != EntryKind::File && live.kind != EntryKind::Directory {
@@ -1319,7 +1344,7 @@ fn move_one(
         position,
         directory: context.destination_path,
     };
-    let staged = match stage_copy(&parent, context.destination, &live, &staging) {
+    let staged = match stage_copy(&parent, context.destination, &live, &staging, cancelled) {
         Ok(staged) => staged,
         Err((code, message)) => {
             return settle(
@@ -1327,13 +1352,13 @@ fn move_one(
                 journal_id,
                 position,
                 target,
-                refuse(code, message, Outcome::Failed),
+                refuse(code, message, outcome_for(code)),
             );
         }
     };
 
     checkpoint(Checkpoint::Staged);
-    if let Err((code, message)) = still_as_reviewed(target) {
+    if let Err((code, message)) = still_as_reviewed(target, cancelled) {
         discard_staged(context.destination, &staged);
         staging.forget();
         return settle(
@@ -1343,7 +1368,7 @@ fn move_one(
             target,
             refuse(
                 code,
-                changed_while_staged("copied", message),
+                changed_while_staged(code, "copied", message),
                 outcome_for(code),
             ),
         );
@@ -1413,15 +1438,24 @@ fn occupied(parent: libc::c_int, name: &[u8]) -> bool {
 /// it is asked here so a torn copy is discarded rather than published where
 /// somebody would take it for the real thing. The source is asked again before
 /// it is disposed of, for whatever happens in between.
-fn still_as_reviewed(target: &Target) -> Result<(), (&'static str, String)> {
+fn still_as_reviewed(
+    target: &Target,
+    cancelled: &AtomicBool,
+) -> Result<(), (&'static str, String)> {
     let parent =
         guard::resolve_parent(&target.path).map_err(|refusal| (refusal.code, refusal.message))?;
     guard::revalidate(&parent, &target.expected)
         .map_err(|refusal| (refusal.code, refusal.message))?;
-    subtree_unchanged(&parent, target)
+    subtree_unchanged(&parent, target, cancelled)
 }
 
-fn changed_while_staged(what: &str, reason: String) -> String {
+fn changed_while_staged(code: &str, what: &str, reason: String) -> String {
+    if code == "cancelled" {
+        return format!(
+            "Stopped when the action was cancelled, after it was {what} and before anything was \
+             published. What had been written was removed and the original was not touched."
+        );
+    }
     format!(
         "It changed while it was being {what}, so the output was discarded and nothing was published: {reason}"
     )
@@ -1501,6 +1535,7 @@ fn stage_copy(
     destination: libc::c_int,
     live: &sys::Metadata,
     staging: &StagingRecord<'_>,
+    cancelled: &AtomicBool,
 ) -> Result<Staged, (&'static str, String)> {
     for attempt in 0..64u32 {
         let name = staging_name(&parent.name, attempt);
@@ -1520,6 +1555,7 @@ fn stage_copy(
                 &name,
                 live.permissions,
                 &mut on_created,
+                cancelled,
             )
             .map(|_| ());
             sys::close(source);
@@ -1534,6 +1570,7 @@ fn stage_copy(
                 live.permissions,
                 Some(live.modified_nanoseconds),
                 &mut on_created,
+                cancelled,
             )
             .map(|_| ());
             sys::close(source);
@@ -1556,6 +1593,14 @@ fn stage_copy(
 }
 
 fn describe_copy(error: std::io::Error) -> (&'static str, String) {
+    if transfer::is_cancelled(&error) {
+        return (
+            "cancelled",
+            "Stopped when the action was cancelled. What had been written was removed, nothing \
+             was published, and the original was not touched."
+                .to_owned(),
+        );
+    }
     if crate::subtree::is_too_deep(&error) {
         return ("invalid-arguments", crate::subtree::TOO_DEEP.to_owned());
     }
@@ -1642,7 +1687,7 @@ fn dispose_of_source(
     if let Err(refusal) = guard::revalidate(&parent, &target.expected) {
         return kept(still_there(&refusal.message));
     }
-    if let Err((_, message)) = subtree_unchanged(&parent, target) {
+    if let Err((_, message)) = subtree_unchanged(&parent, target, &NEVER_CANCELLED) {
         return kept(still_there(&message));
     }
 
@@ -1779,7 +1824,7 @@ fn run_action(
     targets: &[Target],
     report: &mut dyn FnMut(ItemReport),
     cancelled: &AtomicBool,
-    mut act: impl FnMut(&Guard, &Journal, &str, u64, &Target) -> ItemReport,
+    mut act: impl FnMut(&Guard, &Journal, &str, u64, &Target, &AtomicBool) -> ItemReport,
 ) -> Result<ActionSummary, ActionRefusal> {
     let guard = Guard::new(&GuardContext {
         journal_directory: Some(journal_directory.as_os_str().as_encoded_bytes().to_vec()),
@@ -1831,7 +1876,14 @@ fn run_action(
             continue;
         }
 
-        let outcome = act(&guard, &journal, &journal_id, position as u64, target);
+        let outcome = act(
+            &guard,
+            &journal,
+            &journal_id,
+            position as u64,
+            target,
+            cancelled,
+        );
         match &outcome.outcome {
             Outcome::Completed => {
                 counts.completed += 1;
@@ -1881,6 +1933,7 @@ fn trash_one(
     journal_id: &str,
     position: u64,
     target: &Target,
+    cancelled: &AtomicBool,
 ) -> ItemReport {
     let refuse = |code: &'static str, message: String, outcome: Outcome| ItemReport {
         path: target.path.clone(),
@@ -1907,7 +1960,7 @@ fn trash_one(
             return refuse(refusal.code, refusal.message, outcome);
         }
     };
-    if let Err((code, message)) = subtree_unchanged(&parent, target) {
+    if let Err((code, message)) = subtree_unchanged(&parent, target, cancelled) {
         return refuse(code, message, outcome_for(code));
     }
 
@@ -2084,6 +2137,7 @@ fn erase_one(
     journal_id: &str,
     position: u64,
     target: &Target,
+    cancelled: &AtomicBool,
 ) -> ItemReport {
     let refuse = |code: &'static str, message: String, outcome: Outcome| ItemReport {
         path: target.path.clone(),
@@ -2110,7 +2164,7 @@ fn erase_one(
             return refuse(refusal.code, refusal.message, outcome);
         }
     };
-    if let Err((code, message)) = subtree_unchanged(&parent, target) {
+    if let Err((code, message)) = subtree_unchanged(&parent, target, cancelled) {
         return refuse(code, message, outcome_for(code));
     }
 
@@ -2231,7 +2285,7 @@ pub fn run_restore(
         &targets,
         report,
         cancelled,
-        |guard, journal, journal_id, position, target| {
+        |guard, journal, journal_id, position, target, _cancelled| {
             let (from, identity) = destinations
                 .get(position as usize)
                 .cloned()
@@ -2460,8 +2514,16 @@ pub fn run_empty_trash(
         &targets,
         report,
         cancelled,
-        |guard, journal, journal_id, position, target| {
-            empty_one(guard, &home_trash, journal, journal_id, position, target)
+        |guard, journal, journal_id, position, target, cancelled| {
+            empty_one(
+                guard,
+                &home_trash,
+                journal,
+                journal_id,
+                position,
+                target,
+                cancelled,
+            )
         },
     )
 }
@@ -2513,6 +2575,7 @@ fn empty_one(
     journal_id: &str,
     position: u64,
     target: &Target,
+    cancelled: &AtomicBool,
 ) -> ItemReport {
     let refuse = |code: &'static str, message: String| ItemReport {
         path: target.path.clone(),
@@ -2537,7 +2600,7 @@ fn empty_one(
         Ok(parent) => parent,
         Err(refusal) => return refuse(refusal.code, refusal.message),
     };
-    if let Err((code, message)) = subtree_unchanged(&parent, target) {
+    if let Err((code, message)) = subtree_unchanged(&parent, target, cancelled) {
         return ItemReport {
             path: target.path.clone(),
             outcome: outcome_for(code),
@@ -2897,11 +2960,12 @@ static NEVER_CANCELLED: AtomicBool = AtomicBool::new(false);
 fn subtree_unchanged(
     parent: &guard::ResolvedParent,
     target: &Target,
+    cancelled: &AtomicBool,
 ) -> Result<(), (&'static str, String)> {
     let Some(reviewed) = &target.subtree else {
         return Ok(());
     };
-    match crate::subtree::digest(parent.descriptor(), &parent.name, &NEVER_CANCELLED) {
+    match crate::subtree::digest(parent.descriptor(), &parent.name, cancelled) {
         Ok(live) if live == *reviewed => Ok(()),
         Ok(_) => Err((
             "changed-target",
@@ -2913,7 +2977,9 @@ fn subtree_unchanged(
 
 fn outcome_for(code: &str) -> Outcome {
     match code {
-        "changed-target" => Outcome::Skipped,
+        // Stopping before anything was done to an item leaves it as it was,
+        // which is what a skip is.
+        "changed-target" | "cancelled" => Outcome::Skipped,
         _ => Outcome::Failed,
     }
 }
@@ -4148,6 +4214,80 @@ mod tests {
             "the link is still there"
         );
         assert!(sandbox.path().join("work/data.bin").exists());
+    }
+
+    /// A cancel that arrives while a large item is being copied or compressed
+    /// stops it there: nothing was published yet, so the staged output is taken
+    /// back, the source is untouched, and the item reads as stopped rather than
+    /// running to the end of a copy nobody wants any more.
+    #[test]
+    fn a_cancel_during_a_copy_or_a_compression_stops_that_item_and_touches_nothing() {
+        for operation in ["copy", "compress"] {
+            let sandbox = Sandbox::new(&format!("cancel-during-{operation}"));
+            sandbox.directory(b"state");
+            sandbox.directory(b"elsewhere");
+            sandbox.directory(b"work");
+            sandbox.file(b"work/big.bin", 8 * 1024 * 1024);
+            sandbox.file(b"work/next.bin", 4096);
+
+            let cancelled = std::sync::Arc::new(AtomicBool::new(false));
+            let flag = std::sync::Arc::clone(&cancelled);
+            at_checkpoint(move |at| {
+                if at == Checkpoint::NameChosen {
+                    flag.store(true, Ordering::Relaxed);
+                }
+            });
+            let targets = vec![
+                reviewed(&joined(&sandbox, b"work/big.bin"), 0),
+                reviewed(&joined(&sandbox, b"work/next.bin"), 0),
+            ];
+            let (summary, items) = if operation == "copy" {
+                let mut request = moving(&sandbox, b"work/big.bin", SourceDisposition::Permanent);
+                request.targets = targets;
+                collect(|report| run_copy_move(&request, report, &cancelled))
+            } else {
+                let request = CompressRequest {
+                    plan_id: "plan-0123456789abcd".to_owned(),
+                    journal_directory: sandbox.path().join("state"),
+                    home_trash_directory: joined(&sandbox, b"trash-home"),
+                    destination_directory: joined(&sandbox, b"elsewhere"),
+                    source_disposition: SourceDisposition::Permanent,
+                    targets,
+                };
+                collect(|report| run_compress(&request, report, &cancelled))
+            };
+            let summary = summary.ok().expect("the action ran");
+
+            assert_eq!(summary.completed, 0, "{operation}");
+            assert_eq!(summary.state, State::Partial);
+            for item in &items {
+                assert_eq!(
+                    item.outcome,
+                    Outcome::Skipped,
+                    "{operation}: {:?}",
+                    item.message
+                );
+                assert_eq!(item.reason, Some("cancelled"));
+            }
+            let arrived: Vec<_> = std::fs::read_dir(sandbox.path().join("elsewhere"))
+                .unwrap()
+                .flatten()
+                .map(|entry| entry.file_name())
+                .collect();
+            assert!(arrived.is_empty(), "{operation}: {arrived:?}");
+            assert_eq!(
+                std::fs::metadata(sandbox.path().join("work/big.bin"))
+                    .unwrap()
+                    .len(),
+                8 * 1024 * 1024
+            );
+            let record = Journal::open(&sandbox.path().join("state"))
+                .unwrap()
+                .get(&summary.journal_id)
+                .unwrap()
+                .unwrap();
+            assert_eq!(record.items[0].outcome, Outcome::Skipped, "{operation}");
+        }
     }
 
     fn linking(sandbox: &Sandbox, keep: &[u8], targets: &[&[u8]]) -> DedupHardlinkRequest {
