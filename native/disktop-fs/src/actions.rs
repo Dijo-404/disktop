@@ -35,9 +35,11 @@ const PRIVATE_FILE_MODE: u32 = 0o600;
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub(crate) enum Checkpoint {
     /// A staging name was found free and is about to be created.
-    BeforeStaging,
+    NameChosen,
+    /// An output is staged and verified and about to be published.
+    Staged,
     /// An output was published and the source is about to be dealt with.
-    BeforeDisposal,
+    Published,
 }
 
 #[cfg(test)]
@@ -889,6 +891,23 @@ fn compress_one(
         }
     };
 
+    checkpoint(Checkpoint::Staged);
+    if let Err((code, message)) = still_as_reviewed(target) {
+        discard_staged(destination, &staged);
+        staging.forget();
+        return settle(
+            journal,
+            journal_id,
+            position,
+            target,
+            refuse(
+                code,
+                changed_while_staged("compressed", message),
+                outcome_for(code),
+            ),
+        );
+    }
+
     let publish = sys::renameat_no_replace(destination, &staged.name, destination, &archive_name);
     if publish.is_err() {
         discard_staged(destination, &staged);
@@ -952,7 +971,7 @@ fn stage_archive(
         if sys::target_exists(destination, &staging) {
             continue;
         }
-        checkpoint(Checkpoint::BeforeStaging);
+        checkpoint(Checkpoint::NameChosen);
         let mut created = None;
         let mut on_created = |descriptor| record.record(&staging, descriptor, &mut created);
 
@@ -1203,6 +1222,23 @@ fn move_one(
         }
     };
 
+    checkpoint(Checkpoint::Staged);
+    if let Err((code, message)) = still_as_reviewed(target) {
+        discard_staged(context.destination, &staged);
+        staging.forget();
+        return settle(
+            journal,
+            journal_id,
+            position,
+            target,
+            refuse(
+                code,
+                changed_while_staged("copied", message),
+                outcome_for(code),
+            ),
+        );
+    }
+
     // Publishing is a rename that refuses to overwrite. Between the check
     // above and this, somebody could have created the name; this is what
     // actually decides, and it decides without destroying what they made.
@@ -1245,6 +1281,29 @@ fn move_one(
     // Only now is the source touched. Everything above this line leaves it
     // exactly where it was, whatever went wrong.
     dispose_of_source(guard, context, journal, journal_id, position, target, &live)
+}
+
+/// Whether the source is still exactly what the plan reviewed, asked once its
+/// copy or archive is staged and before that is published.
+///
+/// Verification compares what was read with what was written, and for a source
+/// that was written to while it was read those agree on a torn mixture of
+/// before and after. Only the source can say it moved underneath the copy, and
+/// it is asked here so a torn copy is discarded rather than published where
+/// somebody would take it for the real thing. The source is asked again before
+/// it is disposed of, for whatever happens in between.
+fn still_as_reviewed(target: &Target) -> Result<(), (&'static str, String)> {
+    let parent =
+        guard::resolve_parent(&target.path).map_err(|refusal| (refusal.code, refusal.message))?;
+    guard::revalidate(&parent, &target.expected)
+        .map_err(|refusal| (refusal.code, refusal.message))?;
+    subtree_unchanged(&parent, target)
+}
+
+fn changed_while_staged(what: &str, reason: String) -> String {
+    format!(
+        "It changed while it was being {what}, so the output was discarded and nothing was published: {reason}"
+    )
 }
 
 /// Whether the filesystem holding the destination has room for this source.
@@ -1330,7 +1389,7 @@ fn stage_copy(
         if sys::target_exists(destination, &name) {
             continue;
         }
-        checkpoint(Checkpoint::BeforeStaging);
+        checkpoint(Checkpoint::NameChosen);
         let mut created = None;
         let mut on_created = |descriptor| staging.record(&name, descriptor, &mut created);
 
@@ -1451,7 +1510,7 @@ fn dispose_of_source(
         ));
     }
 
-    checkpoint(Checkpoint::BeforeDisposal);
+    checkpoint(Checkpoint::Published);
     let parent = match guard::resolve_parent(&target.path) {
         Ok(parent) => parent,
         Err(refusal) => return kept(still_there(&refusal.message)),
@@ -3308,7 +3367,7 @@ mod tests {
             .join(staging_name("tree", 0));
         let planted = theirs.clone();
         at_checkpoint(move |at| {
-            if at == Checkpoint::BeforeStaging && !planted.exists() {
+            if at == Checkpoint::NameChosen && !planted.exists() {
                 std::fs::create_dir(&planted).unwrap();
                 std::fs::write(planted.join("theirs"), b"not Disktop's").unwrap();
             }
@@ -3350,7 +3409,7 @@ mod tests {
             .join(staging_name("data.bin", 0));
         let planted = theirs.clone();
         at_checkpoint(move |at| {
-            if at == Checkpoint::BeforeStaging && !planted.exists() {
+            if at == Checkpoint::NameChosen && !planted.exists() {
                 std::fs::write(&planted, b"not Disktop's").unwrap();
             }
         });
@@ -3477,6 +3536,104 @@ mod tests {
         ));
     }
 
+    fn append_to(path: &std::path::Path, bytes: &[u8]) {
+        use std::io::Write;
+        std::fs::OpenOptions::new()
+            .append(true)
+            .open(path)
+            .unwrap()
+            .write_all(bytes)
+            .unwrap();
+    }
+
+    /// A copy that ran while somebody wrote to its source holds some mixture
+    /// of before and after. Its verification compares what was read with what
+    /// was written, and those agree, so only the source itself can say. It is
+    /// asked before the copy is published, not after: a torn copy is never put
+    /// where somebody would take it for the real thing.
+    #[test]
+    fn a_source_that_changed_while_it_was_copied_is_never_published() {
+        let sandbox = Sandbox::new("changed-before-publish");
+        sandbox.directory(b"state");
+        sandbox.directory(b"elsewhere");
+        sandbox.directory(b"work/tree");
+        sandbox.file(b"work/data.bin", 4096);
+        sandbox.file(b"work/tree/inner.bin", 4096);
+        let mut request = moving(&sandbox, b"work/data.bin", SourceDisposition::Permanent);
+        request
+            .targets
+            .push(reviewed(&joined(&sandbox, b"work/tree"), 0));
+
+        let file = sandbox.path().join("work/data.bin");
+        let inner = sandbox.path().join("work/tree/inner.bin");
+        let mut changes = vec![inner, file];
+        at_checkpoint(move |at| {
+            if at == Checkpoint::Staged
+                && let Some(path) = changes.pop()
+            {
+                append_to(&path, b"written during the copy");
+            }
+        });
+        let (summary, items) =
+            collect(|report| run_copy_move(&request, report, &AtomicBool::new(false)));
+        summary.ok().expect("the move ran");
+
+        for item in &items {
+            assert_eq!(item.outcome, Outcome::Skipped, "{:?}", item.message);
+            assert_eq!(item.reason, Some("changed-target"));
+        }
+        let arrived: Vec<_> = std::fs::read_dir(sandbox.path().join("elsewhere"))
+            .unwrap()
+            .flatten()
+            .map(|entry| entry.file_name())
+            .collect();
+        assert!(arrived.is_empty(), "nothing was published: {arrived:?}");
+        assert_eq!(
+            std::fs::read(sandbox.path().join("work/data.bin"))
+                .unwrap()
+                .len(),
+            4096 + 23
+        );
+    }
+
+    #[test]
+    fn a_source_that_changed_while_it_was_compressed_is_never_published() {
+        let sandbox = Sandbox::new("changed-before-archive");
+        sandbox.directory(b"state");
+        sandbox.directory(b"work");
+        sandbox.file(b"work/data.bin", 4096);
+        let request = CompressRequest {
+            plan_id: "plan-0123456789abcd".to_owned(),
+            journal_directory: sandbox.path().join("state"),
+            home_trash_directory: joined(&sandbox, b"trash-home"),
+            destination_directory: Vec::new(),
+            source_disposition: SourceDisposition::Permanent,
+            targets: vec![reviewed(&joined(&sandbox, b"work/data.bin"), 0)],
+        };
+
+        let file = sandbox.path().join("work/data.bin");
+        at_checkpoint(move |at| {
+            if at == Checkpoint::Staged {
+                append_to(&file, b"written during the compression");
+            }
+        });
+        let (summary, items) =
+            collect(|report| run_compress(&request, report, &AtomicBool::new(false)));
+        summary.ok().expect("the compress ran");
+
+        assert_eq!(items[0].outcome, Outcome::Skipped, "{:?}", items[0].message);
+        let left: Vec<_> = std::fs::read_dir(sandbox.path().join("work"))
+            .unwrap()
+            .flatten()
+            .map(|entry| entry.file_name())
+            .collect();
+        assert_eq!(
+            left,
+            vec![std::ffi::OsString::from("data.bin")],
+            "no archive, staged or published"
+        );
+    }
+
     /// An item whose output was published and whose source could not then be
     /// dealt with is uncertain, and the journal has to say so. An item left
     /// reading `in-progress` inside an action that finished is never looked at
@@ -3492,7 +3649,7 @@ mod tests {
 
         let source = sandbox.path().join("work/data.bin");
         at_checkpoint(move |at| {
-            if at == Checkpoint::BeforeDisposal {
+            if at == Checkpoint::Published {
                 use std::io::Write;
                 let mut file = std::fs::OpenOptions::new()
                     .append(true)

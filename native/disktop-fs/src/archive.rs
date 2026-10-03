@@ -255,13 +255,14 @@ fn append_children<W: Write>(
                 stack.push(Frame::enter(child, path)?);
             }
             EntryKind::File => {
-                let mut reader = Source::open(source, &name)?;
+                let mut reader = Member::new(Source::open(source, &name)?, metadata.apparent_bytes);
                 let mut header = tar::Header::new_gnu();
                 header.set_entry_type(tar::EntryType::Regular);
                 header.set_size(metadata.apparent_bytes);
                 header.set_mode(metadata.permissions);
                 header.set_mtime(metadata.modified_nanoseconds / 1_000_000_000);
                 append(builder, &mut header, &path, &mut reader)?;
+                reader.finish()?;
                 *entries += 1;
             }
             EntryKind::Symlink => {
@@ -284,6 +285,61 @@ fn append_children<W: Write>(
         }
     }
     Ok(())
+}
+
+/// A file's bytes as one archive member: exactly as many as its header says.
+///
+/// A tar header fixes a member's length before its data is written, and the
+/// archive writer copies whatever the reader yields. A file that grew while it
+/// was archived would spill into where the next header belongs, and one that
+/// shrank would leave the next header early; either way every member after it
+/// is misread, and a tail of zeros reads as the end of the archive, silently
+/// dropping the rest. A member that does not match its header is an error, and
+/// the archive is not published.
+struct Member {
+    source: Source,
+    remaining: u64,
+}
+
+impl Member {
+    fn new(source: Source, length: u64) -> Member {
+        Member {
+            source,
+            remaining: length,
+        }
+    }
+
+    /// Fail if the file holds more than its header said.
+    fn finish(mut self) -> io::Result<()> {
+        let mut probe = [0u8; 1];
+        if self.source.read(&mut probe)? != 0 {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "a file grew while it was being archived",
+            ));
+        }
+        Ok(())
+    }
+}
+
+impl Read for Member {
+    fn read(&mut self, buffer: &mut [u8]) -> io::Result<usize> {
+        if self.remaining == 0 || buffer.is_empty() {
+            return Ok(0);
+        }
+        let wanted = buffer
+            .len()
+            .min(usize::try_from(self.remaining).unwrap_or(usize::MAX));
+        let read = self.source.read(&mut buffer[..wanted])?;
+        if read == 0 {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "a file shrank while it was being archived",
+            ));
+        }
+        self.remaining -= read as u64;
+        Ok(read)
+    }
 }
 
 /// Take ownership of a descriptor nothing else will close.
@@ -436,6 +492,45 @@ mod tests {
             written,
             "an archive of other bytes does not pass the first one's check",
         );
+    }
+
+    fn member_over(sandbox: &Sandbox, bytes: usize, length: u64) -> Member {
+        sandbox.file(b"member.bin", bytes);
+        let parent = sys::open_root(&sandbox.bytes()).unwrap();
+        let source = Source::open(parent, b"member.bin").unwrap();
+        sys::close(parent);
+        Member::new(source, length)
+    }
+
+    #[test]
+    fn a_member_holds_exactly_the_bytes_its_header_promised() {
+        let sandbox = Sandbox::new("archive-member-exact");
+        let mut member = member_over(&sandbox, 300_000, 300_000);
+        let mut read = Vec::new();
+        member.read_to_end(&mut read).unwrap();
+        assert_eq!(read.len(), 300_000);
+        member.finish().expect("nothing beyond the header's length");
+    }
+
+    #[test]
+    fn a_file_that_grew_past_its_header_is_not_archived() {
+        let sandbox = Sandbox::new("archive-member-grew");
+        let mut member = member_over(&sandbox, 300_000, 200_000);
+        let mut read = Vec::new();
+        member.read_to_end(&mut read).unwrap();
+        assert_eq!(read.len(), 200_000, "never more than the header says");
+        let error = member.finish().expect_err("the rest is noticed");
+        assert_eq!(error.kind(), io::ErrorKind::InvalidData);
+    }
+
+    #[test]
+    fn a_file_that_shrank_under_its_header_is_not_archived() {
+        let sandbox = Sandbox::new("archive-member-shrank");
+        let mut member = member_over(&sandbox, 100_000, 200_000);
+        let error = member
+            .read_to_end(&mut Vec::new())
+            .expect_err("the missing bytes are noticed");
+        assert_eq!(error.kind(), io::ErrorKind::InvalidData);
     }
 
     #[test]
