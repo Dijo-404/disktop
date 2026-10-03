@@ -110,6 +110,27 @@ phases that were never published; this is the first version anybody can install.
   - A history page is bounded: a record lists at most 1000 items and counts the rest in
     `itemsOmitted`; undo still reads the whole record.
   - Reconciliation no longer treats the helper's own in-flight actions as abandoned.
+- Scan and index (measured on a million-entry tree, release build):
+  - Each scan is its own SQLite file, appended to with no secondary index and indexed
+    once when the walk ends: a million-entry scan takes 5.2 s instead of 48 s and its
+    index 241 MB instead of 565 MB.
+  - Every query shape a surface uses is index-backed with row-value cursors: a
+    directory's children come back in 0.2–1.7 ms at any page, a ranked subtree in
+    0.6 ms, type totals in 85 ms instead of 712 ms. Query plans are asserted in tests.
+  - The index directory and files were world-readable (`0755`/`0644`), exposing every
+    name below a scan root to other users; they are now `0700`/`0600`.
+  - Measuring a finding's size no longer evicts the person's own scan from the index:
+    measurements get their own index.
+  - A directory removed mid-scan is reported as a change during the scan rather than
+    as unreadable; a fast scan sends at most ten progress events a second.
+  - The duplicate search holds one size class at a time (helper peak memory 114 MiB →
+    33 MiB on a million entries) and stops within milliseconds when cancelled.
+  - A new `atPath` filter returns the one row at a path, which is how the TUI browses a
+    directory even where a directory's own size ties with its files (Btrfs).
+  - `explore` and `find` over a scan the index has since pruned say which scan to run
+    again instead of failing as an internal error.
+- Category totals no longer compare every finding with every other: at the most
+  findings discovery returns, a findings tab redraws in 3 ms instead of half a second.
 
 ### Phase 6: manager cleanup, alerts, and the gaps earlier phases left
 
