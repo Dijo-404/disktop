@@ -211,6 +211,19 @@ pub fn mkdirat(parent: RawFd, name: &[u8], mode: u32) -> io::Result<()> {
     Ok(())
 }
 
+/// Create a directory that must not already exist.
+///
+/// This is how anything Disktop stages as a directory is created: `EEXIST` is
+/// the refusal, so a directory somebody else put at that name is never
+/// mistaken for one this process made, written into, published, or removed.
+pub fn mkdirat_exclusive(parent: RawFd, name: &[u8], mode: u32) -> io::Result<()> {
+    let child = cstring(name)?;
+    if unsafe { libc::mkdirat(parent, child.as_ptr(), mode as libc::mode_t) } < 0 {
+        return Err(io::Error::last_os_error());
+    }
+    Ok(())
+}
+
 /// Remove one name. `directory` chooses `rmdir` semantics over `unlink`.
 pub fn unlinkat(parent: RawFd, name: &[u8], directory: bool) -> io::Result<()> {
     let child = cstring(name)?;
@@ -219,6 +232,10 @@ pub fn unlinkat(parent: RawFd, name: &[u8], directory: bool) -> io::Result<()> {
     if result < 0 {
         return Err(io::Error::last_os_error());
     }
+    #[cfg(test)]
+    trace::record(trace::Event::Unlink {
+        name: name.to_vec(),
+    });
     Ok(())
 }
 
@@ -250,6 +267,10 @@ pub fn renameat_no_replace(
     if result < 0 {
         return Err(io::Error::last_os_error());
     }
+    #[cfg(test)]
+    trace::record(trace::Event::Rename {
+        to: new_name.to_vec(),
+    });
     Ok(())
 }
 
@@ -374,13 +395,22 @@ pub fn fchmod(descriptor: RawFd, permissions: u32) -> io::Result<()> {
 
 /// Copy a file's modification time onto an open descriptor.
 pub fn set_modified(descriptor: RawFd, nanoseconds: u64) -> io::Result<()> {
+    // Converted into whatever `tv_sec` is on this target rather than named:
+    // the libc crate deprecates naming `time_t` on musl, and a value that does
+    // not fit is refused rather than wrapped into a different date.
+    let seconds = (nanoseconds / 1_000_000_000).try_into().map_err(|_| {
+        io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "The modification time does not fit this system's time type.",
+        )
+    })?;
     let times = [
         libc::timespec {
             tv_sec: 0,
             tv_nsec: libc::UTIME_OMIT,
         },
         libc::timespec {
-            tv_sec: (nanoseconds / 1_000_000_000) as libc::time_t,
+            tv_sec: seconds,
             tv_nsec: (nanoseconds % 1_000_000_000) as i64,
         },
     ];
@@ -439,12 +469,78 @@ pub fn available_bytes_at(path: &[u8]) -> io::Result<u64> {
     Ok(stat.f_bavail.saturating_mul(unit))
 }
 
+/// Let this process hold as many descriptors as its hard limit allows.
+///
+/// Every walk over a tree keeps one directory open per level, and a copy keeps
+/// two, so a tree at the depth limit needs more than the 1024 some machines
+/// set as the soft limit. The hard limit is the administrator's ceiling and is
+/// left alone; a failure here only means a very deep tree is refused with
+/// `EMFILE` rather than handled.
+pub fn raise_descriptor_limit() {
+    let mut limit = libc::rlimit {
+        rlim_cur: 0,
+        rlim_max: 0,
+    };
+    if unsafe { libc::getrlimit(libc::RLIMIT_NOFILE, &mut limit) } == 0
+        && limit.rlim_cur < limit.rlim_max
+    {
+        limit.rlim_cur = limit.rlim_max;
+        unsafe { libc::setrlimit(libc::RLIMIT_NOFILE, &limit) };
+    }
+}
+
 /// Make a file's bytes durable before anything else depends on them existing.
+///
+/// For a directory, what becomes durable is its entries: a name created or
+/// renamed into it is only certain to survive a crash once this returns.
 pub fn fsync(descriptor: RawFd) -> io::Result<()> {
     if unsafe { libc::fsync(descriptor) } < 0 {
         return Err(io::Error::last_os_error());
     }
+    #[cfg(test)]
+    trace::record(trace::Event::Fsync {
+        inode: metadata_of(descriptor).map_or(0, |metadata| metadata.inode),
+    });
     Ok(())
+}
+
+/// The order in which this thread made the calls a crash is judged by.
+///
+/// Durability cannot be observed from inside a running test — nothing is
+/// lost until the power goes — but its precondition can: a name has to be
+/// `fsync`ed into its directory before anything that depends on it surviving
+/// happens. A test starts a trace, runs an action on the same thread, and
+/// reads back the sequence.
+#[cfg(test)]
+pub mod trace {
+    use std::cell::RefCell;
+
+    #[derive(Clone, Debug, PartialEq, Eq)]
+    pub enum Event {
+        Fsync { inode: u64 },
+        Rename { to: Vec<u8> },
+        Unlink { name: Vec<u8> },
+    }
+
+    thread_local! {
+        static EVENTS: RefCell<Option<Vec<Event>>> = const { RefCell::new(None) };
+    }
+
+    pub fn start() {
+        EVENTS.with(|events| *events.borrow_mut() = Some(Vec::new()));
+    }
+
+    pub fn take() -> Vec<Event> {
+        EVENTS.with(|events| events.borrow_mut().take().unwrap_or_default())
+    }
+
+    pub(super) fn record(event: Event) {
+        EVENTS.with(|events| {
+            if let Some(events) = events.borrow_mut().as_mut() {
+                events.push(event);
+            }
+        });
+    }
 }
 
 fn openat2_raw(parent: RawFd, name: &CString, flags: u64, resolve: u64) -> io::Result<RawFd> {
@@ -470,31 +566,97 @@ fn openat2_raw(parent: RawFd, name: &CString, flags: u64, resolve: u64) -> io::R
     Ok(result as RawFd)
 }
 
-/// Metadata for one directory entry, never following a final symlink.
-pub fn metadata_at(parent: RawFd, name: &[u8]) -> io::Result<Metadata> {
-    metadata_at_flags(
-        parent,
-        name,
-        libc::AT_SYMLINK_NOFOLLOW | libc::AT_STATX_DONT_SYNC,
-    )
+/// `struct statx_timestamp` from `<linux/stat.h>`.
+#[repr(C)]
+#[derive(Clone, Copy)]
+#[allow(dead_code)]
+struct StatxTimestamp {
+    tv_sec: i64,
+    tv_nsec: u32,
+    reserved: i32,
 }
 
-fn metadata_at_flags(parent: RawFd, name: &[u8], flags: libc::c_int) -> io::Result<Metadata> {
-    let child = cstring(name)?;
-    let mut buffer = std::mem::MaybeUninit::<libc::statx>::zeroed();
+/// `struct statx` from `<linux/stat.h>`, as the kernel lays it out.
+///
+/// The helper calls `statx(2)` as a raw syscall with its own copy of the
+/// structure rather than through libc's wrapper, because the `libc` crate only
+/// exposes the wrapper, the structure, and the flags for musl when built with a
+/// cfg asserting musl 1.2.3 — a static musl release build would otherwise need
+/// that flag to compile at all. The layout is the kernel's ABI: fixed at 256
+/// bytes since the call was added in Linux 4.11, with later fields taken from
+/// the spare space at the end, so a buffer of this size is right for every
+/// kernel.
+#[repr(C)]
+#[derive(Clone, Copy)]
+// Fields this helper does not read are still part of the layout the kernel
+// writes into.
+#[allow(dead_code)]
+struct RawStatx {
+    stx_mask: u32,
+    stx_blksize: u32,
+    stx_attributes: u64,
+    stx_nlink: u32,
+    stx_uid: u32,
+    stx_gid: u32,
+    stx_mode: u16,
+    spare0: u16,
+    stx_ino: u64,
+    stx_size: u64,
+    stx_blocks: u64,
+    stx_attributes_mask: u64,
+    stx_atime: StatxTimestamp,
+    stx_btime: StatxTimestamp,
+    stx_ctime: StatxTimestamp,
+    stx_mtime: StatxTimestamp,
+    stx_rdev_major: u32,
+    stx_rdev_minor: u32,
+    stx_dev_major: u32,
+    stx_dev_minor: u32,
+    stx_mnt_id: u64,
+    stx_dio_mem_align: u32,
+    stx_dio_offset_align: u32,
+    spare3: [u64; 12],
+}
+
+const _: () = assert!(size_of::<RawStatx>() == 0x100);
+
+// From `<linux/fcntl.h>` and `<linux/stat.h>`; see `RawStatx` for why they are
+// spelled out here.
+const AT_STATX_DONT_SYNC: libc::c_int = 0x4000;
+const STATX_TYPE: u32 = 0x0001;
+const STATX_BASIC_STATS: u32 = 0x07ff;
+const STATX_MNT_ID: u32 = 0x1000;
+
+/// `statx(2)` into a zeroed buffer; the kernel fills in what `mask` asks for
+/// and reports in `stx_mask` what it actually filled in.
+fn raw_statx(parent: RawFd, name: &CString, flags: libc::c_int, mask: u32) -> io::Result<RawStatx> {
+    let mut buffer = std::mem::MaybeUninit::<RawStatx>::zeroed();
     let result = unsafe {
-        libc::statx(
+        libc::syscall(
+            libc::SYS_statx,
             parent,
-            child.as_ptr(),
+            name.as_ptr(),
             flags,
-            libc::STATX_BASIC_STATS | libc::STATX_MNT_ID,
+            mask,
             buffer.as_mut_ptr(),
         )
     };
     if result < 0 {
         return Err(io::Error::last_os_error());
     }
-    let stat = unsafe { buffer.assume_init() };
+    // Every field is an integer and the buffer started zeroed, so whatever the
+    // kernel did not write is a valid zero rather than uninitialised memory.
+    Ok(unsafe { buffer.assume_init() })
+}
+
+/// Metadata for one directory entry, never following a final symlink.
+pub fn metadata_at(parent: RawFd, name: &[u8]) -> io::Result<Metadata> {
+    metadata_at_flags(parent, name, libc::AT_SYMLINK_NOFOLLOW | AT_STATX_DONT_SYNC)
+}
+
+fn metadata_at_flags(parent: RawFd, name: &[u8], flags: libc::c_int) -> io::Result<Metadata> {
+    let child = cstring(name)?;
+    let stat = raw_statx(parent, &child, flags, STATX_BASIC_STATS | STATX_MNT_ID)?;
 
     let mode = u32::from(stat.stx_mode);
     let kind = match mode & libc::S_IFMT {
@@ -505,7 +667,7 @@ fn metadata_at_flags(parent: RawFd, name: &[u8], flags: libc::c_int) -> io::Resu
     };
 
     let device = device_number(stat.stx_dev_major, stat.stx_dev_minor);
-    let mount_id = if stat.stx_mask & libc::STATX_MNT_ID != 0 {
+    let mount_id = if stat.stx_mask & STATX_MNT_ID != 0 {
         stat.stx_mnt_id
     } else {
         device
@@ -542,26 +704,18 @@ pub fn target_exists(parent: RawFd, name: &[u8]) -> bool {
     let Ok(child) = cstring(name) else {
         return false;
     };
-    let mut buffer = std::mem::MaybeUninit::<libc::statx>::zeroed();
-    let result = unsafe {
-        libc::statx(
-            parent,
-            child.as_ptr(),
-            libc::AT_STATX_DONT_SYNC | libc::AT_NO_AUTOMOUNT,
-            libc::STATX_TYPE,
-            buffer.as_mut_ptr(),
-        )
-    };
-    result == 0
+    raw_statx(
+        parent,
+        &child,
+        AT_STATX_DONT_SYNC | libc::AT_NO_AUTOMOUNT,
+        STATX_TYPE,
+    )
+    .is_ok()
 }
 
 /// Metadata for an already-open descriptor, used for a scan root.
 pub fn metadata_of(descriptor: RawFd) -> io::Result<Metadata> {
-    metadata_at_flags(
-        descriptor,
-        b"",
-        libc::AT_EMPTY_PATH | libc::AT_STATX_DONT_SYNC,
-    )
+    metadata_at_flags(descriptor, b"", libc::AT_EMPTY_PATH | AT_STATX_DONT_SYNC)
 }
 
 fn device_number(major: u32, minor: u32) -> u64 {
@@ -579,8 +733,19 @@ fn nanoseconds(seconds: i64, nanoseconds: u32) -> u64 {
         .saturating_add(u64::from(nanoseconds))
 }
 
+/// Close a descriptor this code owns, exactly once.
+///
+/// A second close of the same number is not harmless: between the two, any
+/// other thread may have been handed that number for something else — the
+/// journal's database, a file being copied — and the second close would take
+/// it away from under it. `EBADF` is the only trace a double close leaves when
+/// nothing reused the number, so a debug build treats it as the bug it is.
 pub fn close(descriptor: RawFd) {
-    unsafe { libc::close(descriptor) };
+    let result = unsafe { libc::close(descriptor) };
+    debug_assert!(
+        result == 0 || io::Error::last_os_error().raw_os_error() != Some(libc::EBADF),
+        "descriptor {descriptor} was closed although nothing owned it any more",
+    );
 }
 
 fn cstring(bytes: &[u8]) -> io::Result<CString> {
@@ -655,3 +820,92 @@ impl Drop for Directory {
 // The stream is only ever touched by the thread that owns the walk; the raw
 // pointer is what keeps `Directory` from deriving this on its own.
 unsafe impl Send for Directory {}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::testing::Sandbox;
+
+    /// The raw `statx` call reads its own copy of the kernel's structure, so it
+    /// is checked field by field against what the standard library's `lstat`
+    /// says about the same entries: a file, a directory, a symlink, and an
+    /// open descriptor.
+    #[test]
+    fn the_raw_statx_call_reads_what_lstat_reads() {
+        use std::os::unix::fs::MetadataExt;
+        let sandbox = Sandbox::new("sys-raw-statx");
+        sandbox.file(b"file", 70_000);
+        sandbox.directory(b"directory");
+        sandbox.symlink(b"/nonexistent/target", b"link");
+        sandbox.hardlink(b"file", b"second-name");
+        sandbox.chmod(b"directory", 0o1750);
+        let parent = open_root(&sandbox.bytes()).unwrap();
+
+        for (name, kind) in [
+            (&b"file"[..], EntryKind::File),
+            (b"directory", EntryKind::Directory),
+            (b"link", EntryKind::Symlink),
+        ] {
+            let ours = metadata_at(parent, name).unwrap();
+            let theirs =
+                std::fs::symlink_metadata(sandbox.path().join(std::str::from_utf8(name).unwrap()))
+                    .unwrap();
+            let label = String::from_utf8_lossy(name);
+            assert_eq!(ours.kind, kind, "{label}");
+            assert_eq!(ours.device, theirs.dev(), "{label}");
+            assert_eq!(ours.inode, theirs.ino(), "{label}");
+            assert_eq!(ours.link_count, theirs.nlink(), "{label}");
+            assert_eq!(ours.apparent_bytes, theirs.size(), "{label}");
+            assert_eq!(ours.allocated_bytes, theirs.blocks() * 512, "{label}");
+            assert_eq!(ours.owner_id, theirs.uid(), "{label}");
+            assert_eq!(ours.group_id, theirs.gid(), "{label}");
+            assert_eq!(ours.permissions, theirs.mode() & 0o7777, "{label}");
+            assert_eq!(
+                ours.modified_nanoseconds,
+                theirs.mtime() as u64 * 1_000_000_000 + theirs.mtime_nsec() as u64,
+                "{label}"
+            );
+        }
+        assert_eq!(metadata_at(parent, b"file").unwrap().link_count, 2);
+        assert_eq!(
+            metadata_at(parent, b"directory").unwrap().permissions,
+            0o1750,
+            "the sticky bit comes through"
+        );
+
+        let descriptor = openat_read_no_symlinks(parent, b"file").unwrap();
+        let through_descriptor = metadata_of(descriptor).unwrap();
+        assert_eq!(
+            through_descriptor.inode,
+            metadata_at(parent, b"file").unwrap().inode
+        );
+        close(descriptor);
+
+        assert!(target_exists(parent, b"file"));
+        assert!(
+            !target_exists(parent, b"link"),
+            "a dangling link resolves to nothing"
+        );
+        assert_eq!(
+            metadata_at(parent, b"missing").unwrap_err().raw_os_error(),
+            Some(libc::ENOENT),
+            "an error comes back with its errno",
+        );
+        close(parent);
+    }
+
+    /// The check every other test relies on to catch a descriptor closed by two
+    /// owners: without it, a double close only shows up as some other thread's
+    /// file vanishing, which is a flaky test rather than a failing one.
+    #[test]
+    #[should_panic(expected = "closed although nothing owned it")]
+    fn closing_a_descriptor_twice_is_caught_in_a_debug_build() {
+        let sandbox = Sandbox::new("sys-double-close");
+        sandbox.file(b"file", 1);
+        let parent = open_root(&sandbox.bytes()).unwrap();
+        let descriptor = openat_read_no_symlinks(parent, b"file").unwrap();
+        close(parent);
+        close(descriptor);
+        close(descriptor);
+    }
+}

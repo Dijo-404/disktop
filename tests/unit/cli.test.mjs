@@ -12,9 +12,26 @@ test("help is generated from the command table, so nothing can drift out of it",
     }
     assert.match(help, new RegExp(command.path.join(" ")), `${command.path.join(" ")} is missing from help`);
   }
-  assert.match(help, /\[planned\]/, "an unbuilt command must be marked");
-  assert.match(help, /are not implemented/, "the marker must be explained");
+  // Every declared command is built, so nothing may be marked as planned and
+  // the help must not explain a marker no command carries.
+  for (const command of COMMANDS) {
+    assert.equal(command.implemented, true, `${command.path.join(" ")} is declared but not built`);
+  }
+  assert.doesNotMatch(help, /\[planned\]/);
+  assert.doesNotMatch(help, /not implemented/);
   assert.match(help, /Exit status: 0 complete, 1 alert threshold reached/);
+});
+
+test("a command declared before it is built says so in its own help", () => {
+  const unbuilt = { path: ["someday"], summary: "Not here yet", options: [], implemented: false };
+  assert.match(renderHelp(unbuilt), /declared but not implemented yet/);
+});
+
+test("a command whose operand is one of fixed words lists them in its help", () => {
+  const find = COMMANDS.find((command) => command.path.join(" ") === "find");
+  assert.match(renderHelp(find), /KIND is one of: duplicates, stale, empty, broken\./);
+  const completion = COMMANDS.find((command) => command.path.join(" ") === "completion");
+  assert.match(renderHelp(completion), /SHELL is one of: bash, zsh, fish\./);
 });
 
 test("help fits an 80 column terminal, for every command", () => {
@@ -132,17 +149,15 @@ test("an incomplete inventory reports 3 and says what it missed", async () => {
   assert.equal(envelope.warnings.length, 1);
 });
 
-test("a declared but unbuilt command refuses in the same envelope shape", async () => {
+test("report and completion run rather than refusing as unbuilt", async () => {
   const context = fakeContext();
-  assert.equal(await runCli(["report", "--json"], context), 2);
-  const envelope = JSON.parse(context.captured.stdout);
-  assert.equal(envelope.status, "error");
-  assert.equal(envelope.error.code, "not-implemented");
+  assert.equal(await runCli(["report", "--format", "json"], context), 0);
+  assert.equal(JSON.parse(context.captured.stdout).document, "disktop-report");
 
   const text = fakeContext();
-  assert.equal(await runCli(["completion", "bash"], text), 2);
-  assert.equal(text.captured.stdout, "");
-  assert.match(text.captured.stderr, /not implemented yet/);
+  assert.equal(await runCli(["completion", "bash"], text), 0);
+  assert.match(text.captured.stdout, /complete -F _disktop disktop/);
+  assert.equal(text.captured.stderr, "");
 });
 
 test("--units changes presentation without changing a byte value", async () => {
@@ -243,4 +258,55 @@ test("without --notify or the setting, alerts check notifies nobody", async () =
   await runCli(["alerts", "check", "--threshold", "10", "--json"], context);
   assert.equal(asked, 0);
   assert.equal(JSON.parse(context.captured.stdout).data.notification, undefined);
+});
+
+test("an empty value or operand is refused, never read as the working directory", () => {
+  // `--path="$TARGET"` with TARGET unset arrives as `--path=`; resolved, an
+  // empty path is the directory the command was run from.
+  for (const args of [
+    ["clean", "plan", "--path="],
+    ["clean", "plan", "--path", ""],
+    ["scan", ""],
+    ["explore", "--min-size="],
+    ["find", "empty", "--path="],
+  ]) {
+    const result = parseArguments(args);
+    assert.equal(result.kind, "error", JSON.stringify(args));
+    assert.match(result.message, /empty/, JSON.stringify(args));
+  }
+});
+
+test("an option given twice is refused rather than one of them silently winning", () => {
+  const result = parseArguments(["history", "--limit", "5", "--limit", "500"]);
+  assert.equal(result.kind, "error");
+  assert.match(result.message, /'--limit' was given more than once/);
+  // A flag repeated says the same thing twice and is harmless.
+  assert.equal(parseArguments(["devices", "--json", "--json"]).kind, "command");
+});
+
+test("an argument whose bytes were not UTF-8 is refused, because it no longer names what was typed", () => {
+  // Node decodes argv as UTF-8 and replaces what it cannot read with U+FFFD,
+  // so `disktop scan $'\xff'` would otherwise scan a path nobody typed.
+  for (const args of [["scan", "dir�"], ["clean", "plan", "--path", "/home/example/�"]]) {
+    const result = parseArguments(args);
+    assert.equal(result.kind, "error", JSON.stringify(args));
+    assert.match(result.message, /not valid UTF-8/);
+  }
+});
+
+test("every refusal that quotes what was typed prints it without its escape sequences", async () => {
+  const hostile = "x\u001b]0;owned\u0007\u009b2J";
+  for (const args of [
+    ["snapshots", hostile],
+    ["snapshots", "diff", "--from", hostile],
+    ["find", hostile],
+    ["timer", hostile],
+    ["undo", hostile],
+    ["clean", "--category", hostile],
+    ["explore", "--sort", "name", "--cursor", hostile],
+  ]) {
+    const context = fakeContext();
+    await runCli(args, context);
+    assert.doesNotMatch(context.captured.stderr, /[\u001b\u0007\u009b]/, JSON.stringify(args));
+  }
 });

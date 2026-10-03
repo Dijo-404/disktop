@@ -1,6 +1,6 @@
 # Architecture
 
-Status: design contract for the implementation scaffold. [PLAN.md](../PLAN.md) is the product scope and acceptance checklist. This document explains where code belongs as the tree is filled in.
+Status: the architecture of the `1.0.0` release candidate, enforced by the lint rules below. [PLAN.md](../PLAN.md) is the product scope and acceptance checklist; this document explains where code belongs and why.
 
 ## Dependency direction
 
@@ -16,7 +16,7 @@ bin  ──builds──>  composition  ──constructs──>  Linux adapters, 
                                           native client ──> Rust disktop-fs helper
 ```
 
-`src/domain` contains data types, sizes, path representation, action policy, and errors without I/O. `src/ports` defines the interfaces an application use case needs. `src/application` coordinates inventory, scan, findings, snapshots, action planning, application, undo, and alerts. `src/cli` and `src/tui` call those use cases. They must not import a Linux command adapter or the native client to perform a feature directly.
+`src/domain` contains data types, sizes, path representation, action policy, and errors without I/O. `src/ports` defines the interfaces an application use case needs. `src/application` coordinates inventory, scan, findings, snapshots, action planning, application, undo, and alerts. `src/cli` and `src/tui` call those use cases, and `src/reports` renders what they return. None of them may import a Linux command adapter or the native client to perform a feature directly. The TUI receives its services as one `TuiServices` value (`src/tui/services.ts`), the same services the CLI handlers receive, and its views are pure functions from state to a frame; only `src/tui/render.ts` talks to the terminal.
 
 `src/composition` is the composition root and the only layer permitted to construct an adapter. It imports no surface, and `src/bin` imports it rather than reaching a platform module itself. Every other layer receives what it needs as an argument, which is what makes the prohibitions below enforceable rather than aspirational: if no surface can build an adapter, no surface can quietly use one.
 
@@ -38,7 +38,7 @@ Node may write its own config, snapshots, reports, scan cache metadata, and user
 | --- | --- | --- |
 | Device dashboard | `lsblk -J -b`, `/proc/self/mountinfo`, and `statfs` joined by the Linux inventory adapter, through `InventoryPort` to `application/dashboard.ts`, to the CLI or TUI | Optional cached view. |
 | Tree exploration | `application/scan.ts` through `ScanPort` to the helper's `openat2` walk and SQLite index; `application/explore.ts` through `FileIndexPort` to keyset-paginated `query-index` pages | Current detailed SQLite scan index under `$XDG_CACHE_HOME`, bounded by scan count and byte budget; compact snapshots under `$XDG_DATA_HOME` for growth. |
-| Footprint finding | Detectors in `src/providers` name paths through `PathProbe`, `ToolPort`, `IndexSearchPort` and `PackageInventoryPort`; `application/footprint.ts` merges them and measures every unmeasured path in one pass through `FootprintPort`, which runs a single helper scan and reads each path's own index row | Findings can be recomputed; selected plan is stored separately. |
+| Footprint finding | Detectors in `src/providers` name paths through `PathProbe`, `ToolPort`, `IndexSearchPort` and `PackageInventoryPort`; `application/footprint.ts` merges them and measures every unmeasured path in one pass through `FootprintPort`, which runs a single helper scan into an index of its own and reads each path's own row there | Findings can be recomputed; selected plan is stored separately. Measuring scans never count against `keep_scans`, so they never evict a scan somebody is exploring. |
 | Cleanup | Provider or explicit path to immutable plan, confirmation, revalidation, helper or fixed-argument manager adapter, journal, verification | Expiring reviewed plan and durable native journal. |
 | Report | Application query to JSON/CSV/HTML renderer | Only an explicitly requested output file. |
 

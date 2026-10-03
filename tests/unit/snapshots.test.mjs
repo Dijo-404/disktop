@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
-import { mkdtemp, readdir, rm, writeFile } from "node:fs/promises";
+import { spawnSync } from "node:child_process";
+import { mkdtemp, readdir, readFile, rm, stat, truncate, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { after, test } from "node:test";
@@ -340,4 +341,59 @@ test("a snapshot records the scope the scan actually used, not the one requested
   assert.equal(recorded.scope.maxDepth, "6");
   assert.equal(recorded.scope.accounting, "apparent");
   assert.equal((await store.get(recorded.id)).scope.maxDepth, "6");
+});
+
+test("pruning removes only the store's own files, whatever a snapshot claims its ID is", async () => {
+  // A snapshot file is ordinary JSON other programs can write. The ID inside
+  // it named the file prune deleted, so an edited one reached outside.
+  const root = await sandbox();
+  const store = createSnapshotStore(root);
+  const victim = join(root, "precious.json");
+  await writeFile(victim, "{}");
+  const directoryPath = join(root, "snapshots");
+  await store.save(snapshot("snap-new", "2026-09-03T00:00:00.000Z", []));
+  const forged = JSON.parse(await readFile(join(directoryPath, "snap-new.json"), "utf8"));
+  await writeFile(
+    join(directoryPath, "snap-old.json"),
+    JSON.stringify({ ...forged, id: "../precious", scannedAt: "2026-09-01T00:00:00.000Z" }),
+  );
+
+  const listed = await store.list();
+  assert.deepEqual(listed.map((entry) => entry.id), ["snap-new"], "a file whose ID is not its own name is not a snapshot");
+  await store.prune({ keepLatest: 1 });
+  assert.equal(await readFile(victim, "utf8"), "{}", "nothing outside the store was removed");
+});
+
+test("a snapshot that is a pipe or is too large is skipped, not waited on or read whole", async () => {
+  const root = await sandbox();
+  const store = createSnapshotStore(root);
+  await store.save(snapshot("snap-good", "2026-09-01T00:00:00.000Z", []));
+  const directoryPath = join(root, "snapshots");
+  const fifo = spawnSync("mkfifo", [join(directoryPath, "snap-pipe.json")]);
+  assert.equal(fifo.status, 0, "mkfifo is needed for this test");
+  await writeFile(join(directoryPath, "snap-huge.json"), "");
+  await truncate(join(directoryPath, "snap-huge.json"), 512 * 1024 * 1024);
+
+  const begun = Date.now();
+  const listed = await store.list();
+  assert.ok(Date.now() - begun < 5_000, `listing took ${Date.now() - begun} ms`);
+  assert.deepEqual(listed.map((entry) => entry.id), ["snap-good"]);
+});
+
+test("a write that fails leaves no staging file behind", async () => {
+  const root = await sandbox();
+  const store = createSnapshotStore(root);
+  const unencodable = snapshot("snap-bad", "2026-09-01T00:00:00.000Z", [], {
+    totals: { allocatedBytes: -1n, apparentBytes: 0n, sharedBytes: 0n },
+  });
+  await assert.rejects(() => store.save(unencodable));
+  assert.deepEqual(await readdir(join(root, "snapshots")), [], "the partial file was removed");
+});
+
+test("snapshot files and their directory are private to the user", async () => {
+  const root = await sandbox();
+  const store = createSnapshotStore(root);
+  await store.save(snapshot("snap-a", "2026-09-01T00:00:00.000Z", []));
+  assert.equal((await stat(join(root, "snapshots"))).mode & 0o777, 0o700);
+  assert.equal((await stat(join(root, "snapshots", "snap-a.json"))).mode & 0o777, 0o600);
 });

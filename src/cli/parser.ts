@@ -13,11 +13,22 @@ export interface OptionSpec {
   readonly choices?: readonly string[];
 }
 
+export interface OperandSpec {
+  readonly name: string;
+  readonly required: boolean;
+  /**
+   * The fixed words the operand may be. Help lists them and completion offers
+   * them; the handler still checks the word, so a refusal carries the same
+   * envelope as every other refusal from that command.
+   */
+  readonly choices?: readonly string[];
+}
+
 export interface CommandSpec {
   /** Words that select this command, empty for the root command. */
   readonly path: readonly string[];
   readonly summary: string;
-  readonly operand?: { readonly name: string; readonly required: boolean };
+  readonly operand?: OperandSpec;
   readonly options: readonly OptionSpec[];
   readonly implemented: boolean;
 }
@@ -90,7 +101,7 @@ export const COMMANDS: readonly CommandSpec[] = [
   {
     path: ["find"],
     summary: "Find duplicates, stale files, empty dirs, broken links",
-    operand: { name: "KIND", required: true },
+    operand: { name: "KIND", required: true, choices: ["duplicates", "stale", "empty", "broken"] },
     options: [
       JSON_OPTION,
       UNITS_OPTION,
@@ -112,7 +123,7 @@ export const COMMANDS: readonly CommandSpec[] = [
   {
     path: ["snapshots"],
     summary: "List saved snapshots or compare two of them",
-    operand: { name: "ACTION", required: true },
+    operand: { name: "ACTION", required: true, choices: ["list", "diff"] },
     options: [
       JSON_OPTION,
       UNITS_OPTION,
@@ -192,9 +203,34 @@ export const COMMANDS: readonly CommandSpec[] = [
     options: [JSON_OPTION, UNITS_OPTION, { name: "yes", summary: "Confirm the restore without a terminal", kind: "flag" }],
     implemented: true,
   },
-  { path: ["report"], summary: "Export JSON, CSV, or HTML", options: [JSON_OPTION], implemented: false },
-  { path: ["timer"], summary: "Install or remove the opt-in alert timer", operand: { name: "ACTION", required: true }, options: [JSON_OPTION], implemented: true },
-  { path: ["completion"], summary: "Generate a shell completion script", operand: { name: "SHELL", required: true }, options: [], implemented: false },
+  {
+    path: ["report"],
+    summary: "Export a JSON, CSV, or HTML report",
+    options: [
+      JSON_OPTION,
+      UNITS_OPTION,
+      { name: "format", summary: "What to write", kind: "value", placeholder: "json|csv|html", choices: ["json", "csv", "html"] },
+      { name: "output", summary: "Write to this new file instead of stdout", kind: "value", placeholder: "FILE" },
+      { name: "path", summary: "Include the stored scan that covers this path", kind: "value", placeholder: "PATH" },
+      { name: "limit", summary: "Largest entries to list, up to 1000", kind: "value", placeholder: "COUNT" },
+      { name: "findings", summary: "Also run the detectors and include what they found", kind: "flag" },
+    ],
+    implemented: true,
+  },
+  {
+    path: ["timer"],
+    summary: "Install or remove the opt-in alert timer",
+    operand: { name: "ACTION", required: true, choices: ["install", "uninstall"] },
+    options: [JSON_OPTION],
+    implemented: true,
+  },
+  {
+    path: ["completion"],
+    summary: "Generate a shell completion script",
+    operand: { name: "SHELL", required: true, choices: ["bash", "zsh", "fish"] },
+    options: [],
+    implemented: true,
+  },
 ];
 
 export interface ParsedCommand {
@@ -221,6 +257,15 @@ const VALUE_OPTION_NAMES: ReadonlySet<string> = new Set(
 
 /** Resolve the argument list against the command table without performing any work. */
 export function parseArguments(args: readonly string[]): ParseResult {
+  // Node decodes arguments as UTF-8 and puts U+FFFD wherever it could not, so
+  // an argument holding one no longer names what was typed. A path built from
+  // it would be a different path, so it is refused rather than guessed at.
+  if (args.some((argument) => argument.includes("�"))) {
+    return {
+      kind: "error",
+      message: "An argument held bytes that are not valid UTF-8, so Disktop cannot tell what it named. A path like that is reached through a finding, never typed.",
+    };
+  }
   const words = commandWords(args);
   const command = selectCommand(words.map((word) => word.value));
   if (command === undefined) {
@@ -251,6 +296,11 @@ export function parseArguments(args: readonly string[]): ParseResult {
       if (operand !== undefined) {
         return { kind: "error", message: `'${command.path.join(" ")}' takes one ${command.operand.name}, but received more than one.` };
       }
+      if (argument === "") {
+        // An unset variable in a script arrives as an empty argument, and an
+        // empty path resolves to wherever the command happened to run.
+        return { kind: "error", message: `'${command.path.join(" ")}' received an empty ${command.operand.name}, which names nothing.` };
+      }
       operand = argument;
       continue;
     }
@@ -276,8 +326,14 @@ export function parseArguments(args: readonly string[]): ParseResult {
     if (value === undefined || (inlineValue === undefined && value.startsWith("-"))) {
       return { kind: "error", message: `'--${option.name}' needs a ${option.placeholder ?? "value"}.` };
     }
+    if (value === "") {
+      return { kind: "error", message: `'--${option.name}' received an empty ${option.placeholder ?? "value"}, which names nothing.` };
+    }
     if (option.choices !== undefined && !option.choices.includes(value)) {
       return { kind: "error", message: `'--${option.name}' accepts ${option.choices.join(" or ")}, not '${value}'.` };
+    }
+    if (values.has(option.name)) {
+      return { kind: "error", message: `'--${option.name}' was given more than once; give it once.` };
     }
     values.set(option.name, value);
     if (inlineValue === undefined) {
@@ -345,16 +401,28 @@ export function renderHelp(command: CommandSpec = COMMANDS[0] as CommandSpec): s
       const note = entry.implemented ? "" : " [planned]";
       lines.push(`  ${name.padEnd(22)} ${entry.summary}${note}`);
     }
+    // The marker is explained only while something carries it, so the help
+    // never describes a state no command is in.
+    if (COMMANDS.some((entry) => !entry.implemented)) {
+      lines.push(
+        "",
+        "[planned] commands parse and validate their options, then report that they",
+        "are not implemented.",
+      );
+    }
     lines.push(
       "",
-      "[planned] commands parse and validate their options, then report that they",
-      "are not implemented. With no command Disktop opens the dashboard; with --json",
-      "it prints the dashboard instead.",
+      "With no command, on a terminal, Disktop opens its terminal UI (press ? in",
+      "it for keys). With --json, or through a pipe, it prints the dashboard.",
+      "Nothing on disk changes without a reviewed plan you confirm.",
     );
   } else {
     lines.push(command.summary, "");
     const operand = command.operand === undefined ? "" : ` ${command.operand.required ? command.operand.name : `[${command.operand.name}]`}`;
     lines.push("Usage:", `  disktop ${command.path.join(" ")}${operand} [OPTIONS]`);
+    if (command.operand?.choices !== undefined) {
+      lines.push("", `${command.operand.name} is one of: ${command.operand.choices.join(", ")}.`);
+    }
     if (!command.implemented) {
       lines.push("", "This command is declared but not implemented yet.");
     }

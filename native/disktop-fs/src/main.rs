@@ -20,6 +20,9 @@ mod testing;
 use std::io;
 
 fn main() {
+    // A tree at the depth limit needs a descriptor per level; see
+    // `subtree::MAX_DEPTH`.
+    sys::raise_descriptor_limit();
     let stdin = io::stdin();
     let stdout = io::stdout();
 

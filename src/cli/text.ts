@@ -445,9 +445,12 @@ export function historyLines(records: readonly JournalRecord[], units: Units): s
     // A move or a compress that trashed its source is undoable in exactly the
     // way a Trash action is; one that removed the source permanently left no
     // item with a destination, which is what says so.
+    // A page may leave items out to stay bounded; what it left out may be the
+    // ones that went to Trash, so a shortened list is not proof of nothing.
     const restorable =
       ["trash", "copy-move", "compress"].includes(record.operation) &&
-      record.items.some((item) => item.outcome === "completed" && item.destination !== undefined);
+      (record.items.some((item) => item.outcome === "completed" && item.destination !== undefined) ||
+        (record.itemsOmitted ?? 0n) > 0n);
     const undo = restorable && record.state !== "uncertain" ? "  undo available" : "";
     return `${record.startedAt}  ${record.operation.padEnd(12)} ${record.state.padEnd(10)} ${formatBytes(
       record.bytesMovedToTrash,

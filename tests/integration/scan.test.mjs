@@ -331,6 +331,82 @@ test("explore answers about the path it was given, not the whole scan", async ()
   }
 });
 
+test("a directory is browsed by finding its own row at its path, then paging its children", async () => {
+  const { utimes, writeFile, mkdir } = await import("node:fs/promises");
+  const { createNativeScanner } = await import("../../dist/platform/linux/scan/index.js");
+  const { NativeHelperClient } = await import("../../dist/native/client.js");
+  const { rawPathFromUtf8 } = await import("../../dist/domain/paths.js");
+
+  const home = await disktopHome();
+  const fixture = await createLargeFixture({ entries: 1, fanOut: 1 });
+  const browsed = join(fixture.root, "browsed");
+  await mkdir(browsed);
+  for (let index = 0; index < 25; index += 1) {
+    await writeFile(join(browsed, `child-${String(index).padStart(2, "0")}.bin`), "c".repeat(index * 100));
+  }
+  // Every child shares the directory's modification time, so a listing of
+  // the subtree sorted by it ties the directory with what is below it.
+  const stamp = new Date("2026-01-01T00:00:00Z");
+  for (let index = 0; index < 25; index += 1) {
+    await utimes(join(browsed, `child-${String(index).padStart(2, "0")}.bin`), stamp, stamp);
+  }
+  await utimes(browsed, stamp, stamp);
+
+  try {
+    const scanner = createNativeScanner({
+      indexDirectory: join(home, "index"),
+      start: () => NativeHelperClient.start(),
+    });
+    let scanId;
+    for await (const event of scanner.run(
+      { roots: [rawPathFromUtf8(fixture.root)], crossFilesystems: false, excludes: [], accounting: "allocated" },
+      new AbortController().signal,
+    )) {
+      if (event.kind === "complete") {
+        scanId = event.scanId;
+      }
+    }
+
+    for (const sort of ["allocated", "apparent", "modified", "name"]) {
+      const own = await scanner.query({ scanId, filter: { atPath: rawPathFromUtf8(browsed) }, sort, order: "descending", limit: 50 });
+      assert.equal(own.entries.length, 1, `${sort}: exactly the directory's own row`);
+      assert.equal(own.entries[0].path.display, browsed);
+      assert.equal(own.entries[0].kind, "directory");
+      assert.equal(own.nextCursor, undefined);
+
+      const seen = new Set();
+      let cursor;
+      for (let pages = 0; pages < 10; pages += 1) {
+        const page = await scanner.query({
+          scanId,
+          filter: { parentId: own.entries[0].id },
+          sort,
+          order: "descending",
+          limit: 7,
+          ...(cursor === undefined ? {} : { cursor }),
+        });
+        for (const entry of page.entries) {
+          assert.equal(seen.has(entry.id), false, `${sort}: a child came back on two pages`);
+          assert.equal(entry.parentId, own.entries[0].id);
+          seen.add(entry.id);
+        }
+        cursor = page.nextCursor;
+        if (cursor === undefined) {
+          break;
+        }
+      }
+      assert.equal(seen.size, 25, `${sort}: every child was listed once`);
+    }
+
+    await assert.rejects(
+      scanner.query({ scanId, filter: { atPath: rawPathFromUtf8(join(fixture.root, "never-created")) }, sort: "allocated", order: "descending", limit: 1 }),
+      /not in this scan/,
+    );
+  } finally {
+    await fixture.cleanup();
+  }
+});
+
 test("a tree full of unreadable directories does not produce an unbounded result", async () => {
   if (process.getuid?.() === 0) {
     return;

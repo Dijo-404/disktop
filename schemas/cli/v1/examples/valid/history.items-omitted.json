@@ -1,0 +1,66 @@
+{
+  "schemaVersion": "1",
+  "command": "history",
+  "generatedAt": "2026-10-01T08:45:00.000Z",
+  "status": "complete",
+  "exitCode": 0,
+  "data": {
+    "reconciled": "1",
+    "records": [
+      {
+        "id": "act-1759305679004-9f2c1ab07d4e5610",
+        "planId": "plan-20261001T084119004Z-9f2c1ab0",
+        "operation": "trash",
+        "startedAt": "2026-10-01T08:41:19.004Z",
+        "finishedAt": "2026-10-01T08:41:19.231Z",
+        "state": "complete",
+        "completed": "1",
+        "skipped": "0",
+        "failed": "0",
+        "selectedBytes": "7314112512",
+        "bytesMovedToTrash": "7314112512",
+        "items": [
+          {
+            "path": {
+              "bytesBase64": "L2hvbWUvZXhhbXBsZS8uY2FyZ28vcmVnaXN0cnk=",
+              "display": "/home/example/.cargo/registry",
+              "utf8": "/home/example/.cargo/registry"
+            },
+            "destination": {
+              "bytesBase64": "L2hvbWUvZXhhbXBsZS8ubG9jYWwvc2hhcmUvVHJhc2gvZmlsZXMvcmVnaXN0cnk=",
+              "display": "/home/example/.local/share/Trash/files/registry",
+              "utf8": "/home/example/.local/share/Trash/files/registry"
+            },
+            "outcome": "completed",
+            "bytes": "7314112512"
+          }
+        ],
+        "itemsOmitted": "499999"
+      },
+      {
+        "id": "act-1759305100112-3a7bd4e9c0f28513",
+        "planId": "plan-20261001T083820000Z-11bb22cc",
+        "operation": "erase",
+        "startedAt": "2026-10-01T08:38:20.112Z",
+        "state": "uncertain",
+        "completed": "0",
+        "skipped": "0",
+        "failed": "0",
+        "selectedBytes": "0",
+        "bytesMovedToTrash": "0",
+        "items": [
+          {
+            "path": {
+              "bytesBase64": "L2hvbWUvZXhhbXBsZS9qdW5r",
+              "display": "/home/example/junk",
+              "utf8": "/home/example/junk"
+            },
+            "outcome": "uncertain",
+            "message": "Disktop stopped around this operation and cannot tell whether it happened.",
+            "bytes": "0"
+          }
+        ]
+      }
+    ]
+  }
+}

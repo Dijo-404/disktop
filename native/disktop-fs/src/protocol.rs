@@ -282,6 +282,8 @@ struct FilterArguments {
     #[serde(default)]
     under_path: Option<String>,
     #[serde(default)]
+    at_path: Option<String>,
+    #[serde(default)]
     parent_id: Option<String>,
     #[serde(default)]
     name_contains: Option<String>,
@@ -670,7 +672,13 @@ fn run_scan(
     limits: &IndexLimits,
     cancelled: &AtomicBool,
 ) {
-    if let Err(error) = std::fs::create_dir_all(index_directory) {
+    // The index names every file below the roots, including the ones in
+    // directories nobody else may list, so whatever the helper creates for it
+    // is private to this user, as Disktop's own directories are.
+    if let Err(error) =
+        std::os::unix::fs::DirBuilderExt::mode(std::fs::DirBuilder::new().recursive(true), 0o700)
+            .create(index_directory)
+    {
         return fail(
             responder,
             "permission-denied",
@@ -798,6 +806,46 @@ impl ScanSink for ReportingSink<'_> {
     }
 }
 
+/// Open one finished scan, or answer the request with why not.
+///
+/// A scan ID names a file in the index directory, so one that could not be a
+/// scan ID is refused as an argument rather than looked up. A scan the index
+/// no longer holds is routine — the cache rolls over — and is answered as
+/// `unknown-request` so a client can say "run a new scan" rather than "error".
+fn open_scan(
+    responder: &Responder,
+    index_directory: &std::path::Path,
+    scan_id: &str,
+) -> Option<rusqlite::Connection> {
+    if !crate::index::valid_scan_id(scan_id) {
+        fail(
+            responder,
+            "invalid-arguments",
+            "scanId must be 8 to 128 ASCII letters, digits, '.', '-', or '_'",
+        );
+        return None;
+    }
+    match crate::index::open_scan(index_directory, scan_id) {
+        Ok(Some(connection)) => Some(connection),
+        Ok(None) => {
+            fail(
+                responder,
+                "unknown-request",
+                "That scan is not in the index. It may have been pruned; run a new scan.",
+            );
+            None
+        }
+        Err(error) => {
+            fail(
+                responder,
+                "internal-error",
+                &format!("The index could not be read: {error}"),
+            );
+            None
+        }
+    }
+}
+
 fn query_index(responder: &Responder, arguments: Map<String, Value>) {
     let arguments: QueryIndexArguments = match decode(arguments) {
         Ok(arguments) => arguments,
@@ -813,41 +861,16 @@ fn query_index(responder: &Responder, arguments: Map<String, Value>) {
         Err(message) => return fail(responder, "invalid-arguments", &message),
     };
 
-    let connection = match crate::index::open(&index_directory) {
-        Ok(connection) => connection,
-        Err(error) => {
-            return fail(
-                responder,
-                "internal-error",
-                &format!("The index could not be opened: {error}"),
-            );
-        }
+    let Some(connection) = open_scan(responder, &index_directory, &request.scan_id) else {
+        return;
     };
-
-    match crate::index::scan_exists(&connection, &request.scan_id) {
-        Ok(true) => {}
-        Ok(false) => {
-            return fail(
-                responder,
-                "unknown-request",
-                "That scan is not in the index. It may have been pruned; run a new scan.",
-            );
-        }
-        Err(error) => {
-            return fail(
-                responder,
-                "internal-error",
-                &format!("The index could not be read: {error}"),
-            );
-        }
-    }
 
     if let Some(encoded) = &arguments.filter.under_path {
         let path = match decode_path(encoded) {
             Ok(path) => path,
             Err(message) => return fail(responder, "invalid-arguments", &message),
         };
-        match crate::index::subtree_range(&connection, &request.scan_id, &path) {
+        match crate::index::subtree_range(&connection, &path) {
             // A path the scan never saw is refused by name. An empty page
             // would read as "there is nothing under there".
             Ok(None) => {
@@ -863,6 +886,33 @@ fn query_index(responder: &Responder, arguments: Map<String, Value>) {
                     responder,
                     "internal-error",
                     &format!("The subtree could not be resolved: {error}"),
+                );
+            }
+        }
+    }
+
+    // The row at exactly one path, resolved the same way and refused the same
+    // way when the scan never saw it: an empty page would read as "there is
+    // nothing there", which is a different answer.
+    if let Some(encoded) = &arguments.filter.at_path {
+        let path = match decode_path(encoded) {
+            Ok(path) => path,
+            Err(message) => return fail(responder, "invalid-arguments", &message),
+        };
+        match crate::index::subtree_range(&connection, &path) {
+            Ok(None) => {
+                return fail(
+                    responder,
+                    "invalid-arguments",
+                    "That path is not in this scan. Scan it before exploring it.",
+                );
+            }
+            Ok(Some((own, _))) => request.filter.at = Some(own),
+            Err(error) => {
+                return fail(
+                    responder,
+                    "internal-error",
+                    &format!("The path could not be resolved: {error}"),
                 );
             }
         }
@@ -1011,37 +1061,13 @@ fn hash_candidates(server: &Arc<Server>, responder: Responder, arguments: Map<St
         return fail(&responder, "unsupported-kernel", &message);
     }
 
-    let connection = match crate::index::open(&index_directory) {
-        Ok(connection) => connection,
-        Err(error) => {
-            return fail(
-                &responder,
-                "internal-error",
-                &format!("The index could not be opened: {error}"),
-            );
-        }
+    let Some(connection) = open_scan(&responder, &index_directory, &arguments.scan_id) else {
+        return;
     };
-    match crate::index::scan_exists(&connection, &arguments.scan_id) {
-        Ok(true) => {}
-        Ok(false) => {
-            return fail(
-                &responder,
-                "unknown-request",
-                "That scan is not in the index. It may have been pruned; run a new scan.",
-            );
-        }
-        Err(error) => {
-            return fail(
-                &responder,
-                "internal-error",
-                &format!("The index could not be read: {error}"),
-            );
-        }
-    }
 
     let under = match under_path {
         None => None,
-        Some(path) => match crate::index::subtree_range(&connection, &arguments.scan_id, &path) {
+        Some(path) => match crate::index::subtree_range(&connection, &path) {
             // A path the scan never saw is refused by name; no groups would
             // read as "there are no duplicates under there".
             Ok(None) => {
@@ -1063,8 +1089,8 @@ fn hash_candidates(server: &Arc<Server>, responder: Responder, arguments: Map<St
     };
     drop(connection);
 
+    let scan_id = arguments.scan_id;
     let request = duplicates::Request {
-        scan_id: arguments.scan_id,
         under,
         minimum_bytes,
         maximum_groups: arguments.maximum_groups.unwrap_or(duplicates::MAX_GROUPS),
@@ -1081,15 +1107,8 @@ fn hash_candidates(server: &Arc<Server>, responder: Responder, arguments: Map<St
         move |responder, cancelled| {
             // The connection is opened on the worker thread: a rusqlite
             // connection belongs to the thread that made it.
-            let connection = match crate::index::open(&index_directory) {
-                Ok(connection) => connection,
-                Err(error) => {
-                    return fail(
-                        responder,
-                        "internal-error",
-                        &format!("The index could not be opened: {error}"),
-                    );
-                }
+            let Some(connection) = open_scan(responder, &index_directory, &scan_id) else {
+                return;
             };
             match duplicates::find(&connection, &request, cancelled) {
                 Ok(report) => {
@@ -1767,12 +1786,10 @@ fn dedup_hardlink_request(
     }
     let keep = decoded_targets(std::slice::from_ref(&arguments.keep))?
         .pop()
-        .expect("one target in, one target out");
-    if arguments
-        .targets
-        .iter()
-        .any(|target| target.path == arguments.keep.path)
-    {
+        .ok_or_else(|| "The file being kept could not be read from the request".to_owned())?;
+    let targets = decoded_targets(&arguments.targets)?;
+    // Compared as the bytes they name, not as the text that spelled them.
+    if targets.iter().any(|target| target.path == keep.path) {
         return Err(
             "The file being kept cannot also be one of the files being replaced".to_owned(),
         );
@@ -1781,7 +1798,7 @@ fn dedup_hardlink_request(
         plan_id: arguments.plan_id.clone(),
         journal_directory: decoded_directory(&arguments.journal_directory)?,
         keep,
-        targets: decoded_targets(&arguments.targets)?,
+        targets,
     })
 }
 
@@ -2045,6 +2062,14 @@ pub fn journal_record(record: &journal::ActionRecord) -> Value {
                 .collect(),
         ),
     );
+    // Present only when a page left items out, so a reader can never take a
+    // shortened list for the whole action.
+    if record.items_omitted > 0 {
+        object.insert(
+            "itemsOmitted".to_owned(),
+            record.items_omitted.to_string().into(),
+        );
+    }
     Value::Object(object)
 }
 
@@ -2136,8 +2161,9 @@ fn query_request(arguments: &QueryIndexArguments) -> Result<QueryRequest, String
     Ok(QueryRequest {
         scan_id: arguments.scan_id.clone(),
         filter: EntryFilter {
-            // Resolved against the index once the connection is open.
+            // Both resolved against the index once the connection is open.
             under: None,
+            at: None,
             parent_id: optional_u64(filter.parent_id.as_deref(), "parentId")?
                 .map(|id| id.min(i64::MAX as u64) as i64),
             name_contains: filter.name_contains.clone(),
@@ -2546,6 +2572,56 @@ mod tests {
         );
     }
 
+    /// Every file and directory below `root`, with its permission bits.
+    fn modes_below(root: &std::path::Path) -> Vec<(std::path::PathBuf, u32)> {
+        use std::os::unix::fs::PermissionsExt;
+        let mut found = Vec::new();
+        let mut pending = vec![root.to_path_buf()];
+        while let Some(path) = pending.pop() {
+            let metadata = std::fs::symlink_metadata(&path).expect("the index entry is readable");
+            found.push((path.clone(), metadata.permissions().mode() & 0o7777));
+            if metadata.is_dir() {
+                for entry in std::fs::read_dir(&path).expect("the index directory lists") {
+                    pending.push(entry.expect("an index entry").path());
+                }
+            }
+        }
+        found
+    }
+
+    #[test]
+    fn a_scans_index_is_readable_by_its_owner_alone() {
+        let sandbox = Sandbox::new("protocol-private-index");
+        sandbox.directory(b"tree/private");
+        sandbox.file(b"tree/private/diary.txt", 64);
+        // The index directory does not exist yet: the helper creates it, as it
+        // does under a fresh $XDG_CACHE_HOME.
+        let cache = sandbox.path().join("cache");
+        let index = cache.join("disktop");
+        let mut root = sandbox.bytes();
+        root.extend_from_slice(b"/tree");
+
+        let output = session(
+            &[scan_request("scan-1", &root, index.as_os_str().as_bytes())],
+            |events| terminal(events, "scan-1"),
+        );
+        assert_eq!(output.last().unwrap()["event"], "complete");
+
+        // The index names every file below the scan root, including the ones
+        // in directories nobody else may list. Whoever can read it can read
+        // those names, so it is as private as the most private of them.
+        let modes = modes_below(&cache);
+        assert!(modes.len() >= 3, "the index was written: {modes:?}");
+        for (path, mode) in modes {
+            assert_eq!(
+                mode & 0o077,
+                0,
+                "{} is open to other users (mode {mode:o})",
+                path.display()
+            );
+        }
+    }
+
     #[test]
     fn an_index_query_pages_the_scan_the_helper_just_wrote() {
         let sandbox = Sandbox::new("protocol-query");
@@ -2661,6 +2737,52 @@ mod tests {
                 .unwrap()
                 .contains("not in this scan")
         );
+    }
+
+    #[test]
+    fn a_query_at_a_path_answers_with_that_one_row_and_refuses_a_path_never_scanned() {
+        let sandbox = Sandbox::new("protocol-at-path");
+        sandbox.directory(b"index");
+        sandbox.directory(b"projects");
+        sandbox.file(b"projects/big.bin", 200_000);
+        let index = sandbox.path().join("index");
+        let index_bytes = index.as_os_str().as_bytes();
+
+        let scan = session(
+            &[scan_request("scan-1", &sandbox.bytes(), index_bytes)],
+            |events| terminal(events, "scan-1"),
+        );
+        let scan_id = scan.last().unwrap()["result"]["scanId"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+
+        let at = |request_id: &str, path: &[u8]| {
+            format!(
+                "{{\"protocolVersion\":1,\"requestId\":\"{request_id}\",\"operation\":\"query-index\",\
+                  \"arguments\":{{\"scanId\":\"{scan_id}\",\"indexDirectory\":\"{}\",\
+                  \"filter\":{{\"atPath\":\"{}\"}},\"sort\":\"allocated\",\"order\":\"descending\",\
+                  \"limit\":\"10\"}}}}\n",
+                crate::base64::encode(index_bytes),
+                crate::base64::encode(path),
+            )
+        };
+        let mut projects = sandbox.bytes();
+        projects.extend_from_slice(b"/projects");
+        let mut absent = sandbox.bytes();
+        absent.extend_from_slice(b"/never-created");
+        let output = responses(&format!("{}{}", at("at-1", &projects), at("at-2", &absent)));
+
+        // The directory's own row, not the larger file below it.
+        let entries = output[0]["result"]["entries"].as_array().expect("a page");
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0]["path"], crate::base64::encode(&projects));
+        assert_eq!(entries[0]["kind"], "directory");
+        assert!(output[0]["result"]["nextCursor"].is_null());
+
+        // A path the scan never saw is refused as `underPath` refuses one.
+        assert_eq!(output[1]["event"], "error");
+        assert_eq!(output[1]["error"]["code"], "invalid-arguments");
     }
 
     #[test]

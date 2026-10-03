@@ -43,7 +43,12 @@ pub fn decode(text: &str) -> Result<Vec<u8>, &'static str> {
     }
 
     let mut decoded = Vec::with_capacity(bytes.len() / 4 * 3);
-    for chunk in bytes.chunks(4) {
+    let groups = bytes.len() / 4;
+    for (group, chunk) in bytes.chunks(4).enumerate() {
+        // Padding ends the whole text, never one group in the middle of it.
+        if group + 1 < groups && chunk.contains(&b'=') {
+            return Err("base64 padding is misplaced");
+        }
         let mut accumulator: u32 = 0;
         let mut significant = 0;
         for (position, byte) in chunk.iter().enumerate() {
@@ -73,6 +78,13 @@ pub fn decode(text: &str) -> Result<Vec<u8>, &'static str> {
             2 => 1,
             _ => return Err("base64 group carries no data"),
         };
+        // The bits a padded group carries past its last byte are zero in the
+        // one canonical spelling; anything else is a second spelling of the
+        // same bytes.
+        let unused = 8 * (3 - produced);
+        if accumulator & ((1u32 << unused) - 1) != 0 {
+            return Err("base64 has bits set past its last byte");
+        }
         let triple = accumulator.to_be_bytes();
         decoded.extend_from_slice(&triple[1..1 + produced]);
     }
@@ -102,5 +114,25 @@ mod tests {
         assert!(decode("L2hv bWU=").is_err());
         assert!(decode("L2hvbWU_").is_err());
         assert!(decode("====").is_err());
+    }
+
+    /// Two spellings of one path would let a request name the same file twice
+    /// and have a comparison of the spellings call them different.
+    #[test]
+    fn every_path_has_exactly_one_spelling() {
+        assert_eq!(decode("QQ==").unwrap(), b"A");
+        assert!(
+            decode("QR==").is_err(),
+            "bits past the last byte must be zero"
+        );
+        assert_eq!(decode("QUI=").unwrap(), b"AB");
+        assert!(
+            decode("QUJ=").is_err(),
+            "bits past the last byte must be zero"
+        );
+        assert!(
+            decode("QQ==QUJD").is_err(),
+            "padding only ever ends the whole text"
+        );
     }
 }

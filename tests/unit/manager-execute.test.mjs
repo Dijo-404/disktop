@@ -32,8 +32,8 @@ function harness({ preflight = { skipped: new Map() }, runs = [], gone = IDS, ob
   const calls = [];
   let actionId = 0;
   const client = {
-    async request(operation, operationArguments) {
-      calls.push({ operation, arguments: operationArguments });
+    async request(operation, operationArguments, signal) {
+      calls.push({ operation, arguments: operationArguments, aborted: signal?.aborted === true });
       if (operation === "manager-begin") {
         actionId += 1;
         return { event: "complete", result: { actionId: `act-${actionId}` } };
@@ -222,4 +222,34 @@ test("a per-item command that exited non-zero is never counted as done, whatever
   assert.match(finish.items[0].message, /exited/);
   assert.equal(finish.items[1].outcome, "completed");
   assert.equal(result.state, "partial");
+});
+
+test("what a command did is journalled even after Ctrl+C, because a journal write is never cancellable", async () => {
+  // The abort stops the next command. It must not reach the request that
+  // records how the running one ended, or the one that closes the action:
+  // a cancelled journal write is a command that started and never finished.
+  const controller = new AbortController();
+  const { calls, executor } = harness({ onRun: () => controller.abort() });
+  await executor.apply(containersPlan(3), controller.signal);
+  const journalled = calls.filter((call) => call.operation.startsWith("manager-"));
+  assert.ok(journalled.some((call) => call.operation === "manager-finish"));
+  for (const call of journalled) {
+    assert.equal(call.aborted, false, `${call.operation} ${call.arguments.phase ?? ""} was sent with an aborted signal`);
+  }
+});
+
+test("a command that was stopped before it started is skipped as never run, not failed as unconfirmed", async () => {
+  // The runner saw the stop request before it spawned anything, so there is
+  // nothing to verify: the items were never attempted.
+  const { calls, executor } = harness({
+    runs: [{ status: "not-started", exitCode: null, output: "", explanation: "Stopped before this command started; it was never run." }],
+    gone: [],
+  });
+  await executor.apply(containersPlan(2), new AbortController().signal);
+  const finish = calls.find((call) => call.operation === "manager-finish").arguments;
+  for (const item of finish.items) {
+    assert.equal(item.outcome, "skipped", JSON.stringify(item));
+    assert.match(item.message, /never run/);
+  }
+  assert.equal(calls.filter((call) => call.operation === "run").length, 1, "nothing after it is run either");
 });

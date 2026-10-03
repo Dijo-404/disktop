@@ -2,6 +2,13 @@ name: Publish the single initial npm release
 
 # Deliberately manual. Configure the npm-publish environment with a required
 # reviewer and the one-time granular NPM_TOKEN secret before dispatching.
+#
+# Three jobs, one artifact. `build` runs every gate on the reviewed tag, builds
+# the four helpers exactly as CI does, packs the tarball once, and runs the
+# package smoke test against that exact file. `verify` installs the same file,
+# checked by its SHA-256, on ARM64 and on musl. `publish` is the only job that
+# can reach the token or mint a provenance identity, and it publishes that
+# same file, checked by the same SHA-256, without building anything.
 on:
   workflow_dispatch:
     inputs:
@@ -28,19 +35,20 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
-  publish:
-    name: Audit and publish v1.0.0
+  build:
+    name: Audit, build, and smoke test the v1.0.0 artifact
     if: >-
       ${{ github.repository == 'Dijo-404/disktop' &&
           github.ref_name == github.event.repository.default_branch &&
           inputs.release_tag == 'v1.0.0' &&
           inputs.confirmation == 'PUBLISH v1.0.0' }}
     runs-on: ubuntu-24.04
-    timeout-minutes: 60
-    environment: npm-publish
+    timeout-minutes: 90
     permissions:
       contents: read
-      id-token: write
+    outputs:
+      archive: ${{ steps.pack.outputs.archive }}
+      sha256: ${{ steps.pack.outputs.sha256 }}
     steps:
       - name: Require a public source repository
         if: github.event.repository.private
@@ -55,10 +63,7 @@ jobs:
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version: '24'
-          registry-url: https://registry.npmjs.org
           package-manager-cache: false
-      - name: Install pinned Rust toolchain
-        run: rustup toolchain install 1.93.0 --profile minimal --component rustfmt,clippy
       - name: Verify reviewed tag and package metadata
         env:
           EXPECTED_COMMIT: ${{ inputs.expected_commit }}
@@ -82,7 +87,12 @@ jobs:
           if (pkg.repository?.url !== expectedRepository) {
             throw new Error(`repository.url must be ${expectedRepository}`);
           }
+          const cargo = fs.readFileSync('native/disktop-fs/Cargo.toml', 'utf8');
+          if (!/^version = "1\.0\.0"$/m.test(cargo)) {
+            throw new Error('native/disktop-fs/Cargo.toml must be version 1.0.0, the version its helper reports');
+          }
           NODE
+      - uses: ./.github/actions/release-toolchain
       - name: Install locked npm dependencies
         run: npm ci
       - name: Run TypeScript and contract gates
@@ -93,22 +103,25 @@ jobs:
       - name: Run Rust gates
         run: |
           cargo fmt --manifest-path native/disktop-fs/Cargo.toml --all -- --check
-          cargo clippy --manifest-path native/disktop-fs/Cargo.toml --all-targets -- -D warnings
-          cargo test --manifest-path native/disktop-fs/Cargo.toml
-      - name: Run Linux integration and terminal gates
+          cargo clippy --locked --manifest-path native/disktop-fs/Cargo.toml --all-targets -- -D warnings
+          cargo test --locked --manifest-path native/disktop-fs/Cargo.toml
+      - name: Run Linux integration, recovery, terminal, and performance gates
         run: |
           npm run test:integration
+          npm run test:recovery
           npm run test:pty
-      - name: Build the release package and four native targets
-        run: |
-          npm run build:native
-          npm run build
+          npm run test:performance
+      # The same script CI runs on every push: --release --locked through
+      # cargo zigbuild, each binary checked against its name, SHA256SUMS
+      # written, and the x86-64 builds asked hello.
+      - name: Build the four release helpers
+        run: node scripts/build-release.mjs
       - name: Verify native checksums and executable bits
+        working-directory: vendor/bin
         run: |
           set -euo pipefail
-          cd vendor/bin
           test -s SHA256SUMS
-          sha256sum --check SHA256SUMS
+          sha256sum --check --strict SHA256SUMS
           for binary in \
             disktop-fs-linux-x64-gnu \
             disktop-fs-linux-x64-musl \
@@ -116,46 +129,157 @@ jobs:
             disktop-fs-linux-arm64-musl; do
             test -x "$binary"
           done
+      - name: Build the application from a clean dist/
+        run: npm run build
       - name: Pack the exact artifact for review and publication
         id: pack
         run: |
           set -euo pipefail
-          archive="$(npm pack --ignore-scripts --pack-destination "$RUNNER_TEMP" --silent)"
+          mkdir "$RUNNER_TEMP/release"
+          archive="$(npm pack --ignore-scripts --pack-destination "$RUNNER_TEMP/release" --silent)"
           test "$archive" = 'disktop-1.0.0.tgz'
-          printf 'path=%s/%s\n' "$RUNNER_TEMP" "$archive" >> "$GITHUB_OUTPUT"
-          tar -tzf "$RUNNER_TEMP/$archive" | sed '/\/$/d' | sort > "$RUNNER_TEMP/package-files.txt"
-          for item in \
-            package/vendor/bin/SHA256SUMS \
-            package/vendor/bin/disktop-fs-linux-x64-gnu \
-            package/vendor/bin/disktop-fs-linux-x64-musl \
-            package/vendor/bin/disktop-fs-linux-arm64-gnu \
-            package/vendor/bin/disktop-fs-linux-arm64-musl; do
-            grep -Fx "$item" "$RUNNER_TEMP/package-files.txt"
-          done
-          if grep -Ev '^package/(dist/|vendor/bin/|docs/|PLAN\.md$|AGENTS\.md$|CHANGELOG\.md$|CONTRIBUTING\.md$|SECURITY\.md$|README\.md$|LICENSE$|package\.json$)' "$RUNNER_TEMP/package-files.txt"; then
-            echo '::error::Unexpected files in npm archive; update the audited allowlist only after review.'
-            exit 1
-          fi
-          mkdir -p "$RUNNER_TEMP/disktop-unpacked"
-          tar -xzf "$RUNNER_TEMP/$archive" -C "$RUNNER_TEMP/disktop-unpacked"
-          cd "$RUNNER_TEMP/disktop-unpacked/package/vendor/bin"
-          sha256sum --check SHA256SUMS
-          for binary in \
-            disktop-fs-linux-x64-gnu \
-            disktop-fs-linux-x64-musl \
-            disktop-fs-linux-arm64-gnu \
-            disktop-fs-linux-arm64-musl; do
-            test -x "$binary"
-          done
-          sha256sum "$RUNNER_TEMP/$archive"
-      - name: Install and smoke test the packed artifact
+          digest="$(sha256sum "$RUNNER_TEMP/release/$archive" | cut -d ' ' -f 1)"
+          printf 'archive=%s\nsha256=%s\n' "$archive" "$digest" >> "$GITHUB_OUTPUT"
+          echo "$digest  $archive"
+      # The allowlist, checksums, modes, global install, npm exec, scan with
+      # the packaged helper, and the tamper refusals all run against the one
+      # file that will be published; the test fails if it changes that file.
+      - name: Smoke test the exact artifact
         env:
-          ARCHIVE: ${{ steps.pack.outputs.path }}
+          DISKTOP_PACKAGE_TARBALL: ${{ runner.temp }}/release/${{ steps.pack.outputs.archive }}
+          DISKTOP_PACKAGE_REQUIRE_ALL_TARGETS: '1'
+        run: node --test tests/package/package.test.mjs
+      - name: Confirm the artifact is unchanged
+        env:
+          ARCHIVE: ${{ steps.pack.outputs.archive }}
+          SHA256: ${{ steps.pack.outputs.sha256 }}
+        working-directory: ${{ runner.temp }}/release
+        run: echo "$SHA256  $ARCHIVE" | sha256sum --check --strict
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: disktop-release
+          path: ${{ runner.temp }}/release/${{ steps.pack.outputs.archive }}
+          if-no-files-found: error
+          retention-days: 30
+
+  verify:
+    name: Smoke test the artifact on ${{ matrix.platform }}
+    needs: build
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 30
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: true
+      matrix:
+        include:
+          - platform: ARM64 glibc
+            runner: ubuntu-24.04-arm
+            container: ''
+          - platform: x86-64 musl
+            runner: ubuntu-24.04
+            container: node:24-alpine3.24
+          - platform: ARM64 musl
+            runner: ubuntu-24.04-arm
+            container: node:24-alpine3.24
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: refs/tags/v1.0.0
+          persist-credentials: false
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: '24'
+          package-manager-cache: false
+      - name: Require the tagged source
+        env:
+          EXPECTED_COMMIT: ${{ inputs.expected_commit }}
+        run: test "$(git rev-parse HEAD)" = "$EXPECTED_COMMIT"
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: disktop-release
+          path: .release
+      - name: Require the artifact the build job tested
+        env:
+          ARCHIVE: ${{ needs.build.outputs.archive }}
+          SHA256: ${{ needs.build.outputs.sha256 }}
+        working-directory: .release
+        run: echo "$SHA256  $ARCHIVE" | sha256sum --check --strict
+      - name: Install locked npm dependencies for the test runner
+        run: npm ci
+      - name: Smoke test the exact artifact
+        if: matrix.container == ''
+        env:
+          DISKTOP_PACKAGE_TARBALL: ${{ github.workspace }}/.release/${{ needs.build.outputs.archive }}
+          DISKTOP_PACKAGE_REQUIRE_ALL_TARGETS: '1'
+        run: node --test tests/package/package.test.mjs
+      - name: Smoke test the exact artifact inside ${{ matrix.container }}
+        if: matrix.container != ''
+        env:
+          ARCHIVE: ${{ needs.build.outputs.archive }}
+          IMAGE: ${{ matrix.container }}
+        run: >-
+          docker run --rm --user "$(id -u):$(id -g)"
+          --env HOME=/tmp --env DISKTOP_PACKAGE_REQUIRE_ALL_TARGETS=1
+          --env "DISKTOP_PACKAGE_TARBALL=/disktop/.release/$ARCHIVE"
+          --volume "$GITHUB_WORKSPACE:/disktop" --workdir /disktop
+          "$IMAGE" node --test tests/package/package.test.mjs
+
+  publish:
+    name: Publish audited v1.0.0
+    needs: [build, verify]
+    if: >-
+      ${{ github.repository == 'Dijo-404/disktop' &&
+          github.ref_name == github.event.repository.default_branch &&
+          inputs.release_tag == 'v1.0.0' &&
+          inputs.confirmation == 'PUBLISH v1.0.0' }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    environment: npm-publish
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - name: Require the reviewed commit
+        env:
+          EXPECTED_COMMIT: ${{ inputs.expected_commit }}
+        run: test "$GITHUB_SHA" = "$EXPECTED_COMMIT"
+      # Only the guard and the manifest it reads; nothing from the repository
+      # is installed or run in the job that holds the token.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: refs/tags/v1.0.0
+          persist-credentials: false
+          sparse-checkout: |
+            package.json
+            scripts/prepublish-guard.mjs
+          sparse-checkout-cone-mode: false
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: '24'
+          registry-url: https://registry.npmjs.org
+          package-manager-cache: false
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: disktop-release
+          path: ${{ runner.temp }}/release
+      - name: Require the artifact every job tested
+        env:
+          ARCHIVE: ${{ needs.build.outputs.archive }}
+          SHA256: ${{ needs.build.outputs.sha256 }}
+        working-directory: ${{ runner.temp }}/release
         run: |
           set -euo pipefail
-          npm install --global --prefix "$RUNNER_TEMP/disktop-global" --ignore-scripts "$ARCHIVE"
-          "$RUNNER_TEMP/disktop-global/bin/disktop" --help
-          npm exec --yes --package "$ARCHIVE" -- disktop --help
+          test "$ARCHIVE" = 'disktop-1.0.0.tgz'
+          echo "$SHA256  $ARCHIVE" | sha256sum --check --strict
+      # `npm publish <tarball> --ignore-scripts` runs no lifecycle script, so
+      # the prepublishOnly guard is run here explicitly instead: it refuses
+      # unless this is the publish workflow, dispatched on the default branch,
+      # for the tag matching package.json's version.
+      - name: Run the publish guard
+        env:
+          DISKTOP_RELEASE_TAG: ${{ inputs.release_tag }}
+        run: node scripts/prepublish-guard.mjs
       - name: Require the one-time first-publish token
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
@@ -167,7 +291,7 @@ jobs:
       - name: Publish audited v1.0.0 with provenance
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
-          ARCHIVE: ${{ steps.pack.outputs.path }}
+          ARCHIVE: ${{ runner.temp }}/release/${{ needs.build.outputs.archive }}
         run: npm publish "$ARCHIVE" --ignore-scripts --provenance --access public
       - name: Verify registry package and provenance
         run: |
@@ -177,3 +301,4 @@ jobs:
           npm install --prefix "$RUNNER_TEMP/disktop-registry-check" --ignore-scripts disktop@1.0.0
           cd "$RUNNER_TEMP/disktop-registry-check"
           npm audit signatures
+          "$RUNNER_TEMP/disktop-registry-check/node_modules/.bin/disktop" --version

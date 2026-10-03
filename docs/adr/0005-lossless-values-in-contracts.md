@@ -24,8 +24,9 @@ picture, and invalid sequences with U+FFFD. C1 controls, the line and paragraph
 separators, and the bidirectional marks, overrides, and isolates become `<U+XXXX>`,
 because U+009B is CSI to a terminal reading UTF-8 and U+202E makes one name render as
 another. Zero-width joiners are left alone: they carry meaning inside real emoji
-sequences. CSV additionally prefixes a cell beginning `=`, `+`, `-`, or `@`; HTML escapes
-every value.
+sequences. CSV additionally prefixes an apostrophe to a cell beginning `=`, `+`, `-`,
+`@`, tab, or carriage return, and to one already beginning with an apostrophe so the rule
+can be reversed; HTML escapes every value.
 
 This makes display text safe to print. It does not make it unique — two byte sequences
 can still render the same — which is why an operation is identified by `bytesBase64` and
@@ -57,5 +58,7 @@ a delete target needs.
 `tests/contract/cli-schema.test.mjs` and `tests/contract/native-schema.test.mjs` validate
 the examples on both sides, `tests/unit/sizes.test.mjs` covers integers past
 `Number.MAX_SAFE_INTEGER`, and `tests/unit/paths.test.mjs` covers invalid UTF-8, control
-bytes, and segment-boundary containment. Phase 7 adds the CSV and HTML injection
-fixtures.
+bytes, and segment-boundary containment. `tests/unit/reports.test.mjs` and
+`tests/integration/report.test.mjs` export hostile names — formulas, script tags,
+quotes, line breaks, terminal escapes, direction overrides, invalid UTF-8 — as JSON,
+CSV, and HTML and check that every name's bytes survive and none of it acts.

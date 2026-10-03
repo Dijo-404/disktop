@@ -13,7 +13,9 @@ export function discoveryEnvironment(home, overrides = {}) {
   const environment = {
     home: rawPathFromUtf8(home),
     variables: overrides.variables ?? {},
-    userId: 1000n,
+    // The account running the tests owns the fixture files, whatever its uid:
+    // 1000 on a typical desktop, 1001 on a GitHub runner.
+    userId: BigInt(process.getuid?.() ?? 1000),
     now: overrides.now ?? new Date("2026-10-01T00:00:00.000Z"),
     staleAfterDays: 183,
     rules: [],

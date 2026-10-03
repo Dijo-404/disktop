@@ -10,6 +10,7 @@ import { createDuplicateService } from "../application/duplicates.js";
 import { createFindService, type FindService } from "../application/find.js";
 import { createFootprintService, type FootprintService } from "../application/footprint.js";
 import { createPlanService, type PlanService } from "../application/plan-action.js";
+import { createReportService, type ReportService } from "../application/report.js";
 import { createUndoService, type UndoService } from "../application/undo.js";
 import { createScanService, type ScanService } from "../application/scan.js";
 import { createSnapshotService, type SnapshotService } from "../application/snapshots.js";
@@ -20,7 +21,7 @@ import type { NotificationOutcome } from "../ports/notifications.js";
 import { rawPathFromUtf8 } from "../domain/paths.js";
 import { createLinuxInventory } from "../platform/linux/inventory/index.js";
 import { createAccountNames } from "../platform/linux/accounts.js";
-import { inInitialUserNamespace, verifyRootOwnedInstall } from "../platform/linux/install-ownership.js";
+import { inInitialUserNamespace, verifyRootOwnedExecutable, verifyRootOwnedInstall } from "../platform/linux/install-ownership.js";
 import { StartupRefused } from "../domain/errors.js";
 import { createIndexFootprint } from "../platform/linux/footprint.js";
 import { createPathProbe } from "../platform/linux/probe.js";
@@ -47,9 +48,19 @@ import type { RetentionLimits } from "../ports/snapshots.js";
 import { loadConfigFile } from "../storage/config.js";
 import { ruleSlug } from "../providers/rules/index.js";
 import { createPlanStore } from "../storage/plans.js";
+import { createReportFiles } from "../storage/report-files.js";
 import { ruleHash } from "../storage/rules.js";
 import { createSnapshotStore } from "../storage/snapshots.js";
 import { resolveLocations } from "../storage/xdg.js";
+
+/**
+ * How many measuring scans their own index keeps. One is read back the moment
+ * it is written and never again; the second keeps a concurrent `disktop
+ * clean` from pruning a measurement another one is still reading.
+ */
+const MEASUREMENT_SCANS = 2;
+/** The measurement index gets this fraction of `max_index_bytes`. */
+const MEASUREMENT_BUDGET_SHARE = 4n;
 
 /**
  * The composition root: the one place adapters are chosen and built.
@@ -68,6 +79,7 @@ export interface Services {
   readonly apply: ApplyService;
   readonly undo: UndoService;
   readonly find: FindService;
+  readonly report: ReportService;
   readonly scanDefaults: {
     readonly accounting: Accounting;
     readonly crossFilesystems: boolean;
@@ -100,6 +112,13 @@ export async function createServices(options: CompositionOptions = {}): Promise<
       throw new StartupRefused({
         code: "permission-denied",
         message: `Disktop runs as root only from a root-owned install, never 'sudo npx': ${install.reason}`,
+      });
+    }
+    const runtime = await verifyRootOwnedExecutable(realpathSync(process.execPath));
+    if (!runtime.ok) {
+      throw new StartupRefused({
+        code: "permission-denied",
+        message: `Disktop runs as root only on a Node.js that root alone can change: ${runtime.reason}`,
       });
     }
   }
@@ -140,8 +159,17 @@ export async function createServices(options: CompositionOptions = {}): Promise<
   const snapshots = createSnapshotService(snapshotStore, scanner);
 
   const home = rawPathFromUtf8(options.homeDirectory ?? homedir());
+  // Measuring a finding's size is a scan too, and it is kept in an index of
+  // its own. Written into the one above, it would count against `keep_scans`
+  // and push out the scan somebody is exploring.
+  const measurementScanner = createNativeScanner({
+    indexDirectory: join(locations.cacheDirectory, "measurements"),
+    maxIndexBytes: BigInt(config.scan.maxIndexBytes) / MEASUREMENT_BUDGET_SHARE,
+    keepScans: MEASUREMENT_SCANS,
+    start: () => NativeHelperClient.start(),
+  });
   const footprints = createIndexFootprint({
-    scanner,
+    measurement: measurementScanner,
     index: scanner,
     snapshots: snapshotStore,
     home,
@@ -277,6 +305,14 @@ export async function createServices(options: CompositionOptions = {}): Promise<
     explore,
     snapshots,
     footprint,
+    report: createReportService({
+      dashboard,
+      snapshots,
+      explore,
+      footprint,
+      files: createReportFiles(),
+      effectiveUserId: process.geteuid?.() ?? -1,
+    }),
     scanDefaults: {
       accounting: config.scan.accounting,
       crossFilesystems: config.scan.crossFilesystems,

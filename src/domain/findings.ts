@@ -2,6 +2,8 @@ import type { ActionOperation } from "./actions.js";
 import type { Bytes, Capability, RawPath } from "./models.js";
 import { isWithin, pathBytes } from "./paths.js";
 
+const SLASH = 0x2f;
+
 /**
  * What a finding is about. The set is closed so the public JSON can be, and so
  * a surface can group findings without parsing a free-text label.
@@ -226,10 +228,11 @@ export function orderFindings(findings: readonly Finding[]): readonly Finding[] 
  * say the category holds more bytes than the filesystem does.
  */
 export function categoryTotals(findings: readonly Finding[]): readonly CategoryTotal[] {
+  const nestedIds = nestedFindings(findings);
   const totals = new Map<FindingCategory, { findings: number; bytes: Bytes; unmeasured: number; nested: number }>();
   for (const entry of findings) {
     const current = totals.get(entry.category) ?? { findings: 0, bytes: 0n, unmeasured: 0, nested: 0 };
-    const nested = isInsideAnother(entry, findings);
+    const nested = nestedIds.has(entry);
     totals.set(entry.category, {
       findings: current.findings + 1,
       bytes: current.bytes + (nested ? 0n : entry.size.bytes ?? 0n),
@@ -240,20 +243,69 @@ export function categoryTotals(findings: readonly Finding[]): readonly CategoryT
   return [...totals].map(([category, total]) => ({ category, ...total }));
 }
 
-/** Whether every path of a finding lies under some other finding's path. */
-function isInsideAnother(entry: Finding, findings: readonly Finding[]): boolean {
-  if (entry.paths.length === 0) {
-    return false;
+/** Path bytes as a string key, one character per byte, so prefixes compare as strings. */
+function byteKey(bytes: Uint8Array): string {
+  let key = "";
+  for (const byte of bytes) {
+    key += String.fromCharCode(byte);
   }
-  return entry.paths.every((path) =>
-    findings.some(
-      (other) =>
-        other.id !== entry.id &&
-        other.paths.some(
-          (owned) => owned.bytesBase64 !== path.bytesBase64 && isWithin(pathBytes(owned), pathBytes(path)),
-        ),
-    ),
-  );
+  return key;
+}
+
+/**
+ * The findings every one of whose paths lies strictly under a path some other
+ * finding claims.
+ *
+ * Asking each finding about every other one is quadratic, and discovery can
+ * return over a thousand findings, so this indexes every claimed path once and
+ * then looks up each path's proper ancestors: the bytes before each slash.
+ * That is the same question `isWithin` answers, for the parents that a
+ * normalized path can have.
+ */
+function nestedFindings(findings: readonly Finding[]): ReadonlySet<Finding> {
+  const owners = new Map<string, Set<string>>();
+  for (const finding of findings) {
+    for (const path of finding.paths) {
+      const bytes = pathBytes(path);
+      // A claimed directory written with a trailing slash still contains what
+      // is below it, as `isWithin` treats it.
+      const trimmed = bytes.length > 1 && bytes[bytes.length - 1] === SLASH ? bytes.subarray(0, bytes.length - 1) : bytes;
+      const key = byteKey(trimmed);
+      const ids = owners.get(key) ?? new Set<string>();
+      ids.add(finding.id);
+      owners.set(key, ids);
+    }
+  }
+
+  const nested = new Set<Finding>();
+  for (const finding of findings) {
+    if (finding.paths.length === 0) {
+      continue;
+    }
+    const inside = finding.paths.every((path) => {
+      const bytes = pathBytes(path);
+      for (let index = 0; index < bytes.length; index += 1) {
+        if (bytes[index] !== SLASH) {
+          continue;
+        }
+        // The root is the ancestor before the first slash; a path that is only
+        // the root has no proper ancestor.
+        if (index === 0 && bytes.length === 1) {
+          break;
+        }
+        const ancestor = byteKey(index === 0 ? bytes.subarray(0, 1) : bytes.subarray(0, index));
+        const ids = owners.get(ancestor);
+        if (ids !== undefined && [...ids].some((id) => id !== finding.id)) {
+          return true;
+        }
+      }
+      return false;
+    });
+    if (inside) {
+      nested.add(finding);
+    }
+  }
+  return nested;
 }
 
 /** A finding covers another when it is from a different provider and holds every path. */

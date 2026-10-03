@@ -1,131 +1,203 @@
 # Disktop
 
-Disktop is a Linux terminal storage manager and analyzer. Its goal is to help you see where disk space went, investigate files and application data, and review cleanup actions before anything changes. The planned interface combines a terminal UI for exploration with a non-interactive CLI for scripts.
+**See where your disk space went, and get it back safely.** Disktop is a Linux storage
+manager for the terminal: a full-screen UI for exploring, and a scriptable CLI with
+versioned JSON for everything the UI does.
 
-> **Project status:** This repository is an implementation in progress. Phases 0 through 6 of [PLAN.md](PLAN.md#internal-implementation-phases) are complete and Phase 7 (complete surfaces) is the next gate. The CLI inventories devices, scans and explores trees, finds duplicate, stale, empty, and broken entries, lists what can be cleaned, and reviews and applies Trash, permanent removal, move, compression, hardlink, rule, and package or container manager actions, with history and undo; the TUI still shows only the dashboard, and reports and shell completions are still planned. There is no published npm package. The first public release will be **`1.0.0`**, after every Linux capability in [PLAN.md](PLAN.md#feature-acceptance-matrix) passes its acceptance checks. Internal phases and CI artifacts are not public releases.
+![Disktop's terminal UI: the disks dashboard, a scanned directory, cleanup findings, and a reviewed plan](https://raw.githubusercontent.com/Dijo-404/disktop/main/docs/demo.svg)
 
-`disktop` is the working package and command name. Registry availability and naming rights must be checked again before publication.
+- **Every disk at a glance** — devices, filesystems, mounts, free space, inode use, and
+  a warning before a filesystem fills.
+- **Fast, mount-safe scans** — a native helper walks with `openat2` containment, never
+  follows a symlink, stays on one filesystem, counts hardlinks once, and keeps the
+  index on disk so memory stays flat on million-file trees.
+- **Find what is worth looking at** — largest files and directories, file-type
+  breakdowns, growth since the last scan, duplicates (byte-compared), stale files,
+  empty directories, broken links, and two dozen detectors for build output, language
+  and AI caches, browsers, IDEs, VMs, games, containers, package caches, logs, and kernels.
+- **Change nothing without a reviewed plan** — Trash by default, undo from History,
+  protected paths that no flag can override, a durable journal, and results that keep
+  "selected", "moved to Trash", and "free space actually gained" apart.
 
-## What Disktop is designed to do
+> **Status:** `1.0.0` release candidate. The package is published to npm only after
+> the release gate in [PLAN.md](PLAN.md#internal-implementation-phases) passes. Until
+> then, run it from a checkout (see [Development](#development)).
 
-### See storage clearly
+## Install
 
-- Count SSDs, HDDs, and other block devices without counting loop and pseudo devices as physical disks.
-- Show filesystems, mount points, available space, inode use, filesystem type, and whether storage is removable or network attached.
-- Warn when a filesystem passes a configurable capacity threshold, 90% by default, or is short on inodes.
-- Rank files and directories by allocated disk space, with an apparent-size toggle for sparse or compressed files. Show totals by file type and filter by name, extension, size, age, and owner.
-- Save compact snapshots and show changes between comparable scans, such as growth under `~/Downloads`.
-
-### Find space worth inspecting
-
-- Find duplicate files through size, partial hash, full hash, and final byte comparison. Hardlinks to the same inode are not treated as duplicates.
-- Find large stale candidates, empty directories, and broken symlinks. Stale results identify whether they use reliable access times or modification times; a modification-time result will never claim that a file was not opened.
-- Measure Conda environments and package caches, Python virtual environments, Node and Rust toolchains, project build artifacts, language caches, AI model caches, IDEs, browsers, and Electron applications.
-- Inventory installed applications across supported Linux package managers. Package-manager reported sizes are labeled as estimates and kept distinct from measured file usage.
-- Surface Steam libraries, Wine/Proton prefixes, VM images, snapshots, large logs, swap, deleted-but-open files, and optional SMART health information. On shared servers, an explicit read-only administrator scan can show usage by file owner.
-
-### Review and act
-
-- Preview user-file cleanup with an exact scope and totals where possible. Send eligible files to the freedesktop Trash by default and support undo when the source has not been replaced.
-- Offer explicit permanent deletion, duplicate keep rules and hardlink replacement, cross-disk move, compression, and bounded custom cleanup rules.
-- Offer manager-backed cleanup for supported package caches, journal archives, old kernels, Snap and Flatpak artifacts, Docker and Podman resources, and other reviewed targets. Each manager adapter must bound its scope and report when a tool or permission is unavailable.
-- Record every attempted change in a durable action journal. Results distinguish selected bytes, bytes moved to Trash, and the observed change in free space. Moving a file to Trash on the same filesystem usually frees **no** space until Trash is emptied.
-
-The full feature list and the acceptance check for each feature are in [PLAN.md](PLAN.md). The [provider catalog](docs/providers.md) explains how findings and cleanup proposals are divided.
-
-## How the interface will work
-
-The planned TUI opens at a disk dashboard. Its main views are **Disks**, **Explore**, **Clean**, **Dev**, **Apps**, and **History**. Explore shows a sorted directory tree and filters. Clean shows the action scope, estimate, reversibility, permission requirement, and confirmation before applying a plan. The interface will support vim keys, mouse input, a `?` help view, themes, `NO_COLOR`, an ASCII fallback, SI/IEC units, and an 80×24 terminal.
-
-The CLI shares the same application services as the TUI. Every command below works today except `report`, which is declared in the parser and returns a clear `not-implemented` error:
-
-```text
-disktop --json
-disktop devices --json
-disktop scan ~/projects --json
-disktop explore ~/projects --sort allocated --min-size 1GiB --json
-disktop find duplicates ~/projects --json
-disktop clean --dry-run --json
-disktop clean plan FINDING_ID --operation trash --json
-disktop clean apply PLAN_ID --yes --json
-disktop undo ACTION_ID --yes --json
-disktop report --format html --output report.html
-disktop alerts check --threshold 90 --json
+```sh
+npx disktop            # run without installing
+npm install -g disktop # or install the `disktop` command
 ```
 
-Planning an action stores its immutable operation and target scope under an expiring plan ID. A separate `apply` command revalidates that plan. `--yes` confirms only the reviewed plan; `--permanent` acknowledges a plan that already specified irreversible removal. It cannot turn a Trash plan into permanent deletion. CLI output will use versioned JSON with decimal-string byte and filesystem integers, safe CSV, and escaped standalone HTML. See [CLI contract](docs/cli.md).
+Requirements:
 
-## Safety model
+| | |
+| --- | --- |
+| OS | Linux. x86-64 or ARM64, glibc or musl. |
+| Node.js | 24.21.0+ (24 LTS) or 26.10.0+ (26). Other versions are refused at startup. |
+| Kernel | 5.6+ for scanning and cleanup (`openat2`). Older kernels still get the inventory. |
+| Optional | `lsblk` (device topology), package managers, `docker`/`podman`, `journalctl`, `lsof`, `smartctl`, `notify-send`, systemd user units. Each feature that needs one says so when it is missing. |
 
-Storage cleanup must stay predictable even when directories change while Disktop is open.
+The package ships a prebuilt, checksum-verified helper for each supported target and
+runs no install script. **Never run `sudo npx disktop`**: cleanup that needs root asks
+for it one reviewed command at a time.
 
-1. Providers discover candidates and propose actions. They cannot delete files or execute cleanup commands.
-2. Every action has a reviewable plan. It shows the scope, count or honest estimate, expected bytes, warnings, permission needs, and whether undo is possible.
-3. The action engine rechecks each target immediately before changing it. It blocks protected roots, mount roots, nested mounts, symlink traversal, unsafe shared-writable parents, and changed identities. There is no `--force` bypass for protected paths.
-4. The Rust helper performs user-file mutations using constrained filesystem operations and writes the durable journal. Manager actions use reviewed fixed-argument adapters and journal records. The whole npm process is never escalated for cleanup.
-5. Interruption produces a partial result that says what completed, what was skipped, and what remains. On restart, Disktop reconciles unfinished journal entries.
+## Quick start
 
-Disktop will not silently fall back to unsafe deletion when a kernel feature, manager tool, permission, or safe Trash location is missing. Permanent removal and some manager actions are irreversible and require an explicit plan. The remaining same-directory name-swap race under a concurrent writer is documented in [safety.md](docs/safety.md).
+```sh
+disktop                       # the terminal UI
+disktop --json                # the same dashboard as JSON, for scripts
+disktop scan ~                # index a tree (metadata only; changes nothing)
+disktop explore ~ --min-size 1GiB --type-totals
+disktop find duplicates --path ~/Downloads
+disktop clean                 # what the detectors found, with sizes
+disktop clean plan FINDING_ID # review one finding (an id from `disktop clean`) as a plan
+disktop clean apply PLAN_ID --yes   # apply exactly what was reviewed
+disktop history               # what was done, item by item
+disktop undo ACTION_ID --yes  # put a Trash action back
+```
 
-## Storage accounting and incomplete results
+## The terminal UI
 
-Disktop will default to allocated bytes (`st_blocks × 512`) and offer apparent bytes (`st_size`). It counts a hardlinked inode once in scan totals. These numbers can differ from `df` because of snapshots, reflinks, filesystem metadata, open deleted files, compression, and activity during a scan. Free-space changes are measured separately after an action and are never presented as guaranteed savings caused solely by Disktop.
+Run `disktop` in a terminal of at least 80×24. It keeps working down to 40×10, but a
+plan is only reviewed and confirmed at 60×20 or larger, where all of it fits.
 
-Scans stay on one filesystem by default, do not follow symlinks, and report unreadable directories, excluded mounts, and cancellation as incomplete results. Network and removable mounts require explicit selection. WSL Windows mounts such as `/mnt/c` are excluded by default. Scans are designed for bounded memory and low I/O impact, with progress and cancellation.
+| Tab | What it shows |
+| --- | --- |
+| **1 Disks** | Every filesystem with a usage bar, and for the selected one a bar that separates used, root-reserved, and available space, its device, inodes, and mounts. |
+| **2 Explore** | A stored scan, directory by directory: size, share of the parent, growth since the previous comparable scan, a trend of the total, and a file-type breakdown. `f` cycles finders: largest files, duplicates, stale, empty directories, broken links. |
+| **3 Clean** | Everything the detectors found that a plan could act on, totalled by category, then what is there for information (swap, SMART, open-deleted files). |
+| **4 Dev** · **5 Apps** | The same findings, narrowed to developer environments and caches, or to installed applications and their data. |
+| **6 History** | The action journal, with what happened to each item, and undo for Trash actions. |
 
-## Supported environment for the planned release
+Keys (also under `?`):
 
-- Linux on x86-64 or ARM64, with packaged glibc and musl Rust helper binaries; the exact tested distribution matrix is tracked in [support-matrix.md](docs/support-matrix.md).
-- Node.js 24.21.0 or newer within the 24 LTS line, or 26.10.0 or newer within the 26 line, for the CLI and TUI. Use the latest security release of either line; other Node versions are refused at startup. Full native scanning and mutation require Linux kernel 5.6 or newer because the safety design uses `openat2`. Unsupported kernel, architecture, or helper combinations expose a clear capability state and retain whatever read-only inventory functions are safe.
-- Optional external tools, such as package managers, `lsof`, `smartctl`, `notify-send`, or systemd user units, are probed before their related features are offered.
-- A macOS platform boundary is part of the architecture, but a macOS implementation is outside the Linux `1.0.0` scope.
+| Key | Does |
+| --- | --- |
+| `j` `k` / arrows, `g` `G`, PgUp PgDn, `^U` `^D` | move |
+| `1`–`6`, Tab, `[` `]`, `h` `l` outside Explore | switch tab |
+| Enter, `l` / `h`, Backspace | open a directory / go up (Explore); details (findings) |
+| `s` | sort by size on disk, apparent size, modified, name |
+| `/` | filter: `report ext:log >1GiB <5GB age>30 type:dir` |
+| `f` | next finder (Explore) |
+| `t` | file-type breakdown on or off |
+| `S` | scan the selected filesystem or this directory |
+| `c` | review a plan to clean the selection |
+| `y` / type `yes` | apply a reversible / an irreversible plan |
+| `u` | undo the selected Trash action (History) |
+| `p` | which detectors ran, and why the others could not |
+| `U` | IEC or SI units |
+| `r` | read again |
+| Esc | close, or stop what is running (a scan keeps what it read) |
+| `q`, Ctrl+C | quit; the terminal is always restored |
 
-The npm tarball will include prebuilt helpers and will not compile Rust during an end user's install. It is not available from npm yet. **Do not run `sudo npx disktop`**; privileged manager actions will use scoped elevation, and administrator scans will use a root-owned global install in read-only mode.
+The mouse selects rows, switches tabs, and scrolls. `NO_COLOR` removes colour and keeps
+bold and inverse; a non-UTF-8 locale gets ASCII glyphs (`DISKTOP_ASCII=1` forces them);
+`TERM=dumb` and pipes get the text dashboard; `DISKTOP_NO_MOUSE=1` turns mouse
+reporting off.
 
-## Work on the repository now
+## The CLI
 
-Start with [AGENTS.md](AGENTS.md), then [PLAN.md](PLAN.md). The scaffold provides these local checks (a supported Node.js version and a Rust toolchain are needed):
+Every command writes text by default and one versioned JSON envelope with `--json`.
+Byte counts and filesystem integers are decimal strings, and every path carries its raw
+bytes in base64, so nothing is rounded or mangled. Progress goes to stderr, and only
+when stderr is a terminal.
+
+| Command | |
+| --- | --- |
+| `disktop devices` | Devices, filesystems, mounts, free space, inodes. |
+| `disktop alerts check [--threshold N] [--notify]` | Exit `1` when a filesystem passes its space or inode threshold. |
+| `disktop scan [PATH]` | Index a tree and save a snapshot. `--accounting allocated\|apparent`, `--cross-filesystems`, `--throttle 50MiB`, `--max-depth N`. |
+| `disktop explore [PATH]` | Pages of a stored scan: `--sort`, `--kind`, `--min-size`, `--ext`, `--name`, `--older-than`, `--type-totals`, `--owners`. |
+| `disktop find duplicates\|stale\|empty\|broken` | Finders over a stored scan; duplicates are byte-compared, `--keep oldest\|newest\|in-path`. |
+| `disktop snapshots list\|diff` | Growth between comparable scans. |
+| `disktop clean` | Findings, measured. `--category`, `--no-sizes`. |
+| `disktop clean plan FINDING_ID\|--path PATH` | Review into an expiring plan: `--operation trash\|permanent\|move\|compress\|hardlink\|manager`. |
+| `disktop clean apply PLAN_ID --yes [--permanent]` | Apply a reviewed plan, revalidating every item. |
+| `disktop history`, `disktop undo ACTION_ID --yes` | The journal, and restoring a Trash action. |
+| `disktop report --format json\|csv\|html [--output FILE]` | Capacity, a stored scan (`--path`), and findings (`--findings`). CSV is formula-safe and HTML is escaped and script-free. |
+| `disktop timer install\|uninstall` | An hourly user timer that runs only `alerts check`. |
+| `disktop completion bash\|zsh\|fish` | Shell completion, generated from the same command table as `--help`. |
+
+Exit status: `0` complete, `1` alert threshold reached (`alerts check`), `2` input or
+operational error, `3` incomplete result, `130` interrupted. The full contract, with
+JSON schemas, is in [docs/cli.md](docs/cli.md) and [schemas/cli/v1](schemas/cli/v1).
+
+## Safety
+
+1. **Detectors only suggest.** No detector can delete or run a cleanup command.
+2. **Every change is a reviewed, expiring plan** with its exact entries, their identity
+   (device, inode, type, size, mtime, and a digest of a directory's whole subtree),
+   the operation, whether it can be undone, and the permission it needs. An apply
+   cannot change the operation; `--permanent` acknowledges an irreversible plan and
+   never turns a Trash plan into deletion.
+3. **The helper checks everything again**, item by item, from its own side: protected
+   roots, mount roots and nested mounts, symlinks (never followed), unsafe
+   shared-writable parents, and changed identities. There is no `--force`.
+4. **Everything is journalled** before and after each item, durably. An interrupted
+   action is reconciled on the next start, and an item whose outcome could not be
+   judged is reported as `uncertain` — never as done.
+5. **Trash is the default.** A move to Trash on the same filesystem usually frees no
+   space until Trash is emptied; results say so, and show the observed free-space change
+   separately because other programs write too.
+6. **Root is never the whole program.** Under EUID 0 Disktop changes no file itself;
+   package and container cleanup runs one fixed command at a time through `sudo` or
+   `pkexec`, and a refused password is a refusal, not a fallback.
+
+The threat model and its remaining limits — notably the last-component rename race
+against a concurrent writer in the same directory — are in
+[docs/safety.md](docs/safety.md) and [docs/threat-model.md](docs/threat-model.md).
+
+## What the numbers mean
+
+Disktop counts **allocated** bytes (`st_blocks × 512`) by default and **apparent** bytes
+(`st_size`) on request; a hardlinked inode counts once. These can differ from `df`
+because of snapshots, reflinks, compression, metadata, and files deleted while open.
+A size nothing measured is shown as `unknown`, never `0`, and a manager's own estimate
+is marked `~`. A scan that could not read a directory, was stopped, or skipped a mount
+says so and exits `3`.
+
+## Configuration and data
+
+Optional settings live in `$XDG_CONFIG_HOME/disktop/config.toml`; every key is
+documented in [docs/config.example.toml](docs/config.example.toml), including your own
+declarative cleanup rules (data only — a rule cannot run a command). Snapshots go under
+`$XDG_DATA_HOME/disktop`, the scan index under `$XDG_CACHE_HOME/disktop`, and plans and
+the action journal under `$XDG_STATE_HOME/disktop`, with the usual `~/.config`,
+`~/.local/share`, `~/.cache`, and `~/.local/state` fallbacks.
+
+**Privacy:** Disktop makes no network requests and collects no telemetry. Everything it
+reads and writes stays on your machine; reports go only where you ask.
+
+## Limitations
+
+- Linux only in `1.0.0`; the platform boundary exists for a later macOS adapter.
+- Scanning and cleanup need kernel 5.6+ (`openat2`); there is deliberately no less safe
+  fallback.
+- Move and compress plans need a destination, so the TUI plans Trash, permanent removal,
+  manager actions, and (for a duplicate copy) hardlink replacement; use
+  `disktop clean plan --operation move|compress` for the rest.
+- Sizes from package managers are their own estimates, and the free-space change after
+  an action includes whatever else wrote to the filesystem meanwhile.
+- See [docs/support-matrix.md](docs/support-matrix.md) for what has been checked on
+  which distributions and hosts.
+
+## Development
 
 ```sh
 npm ci
-npm run build:native
-npm run build
-npm run typecheck
-npm run lint
-npm test
-npm run test:integration
-npm run test:pty
-npm run check
-npm pack --dry-run
+npm run build:native     # the Rust helper, debug build
+npm run check            # typecheck, lint, unit, integration, recovery, PTY
+cargo test --manifest-path native/disktop-fs/Cargo.toml
+npm run test:performance # scan memory and latency budget
 node dist/bin/disktop.js --help
 ```
 
-The suites cover what is built, not what is planned. Unit tests exercise the mountinfo and lsblk parsers, the inventory join, the alert thresholds, and the dashboard layout at 80×24; integration tests validate what the CLI actually writes on the running host against the published JSON schemas; PTY tests drive a real terminal and check that Disktop hands it back, including after Ctrl+C. The native build and smoke tests check the helper's `hello`/`probe` handshake, its explicit rejection of unimplemented operations, and the locator's checksum and permission verification. Nothing here validates scanning or cleanup, because neither exists yet. Full fixtures, recovery tests, platform coverage, and release-package checks are added as their owning phases are implemented. Do not use a cleanup test against a real home directory or the CI host filesystem.
+Read [AGENTS.md](AGENTS.md) and [PLAN.md](PLAN.md) first; the architecture, the helper
+protocol, and every recorded decision are under [docs](docs). Destructive tests run
+only in temporary sandboxes. Security issues: see [SECURITY.md](SECURITY.md).
 
-The intended ownership map is:
+## License
 
-| Area | Responsibility |
-| --- | --- |
-| `src/domain`, `src/ports`, `src/application` | Pure models and policy, interfaces, and shared use cases. |
-| `src/platform/linux`, `src/providers`, `src/storage` | Linux inventory and manager adapters, findings, config, snapshots, and read-only history projection. |
-| `src/native`, `native/disktop-fs` | Versioned helper client; Rust scan, index, hashing, user-file actions, and durable journal. |
-| `src/cli`, `src/tui`, `src/reports` | CLI, terminal UI, and exports through application services. |
-| `schemas`, `tests`, `docs` | Public contracts, acceptance evidence, and design decisions. |
-
-See [architecture.md](docs/architecture.md) for the dependency direction and [native-protocol.md](docs/native-protocol.md) for the planned helper boundary. Agents should state the owning module, changed port or schema, acceptance-matrix row, fixture, and test for each implementation task.
-
-## Project state and release process
-
-The numbered phases in [PLAN.md](PLAN.md#internal-implementation-phases) are internal gates. They cover contracts, inventory, scanning, providers, safe actions, advanced analysis, manager cleanup, complete interfaces, and whole-product validation. They do **not** produce public feature-limited releases. Publication of the single initial npm version, `1.0.0`, requires every Linux acceptance row to pass, a packed-tarball audit, clean-account install tests, and verified npm provenance. The first npm publication uses a scoped publish token in GitHub Actions with `npm publish --provenance --access public`; npm trusted publishing can be configured for later updates after the package exists.
-
-A demo GIF and shell completions are release requirements; neither is presented as available in this scaffold.
-
-## Privacy and local data
-
-Disktop itself makes no network requests and collects no telemetry. `npx` or `npm` may contact the npm registry when installing the eventual package. Scans, snapshots, reports, and action history stay on the user's machine. Disktop will follow the XDG base directories: configuration under `$XDG_CONFIG_HOME/disktop`, snapshots under `$XDG_DATA_HOME/disktop`, scan cache under `$XDG_CACHE_HOME/disktop`, and the action journal under `$XDG_STATE_HOME/disktop`, with standard home-directory fallbacks. Reports go only to paths explicitly selected by the user.
-
-## Contributing and license
-
-Read [AGENTS.md](AGENTS.md) and the relevant document in [docs](docs) before changing a module. Add acceptance evidence for new behavior, keep destructive tests in temporary sandboxes, and update schemas and documentation with contract changes. Report security-sensitive deletion issues privately to repository maintainers once a security contact is published; do not include personal filesystem paths or file contents in public reports.
-
-Disktop is licensed under [Apache License 2.0](LICENSE).
+[Apache License 2.0](LICENSE).

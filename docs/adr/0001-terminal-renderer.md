@@ -50,6 +50,17 @@ the keyboard; sent sooner they are handled by the line discipline, which tests t
 rather than Disktop. `terminal-kit` restores the cursor with the terminal's own sequence
 rather than a fixed `?25h`, so the assertion accepts either form.
 
-Still outstanding before the choice is locked: mouse toggling, tmux, and SSH, plus
-restoration after a thrown exception. The renderer registers that handler already; nothing
-in Phase 1 can throw inside the draw loop to exercise it.
+Phase 7 evidence, which locks the choice: `tests/pty/cli.test.mjs` now also covers a
+mouse click on a tab (SGR reporting requested on entry and switched off on exit), a
+non-UTF-8 locale drawing ASCII only, `NO_COLOR` writing attributes but no colour
+parameter, every tab drawing in a real terminal, and an exception thrown from a timer
+while the TUI runs: the terminal is restored before the reason is written and the
+process exits `2`. `tests/pty/tmux.test.mjs` drives the TUI inside tmux and checks what
+the pane shows after keys, after resizing to 60×18 and below the 40×10 minimum, and after
+quitting. SSH adds nothing a PTY does not exercise; it remains a host check in the
+support matrix rather than a test.
+
+Two things the library does that the adapter now guards against: `terminal(text)` reads
+`%` and `^` in its argument as format and markup syntax, so every frame is written with
+`noFormat`; and redrawing by erasing the screen flickers, so the adapter keeps the last
+frame and writes only the rows that changed, in one write.

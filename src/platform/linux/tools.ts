@@ -8,7 +8,11 @@ const rest = (pattern: RegExp): { readonly rest: RegExp } => ({ rest: pattern })
 const KERNEL_PACKAGE = /^linux-[a-z0-9][a-z0-9.+-]{0,127}$/;
 const KERNEL_RPM = /^kernel[a-z0-9-]*-[0-9][A-Za-z0-9._+-]{0,127}$/;
 
-const DEVICE = /^\/dev\/[A-Za-z0-9][A-Za-z0-9/_.:-]*$/;
+/**
+ * A node under `/dev`, one segment at a time. No segment may start with a dot,
+ * so `..` cannot climb out of `/dev` and point a query at some other file.
+ */
+const DEVICE = /^\/dev(?:\/[A-Za-z0-9_][A-Za-z0-9_.:+-]*)+$/;
 
 /**
  * Every query a detector may ask, matched against the whole argument vector.
