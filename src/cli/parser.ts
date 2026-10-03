@@ -13,11 +13,22 @@ export interface OptionSpec {
   readonly choices?: readonly string[];
 }
 
+export interface OperandSpec {
+  readonly name: string;
+  readonly required: boolean;
+  /**
+   * The fixed words the operand may be. Help lists them and completion offers
+   * them; the handler still checks the word, so a refusal carries the same
+   * envelope as every other refusal from that command.
+   */
+  readonly choices?: readonly string[];
+}
+
 export interface CommandSpec {
   /** Words that select this command, empty for the root command. */
   readonly path: readonly string[];
   readonly summary: string;
-  readonly operand?: { readonly name: string; readonly required: boolean };
+  readonly operand?: OperandSpec;
   readonly options: readonly OptionSpec[];
   readonly implemented: boolean;
 }
@@ -90,7 +101,7 @@ export const COMMANDS: readonly CommandSpec[] = [
   {
     path: ["find"],
     summary: "Find duplicates, stale files, empty dirs, broken links",
-    operand: { name: "KIND", required: true },
+    operand: { name: "KIND", required: true, choices: ["duplicates", "stale", "empty", "broken"] },
     options: [
       JSON_OPTION,
       UNITS_OPTION,
@@ -112,7 +123,7 @@ export const COMMANDS: readonly CommandSpec[] = [
   {
     path: ["snapshots"],
     summary: "List saved snapshots or compare two of them",
-    operand: { name: "ACTION", required: true },
+    operand: { name: "ACTION", required: true, choices: ["list", "diff"] },
     options: [
       JSON_OPTION,
       UNITS_OPTION,
@@ -206,8 +217,20 @@ export const COMMANDS: readonly CommandSpec[] = [
     ],
     implemented: true,
   },
-  { path: ["timer"], summary: "Install or remove the opt-in alert timer", operand: { name: "ACTION", required: true }, options: [JSON_OPTION], implemented: true },
-  { path: ["completion"], summary: "Generate a shell completion script", operand: { name: "SHELL", required: true }, options: [], implemented: false },
+  {
+    path: ["timer"],
+    summary: "Install or remove the opt-in alert timer",
+    operand: { name: "ACTION", required: true, choices: ["install", "uninstall"] },
+    options: [JSON_OPTION],
+    implemented: true,
+  },
+  {
+    path: ["completion"],
+    summary: "Generate a shell completion script",
+    operand: { name: "SHELL", required: true, choices: ["bash", "zsh", "fish"] },
+    options: [],
+    implemented: true,
+  },
 ];
 
 export interface ParsedCommand {
@@ -358,16 +381,27 @@ export function renderHelp(command: CommandSpec = COMMANDS[0] as CommandSpec): s
       const note = entry.implemented ? "" : " [planned]";
       lines.push(`  ${name.padEnd(22)} ${entry.summary}${note}`);
     }
+    // The marker is explained only while something carries it, so the help
+    // never describes a state no command is in.
+    if (COMMANDS.some((entry) => !entry.implemented)) {
+      lines.push(
+        "",
+        "[planned] commands parse and validate their options, then report that they",
+        "are not implemented.",
+      );
+    }
     lines.push(
       "",
-      "[planned] commands parse and validate their options, then report that they",
-      "are not implemented. With no command Disktop opens the dashboard; with --json",
-      "it prints the dashboard instead.",
+      "With no command Disktop opens the dashboard; with --json it prints the",
+      "dashboard instead.",
     );
   } else {
     lines.push(command.summary, "");
     const operand = command.operand === undefined ? "" : ` ${command.operand.required ? command.operand.name : `[${command.operand.name}]`}`;
     lines.push("Usage:", `  disktop ${command.path.join(" ")}${operand} [OPTIONS]`);
+    if (command.operand?.choices !== undefined) {
+      lines.push("", `${command.operand.name} is one of: ${command.operand.choices.join(", ")}.`);
+    }
     if (!command.implemented) {
       lines.push("", "This command is declared but not implemented yet.");
     }

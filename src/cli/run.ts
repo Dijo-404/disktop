@@ -4,6 +4,7 @@ import { EXIT, buildEnvelope, writeEnvelope } from "./output.js";
 import { runAlertsCheck, parseThreshold } from "./commands/alerts.js";
 import { runApply, runFind, runHistory, runPlan, runUndo } from "./commands/actions.js";
 import { runClean } from "./commands/clean.js";
+import { runCompletion } from "./commands/completion.js";
 import { runDashboard } from "./commands/dashboard.js";
 import { runDevices } from "./commands/devices.js";
 import { runExplore } from "./commands/explore.js";
@@ -144,6 +145,9 @@ export async function runCli(args: readonly string[], context: CliContext): Prom
       ...(optional(parsed, "limit")),
       findings: parsed.flags.has("findings"),
     });
+  }
+  if (name === "completion") {
+    return runCompletion(withUnits, parsed.operand ?? "");
   }
   if (name === "alerts check") {
     const threshold = parseThreshold(parsed.values.get("threshold"));

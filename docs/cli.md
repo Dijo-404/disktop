@@ -1,6 +1,6 @@
 # CLI contract
 
-Status: planned `1.0.0` command surface. `devices`, the `--json` dashboard, `alerts check`, `scan`, `explore`, `snapshots list|diff`, `clean`, `clean plan`, `clean apply`, `history`, `undo`, `find duplicates|stale|empty|broken`, `timer install|uninstall`, and `report` are implemented; `completion` is declared in the parser and refuses with `not-implemented`. The JSON output contract in [`schemas/cli/v1/`](../schemas/cli/v1/) is normative and is validated by `tests/contract/cli-schema.test.mjs` against examples and by `tests/integration/cli-output.test.mjs` against what the CLI actually writes on a running host. The parser and generated help are normative now; completions become normative when they are implemented. See [PLAN.md](../PLAN.md#cli-and-outputs).
+Status: planned `1.0.0` command surface. Every command the parser declares is implemented: `devices`, the `--json` dashboard, `alerts check`, `scan`, `explore`, `snapshots list|diff`, `clean`, `clean plan`, `clean apply`, `history`, `undo`, `find duplicates|stale|empty|broken`, `timer install|uninstall`, `report`, and `completion bash|zsh|fish`. The JSON output contract in [`schemas/cli/v1/`](../schemas/cli/v1/) is normative and is validated by `tests/contract/cli-schema.test.mjs` against examples and by `tests/integration/cli-output.test.mjs` against what the CLI actually writes on a running host. The parser, the generated help, and the generated completions are normative. See [PLAN.md](../PLAN.md#cli-and-outputs).
 
 ## What works today
 
@@ -20,13 +20,14 @@ Status: planned `1.0.0` command surface. `devices`, the `--json` dashboard, `ale
 | `disktop timer install\|uninstall [--json]` | The opt-in hourly systemd user timer that runs only `alerts check --notify`. |
 | `disktop undo ACTION_ID --yes [--json]` | Puts back what one Trash action moved. |
 | `disktop report --format json\|csv\|html [--output FILE] [--path PATH] [--limit COUNT] [--findings] [--json]` | One standalone report: capacity, and optionally a stored scan and what the detectors found. Written to stdout, or to a new file that is never put over an existing one. See [Reports](#reports). |
+| `disktop completion bash\|zsh\|fish` | Prints a completion script generated from the same command table the parser reads. See [Shell completions](#shell-completions). |
 | `disktop find empty\|broken [--path PATH] [--limit COUNT] [--json]` | Empty directories and dangling symlinks, read out of the most recent scan covering the path. |
 | `disktop find duplicates [--path PATH] [--min-size SIZE] [--keep oldest\|newest\|in-path] [--keep-under PATH] [--limit COUNT] [--json]` | Groups of files holding the same bytes, with the copy a keep rule would keep. Reads content; changes nothing. |
 | `disktop find stale [--path PATH] [--older-than DAYS] [--limit COUNT] [--json]` | Files not modified for a threshold, with a statement of what that measures on this mount. |
 | `disktop --units iec\|si` | Switches human-readable units. Byte values in JSON never change. |
 | `disktop --help`, `disktop --version` | Generated from the one command table in `src/cli/parser.ts`. |
 
-Everything else parses, validates its options, and then refuses with `not-implemented` and exit `2`, in the same envelope shape a working command uses.
+A command declared in the table before it is built is marked `[planned]` in the help, parses and validates its options, and then refuses with `not-implemented` and exit `2`, in the same envelope shape a working command uses. None is at present.
 
 ## Scanning, exploring, and growth
 
@@ -73,7 +74,7 @@ disktop timer install|uninstall
 disktop completion bash|zsh|fish
 ```
 
-The parser in `src/cli/parser.ts` will define commands and options once, and drive help plus completions. The CLI and TUI invoke the same application use cases. Any command that scans shows progress on stderr, can be cancelled, and reports an incomplete result when it could not inspect the full selected scope. Disktop does not use an interactive prompt when `--json` is requested or stdout is not a TTY.
+The parser in `src/cli/parser.ts` defines commands and options once, and drives help plus completions. The CLI and TUI invoke the same application use cases. Any command that scans shows progress on stderr, can be cancelled, and reports an incomplete result when it could not inspect the full selected scope. Disktop does not use an interactive prompt when `--json` is requested or stdout is not a TTY.
 
 ## Listing what was found
 
@@ -385,6 +386,60 @@ Sizes are shown in the `--units` you chose with the exact byte count in a toolti
 capacity is drawn as bars whose width is the used percentage, red where an alert has
 been raised; a page follows the reader's light or dark preference. Incomplete sections
 are badged and their warnings listed at the top.
+
+## Shell completions
+
+`disktop completion bash|zsh|fish` prints a completion script to stdout and installs
+nothing. The script is generated from the command table in `src/cli/parser.ts` — the
+same table the parser validates against and the help is rendered from — so it offers
+exactly the commands, subcommand words, options, and option values this version
+accepts. It completes:
+
+- command words, including the words that lead to one (`alerts` then `check`, `clean`
+  then `plan` or `apply`);
+- operand keywords: `find duplicates|stale|empty|broken`, `snapshots list|diff`,
+  `timer install|uninstall`, and `completion bash|zsh|fish`;
+- each command's own options, `--help`, and `--version` at the top level;
+- an option's fixed values, such as `--format json|csv|html` or `--units iec|si`;
+- file names wherever a path belongs: the `PATH` operand of `scan` and `explore`, and
+  every option whose value is a `PATH` or `FILE`, such as `--output` and `--path`.
+
+An option's value is never mistaken for a command word, wherever it sits, which is the
+same rule the parser follows; a plan or action ID, a count, or a size completes nothing
+rather than offering file names that would be wrong. An unknown shell is refused with
+exit `2`. Regenerate the script after upgrading Disktop.
+
+**bash** (needs bash 4 or later, which every supported distribution ships). For your
+account, with the `bash-completion` package installed:
+
+```sh
+mkdir -p ~/.local/share/bash-completion/completions
+disktop completion bash > ~/.local/share/bash-completion/completions/disktop
+```
+
+Without `bash-completion`, add `source <(disktop completion bash)` to `~/.bashrc`.
+
+**zsh**. Put the script in a directory on `$fpath` under the name `_disktop`, before
+`compinit` runs:
+
+```sh
+mkdir -p ~/.zfunc
+disktop completion zsh > ~/.zfunc/_disktop
+# in ~/.zshrc, before compinit:
+fpath=(~/.zfunc $fpath)
+autoload -Uz compinit && compinit
+```
+
+Alternatively, add `source <(disktop completion zsh)` to `~/.zshrc` after `compinit`.
+zsh shows each command's and option's summary beside it.
+
+**fish**:
+
+```sh
+disktop completion fish > ~/.config/fish/completions/disktop.fish
+```
+
+fish loads it the next time `disktop` is completed.
 
 ## Machine output
 
