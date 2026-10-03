@@ -4,7 +4,7 @@ Disktop inspects storage and can act on files after review. Treat a bypass of pr
 
 ## Supported versions
 
-Disktop has no public release yet. Security support begins with `1.0.0` after the full release gate in [PLAN.md](PLAN.md) passes. Development snapshots and CI artifacts are not supported releases.
+Security fixes are made for the latest published release, starting with `1.0.0`. Development snapshots and CI artifacts are not supported releases.
 
 ## Private reporting
 

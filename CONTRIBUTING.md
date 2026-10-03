@@ -6,7 +6,7 @@ Disktop is being built toward one initial public npm release, `1.0.0`. The phase
 
 Read [AGENTS.md](AGENTS.md) and [PLAN.md](PLAN.md) before changing code. The plan defines module ownership, platform boundaries, protocol and CLI contracts, and the feature acceptance matrix. For a change, identify the owning folder, affected port or schema, acceptance row, fixture, and relevant test.
 
-The Linux application uses Node.js 24 LTS as its baseline, checks Node 26 compatibility in CI, and uses a Rust helper. Use a current patched release within the supported Node lines and the pinned dependencies in `package.json`, `package-lock.json`, and `rust-toolchain.toml`. Install dependencies with `npm ci`; keep both npm and Cargo lockfiles committed. The current scaffold checks are:
+The Linux application uses Node.js 24 LTS as its baseline, checks Node 26 compatibility in CI, and uses a Rust helper. Use a current patched release within the supported Node lines and the pinned dependencies in `package.json`, `package-lock.json`, and `rust-toolchain.toml`. Install dependencies with `npm ci`; keep both npm and Cargo lockfiles committed. The checks are:
 
 ```sh
 npm run typecheck
@@ -37,7 +37,7 @@ A helper in `vendor/bin/` takes precedence over the `build:native` debug build, 
 in an installed package, which is why the last line is there. See
 [vendor/bin/README.md](vendor/bin/README.md) for the release build itself.
 
-Early scaffolding may implement only smoke coverage. Passing a smoke test is not evidence that a feature row is complete. Add behavior-based fixtures and tests as each module is built.
+Passing a smoke test is not evidence that a feature row is complete: a change to behaviour comes with a behaviour-based fixture and a test that fails without it.
 
 ## Code boundaries
 
@@ -50,7 +50,7 @@ Do not add `rm -rf`, shell-built cleanup commands, or direct file mutation to a 
 
 ## Test safety
 
-Create destructive test trees under isolated temporary directories. Never aim cleanup tests at a developer's home, the CI runner home, or a real system cache. Use mount namespaces or VMs for bind mounts, symlink races, and privileged manager behavior. Test odd byte filenames, hardlinks, sparse files, permission failures, interruptions, and journal recovery for affected code. The Fedora and Arch CI container jobs are smoke checks until those fixtures and manager adapters are implemented; they are not a substitute for the Phase 8 matrix in the plan.
+Create destructive test trees under isolated temporary directories. Never aim cleanup tests at a developer's home, the CI runner home, or a real system cache. Use mount namespaces or VMs for bind mounts, symlink races, and privileged manager behavior. Test odd byte filenames, hardlinks, sparse files, permission failures, interruptions, and journal recovery for affected code. The Ubuntu, Fedora, and Arch CI container jobs are smoke checks of the build, the terminal tests, and the packed package; they are not a substitute for the host and VM checks in the support matrix.
 
 ## Pull requests
 
