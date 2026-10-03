@@ -44,8 +44,12 @@ export function createManagerExecutor(options: ManagerExecutorOptions): Pick<Act
 
       const client = await connect(options.start);
       try {
+        // Journal writes take no abort signal. Ctrl+C stops the next command;
+        // it must never cancel the record of how the running one ended, or
+        // the one that closes the action, since a command that started and was
+        // never recorded as finished reads as uncertain for good.
         const request = async (operation: string, operationArguments: Record<string, unknown>) => {
-          const event = await client.request(operation, operationArguments, signal);
+          const event = await client.request(operation, operationArguments);
           refuseError(event, client);
           return event;
         };
