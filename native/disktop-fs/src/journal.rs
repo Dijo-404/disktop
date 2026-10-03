@@ -467,9 +467,12 @@ impl Journal {
                         -- Only an operation that puts things into Trash has
                         -- bytes in it. A restore's items carry a destination
                         -- too, and counting those would have an undo report
-                        -- that it filled Trash up.
+                        -- that it filled Trash up. A move or a compress whose
+                        -- disposition was Trash records where each source
+                        -- went; one whose disposition was permanent records
+                        -- no destination, so it counts nothing here.
                         trashed_bytes = CASE
-                          WHEN operation = 'trash' THEN (
+                          WHEN operation IN ('trash', 'copy-move', 'compress') THEN (
                             SELECT coalesce(sum(bytes), 0) FROM action_item
                              WHERE action_id = ?1 AND outcome = 'completed'
                                AND destination IS NOT NULL
@@ -1161,6 +1164,51 @@ CREATE TABLE action_item (action_id TEXT NOT NULL REFERENCES action(id) ON DELET
             "an undo moved bytes out of Trash, not into it"
         );
         assert_eq!(record.selected_bytes, 512);
+    }
+
+    /// A move or a compress whose plan said `trash` puts its sources in Trash
+    /// just as a Trash action does, and the action reported those bytes while
+    /// it ran. Reconciling an interrupted one must not report zero instead.
+    #[test]
+    fn a_reconciled_move_counts_the_sources_it_put_in_trash() {
+        let sandbox = Sandbox::new("journal-move-trashed");
+        let journal = Journal::open(sandbox.path()).unwrap();
+        let mut ids = Vec::new();
+        for (operation, destination) in [
+            ("copy-move", Some(&b"/trash/files/a"[..])),
+            ("compress", Some(&b"/trash/files/b"[..])),
+            ("copy-move", None),
+        ] {
+            let id = journal.begin("plan-0123456789ab", operation, None).unwrap();
+            journal
+                .record_intent(&id, 0, b"/work/a", destination)
+                .unwrap();
+            journal
+                .record_moved(
+                    &id,
+                    0,
+                    512,
+                    Some(&Identity {
+                        device: 1,
+                        inode: 2,
+                    }),
+                )
+                .unwrap();
+            journal.record_intent(&id, 1, b"/work/b", None).unwrap();
+            abandon(&journal, &id);
+            ids.push(id);
+        }
+        journal.reconcile().unwrap();
+
+        let trashed: Vec<u64> = ids
+            .iter()
+            .map(|id| journal.get(id).unwrap().unwrap().trashed_bytes)
+            .collect();
+        assert_eq!(
+            trashed,
+            vec![512, 512, 0],
+            "a source put in Trash counts; one removed permanently does not",
+        );
     }
 
     #[test]
