@@ -82,7 +82,7 @@ test("this host's Docker is read, and no named volume is ever selectable", async
   const named = new Set(
     spawnSync("docker", ["volume", "ls", "--filter", "dangling=true", "--format", "{{.Name}}\t{{.Labels}}"], { encoding: "utf8" })
       .stdout.split("\n")
-      .filter((line) => line !== "" && !line.includes("com.docker.volume.anonymous="))
+      .filter((line) => line !== "" && !(line.split("\t")[1] ?? "").split(",").some((label) => label.startsWith("com.docker.volume.anonymous=")))
       .map((line) => line.split("\t")[0]),
   );
   for (const proposal of discovery.proposals) {
