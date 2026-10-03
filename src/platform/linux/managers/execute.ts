@@ -114,10 +114,15 @@ export function createManagerExecutor(options: ManagerExecutorOptions): Pick<Act
             }
             continue;
           }
+          // Refused, missing, or stopped before it was spawned: this command did
+          // nothing, so its items are skipped with the reason, and so is
+          // everything after it.
           stopped =
             run.status === "denied"
               ? `Administrator rights were refused: ${run.explanation}`
-              : run.explanation;
+              : run.status === "not-started"
+                ? NOT_RUN
+                : run.explanation;
           for (const position of positions) {
             if (!skipped.has(position)) {
               skipped.set(position, stopped);

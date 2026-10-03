@@ -123,7 +123,9 @@ test("a command whose stop was asked for before it started is never run", async 
   controller.abort();
   const { runner, spawned } = fakeRunner();
   const run = await runner.run({ tool: "apt-get", arguments: ["clean"] }, "root", { interactive: false, signal: controller.signal });
-  assert.equal(run.status, "cancelled");
+  // Distinct from "cancelled", which means it ran and was stopped: the
+  // executor verifies a stopped command's items and skips a never-started one's.
+  assert.equal(run.status, "not-started");
   assert.match(run.explanation, /never run/i);
   assert.deepEqual(spawned, [], "nothing was spawned after Ctrl+C");
 });
