@@ -266,6 +266,8 @@ An alert threshold is an expected monitoring outcome, so `1` is reserved for tha
 
 An inventory is incomplete whenever anything could not be read: a mount whose `statfs` was denied, a missing `lsblk`, an unparsable `mountinfo` line, or a configuration file that could not be applied. Each one adds a warning naming what was missed, and no missing reading is ever reported as a zero.
 
+A `statfs` that does not answer within five seconds — a hard NFS mount whose server has gone does this — is a `statfs-timeout` warning and that filesystem is left out. The kernel call cannot be cancelled and keeps one Node worker thread until it returns, so a mount still stuck is not asked again by the same process, and a finished command exits even while the call is pending. Device models, transports, and filesystem types are sanitized where they are read: a USB device chooses its own model string and any user who can mount FUSE chooses a filesystem subtype that every other user's dashboard prints.
+
 ## Manager actions
 
 `disktop clean` lists what package and container managers can clean, as findings whose

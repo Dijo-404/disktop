@@ -55,11 +55,71 @@ export const linuxInventorySources: InventorySources = {
   },
 };
 
-export function createLinuxInventory(sources: InventorySources = linuxInventorySources): InventoryPort {
+export interface InventoryOptions {
+  /** How long one statfs may take before its mount is left out. */
+  readonly statfsTimeoutMilliseconds?: number;
+}
+
+const STATFS_TIMEOUT_MILLISECONDS = 5_000;
+
+export function createLinuxInventory(
+  sources: InventorySources = linuxInventorySources,
+  options: InventoryOptions = {},
+): InventoryPort {
+  const capacity: CapacityReader = {
+    sources,
+    timeoutMilliseconds: options.statfsTimeoutMilliseconds ?? STATFS_TIMEOUT_MILLISECONDS,
+    stuck: new Set(),
+  };
   return {
-    list: () => collect(sources),
+    list: () => collect(capacity),
     mountOptionsFor: (path) => mountOptionsFor(sources, path),
   };
+}
+
+/**
+ * statfs with a bound, and a memory of the mounts that did not answer.
+ *
+ * statfs on a hard NFS mount whose server has gone blocks in the kernel, and
+ * Node cannot cancel it: the call holds one of libuv's few worker threads until
+ * the kernel lets go. The reading therefore gives up on it after a bound, and a
+ * mount still stuck is not asked again in this process, because every repeat
+ * would take another worker and eventually every file operation would wait.
+ */
+interface CapacityReader {
+  readonly sources: InventorySources;
+  readonly timeoutMilliseconds: number;
+  /** Mount points, by their bytes, whose statfs has not returned yet. */
+  readonly stuck: Set<string>;
+}
+
+type CapacityReading =
+  | { readonly kind: "read"; readonly reading: StatfsReading }
+  | { readonly kind: "failed"; readonly error: unknown }
+  | { readonly kind: "timed-out" };
+
+async function readCapacity(reader: CapacityReader, mountPoint: RawPath): Promise<CapacityReading> {
+  const key = mountPoint.bytesBase64;
+  if (reader.stuck.has(key)) {
+    return { kind: "timed-out" };
+  }
+  reader.stuck.add(key);
+  const pending = reader.sources.statfs(pathBytes(mountPoint)).then(
+    (reading): CapacityReading => ({ kind: "read", reading }),
+    (error: unknown): CapacityReading => ({ kind: "failed", error }),
+  );
+  // Only an answer, however late, makes the mount worth asking again.
+  void pending.finally(() => reader.stuck.delete(key));
+
+  let timer: NodeJS.Timeout | undefined;
+  const expired = new Promise<CapacityReading>((resolve) => {
+    timer = setTimeout(() => resolve({ kind: "timed-out" }), reader.timeoutMilliseconds);
+  });
+  try {
+    return await Promise.race([pending, expired]);
+  } finally {
+    clearTimeout(timer);
+  }
 }
 
 /**
@@ -100,13 +160,14 @@ async function mountOptionsFor(
   return best === undefined ? undefined : [...best.options, ...best.superOptions];
 }
 
-async function collect(sources: InventorySources): Promise<InventoryResult> {
+async function collect(capacity: CapacityReader): Promise<InventoryResult> {
+  const sources = capacity.sources;
   const warnings: Warning[] = [];
   const mounts = await readMounts(sources, warnings);
   const blockDevices = await readBlockDevices(sources, warnings);
   const windowsSubsystem = await sources.detectWindowsSubsystem();
 
-  const filesystems = await joinFilesystems(sources, mounts, blockDevices, windowsSubsystem, warnings);
+  const filesystems = await joinFilesystems(capacity, mounts, blockDevices, windowsSubsystem, warnings);
   const devices = buildDevices(blockDevices.devices);
 
   return {
@@ -175,7 +236,7 @@ async function readBlockDevices(sources: InventorySources, warnings: Warning[]):
  * filesystem, and counting it twice would double the reported capacity.
  */
 async function joinFilesystems(
-  sources: InventorySources,
+  capacity: CapacityReader,
   mounts: readonly MountEntry[],
   topology: BlockTopology,
   windowsSubsystem: boolean,
@@ -206,7 +267,7 @@ async function joinFilesystems(
   const filesystems: Filesystem[] = [];
   for (const [id, group] of grouped) {
     const primary = group[0] as MountEntry;
-    const reading = await firstReadableStatfs(sources, group, warnings);
+    const reading = await firstReadableStatfs(capacity, group, warnings);
     if (reading === undefined) {
       continue;
     }
@@ -233,20 +294,30 @@ async function joinFilesystems(
 }
 
 async function firstReadableStatfs(
-  sources: InventorySources,
+  capacity: CapacityReader,
   group: readonly MountEntry[],
   warnings: Warning[],
 ): Promise<StatfsReading | undefined> {
   for (const mount of group) {
-    try {
-      return await sources.statfs(pathBytes(mount.mountPoint));
-    } catch (error) {
+    const answer = await readCapacity(capacity, mount.mountPoint);
+    if (answer.kind === "read") {
+      return answer.reading;
+    }
+    if (answer.kind === "timed-out") {
       warnings.push({
-        code: "statfs-unreadable",
-        message: `Capacity for this mount could not be read (${describe(error)}); it is left out rather than reported as zero.`,
+        code: "statfs-timeout",
+        message: `Capacity for this mount did not answer within ${capacity.timeoutMilliseconds} ms, as a network filesystem whose server has gone does; it is left out rather than reported as zero.`,
         path: mount.mountPoint,
       });
+      // Every mount in the group is the same filesystem behind the same
+      // server; asking through another one would only wait again.
+      return undefined;
     }
+    warnings.push({
+      code: "statfs-unreadable",
+      message: `Capacity for this mount could not be read (${describe(answer.error)}); it is left out rather than reported as zero.`,
+      path: mount.mountPoint,
+    });
   }
   return undefined;
 }
