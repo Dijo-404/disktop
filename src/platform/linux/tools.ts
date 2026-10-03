@@ -23,7 +23,8 @@ export const ALLOWED_QUERIES: Readonly<Record<string, readonly (readonly QueryWo
   docker: [
     ["image", "ls", "--filter", "dangling=true", "--no-trunc", "--format", "{{.ID}}\t{{.Size}}"],
     ["container", "ls", "--all", "--filter", "status=exited", "--filter", "status=created", "--no-trunc", "--format", "{{.ID}}\t{{.State}}"],
-    ["volume", "ls", "--filter", "dangling=true", "--format", "{{.Name}}\t{{.Labels}}"],
+    ["volume", "ls", "--filter", "dangling=true", "--format", "{{.Name}}"],
+    ["volume", "ls", "--filter", "dangling=true", "--filter", "label=com.docker.volume.anonymous", "--format", "{{.Name}}"],
     ["system", "df", "--format", "{{json .}}"],
   ],
   "dpkg-query": [

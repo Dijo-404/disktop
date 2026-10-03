@@ -26,7 +26,17 @@ export const CONTAINER_QUERIES = {
     "--format",
     "{{.ID}}\t{{.State}}",
   ],
-  dockerVolumes: ["volume", "ls", "--filter", "dangling=true", "--format", "{{.Name}}\t{{.Labels}}"],
+  dockerVolumes: ["volume", "ls", "--filter", "dangling=true", "--format", "{{.Name}}"],
+  dockerAnonymousVolumes: [
+    "volume",
+    "ls",
+    "--filter",
+    "dangling=true",
+    "--filter",
+    "label=com.docker.volume.anonymous",
+    "--format",
+    "{{.Name}}",
+  ],
   podmanVolumes: ["volume", "ls", "--filter", "dangling=true", "--format", "{{.Name}}\t{{.Anonymous}}"],
   systemDf: ["system", "df", "--format", "{{json .}}"],
 } as const;
@@ -105,13 +115,18 @@ export function createContainerAdapter(engine: Engine, ports: ContainerPorts): M
     if (listing.failure !== undefined) {
       return listing.failure;
     }
+    let marked: ReadonlySet<string> | undefined;
+    if (engine === "docker") {
+      const filtered = await rows(CONTAINER_QUERIES.dockerAnonymousVolumes);
+      if (filtered.failure !== undefined) {
+        return filtered.failure;
+      }
+      marked = new Set(filtered.rows.map(([volume]) => volume ?? ""));
+    }
     const anonymous: string[] = [];
     const named: string[] = [];
     for (const [volume, marker] of listing.rows) {
-      const isAnonymous =
-        engine === "docker"
-          ? (marker ?? "").split(",").some((label) => label.startsWith("com.docker.volume.anonymous="))
-          : marker === "true";
+      const isAnonymous = marked === undefined ? marker === "true" : marked.has(volume ?? "");
       (isAnonymous ? anonymous : named).push(volume ?? "");
     }
     return {

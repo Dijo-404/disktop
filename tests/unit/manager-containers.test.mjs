@@ -9,7 +9,8 @@ const C = "c".repeat(64);
 
 const IMAGES = "docker image ls --filter dangling=true --no-trunc --format {{.ID}}\t{{.Size}}";
 const CONTAINERS = "docker container ls --all --filter status=exited --filter status=created --no-trunc --format {{.ID}}\t{{.State}}";
-const VOLUMES = "docker volume ls --filter dangling=true --format {{.Name}}\t{{.Labels}}";
+const VOLUMES = "docker volume ls --filter dangling=true --format {{.Name}}";
+const ANONYMOUS = "docker volume ls --filter dangling=true --filter label=com.docker.volume.anonymous --format {{.Name}}";
 const DF = "docker system df --format {{json .}}";
 
 function tools(answers) {
@@ -31,7 +32,8 @@ function tools(answers) {
 const HOST = {
   [IMAGES]: `sha256:${A}\t1.2GB\n${B}\t300MB\n`,
   [CONTAINERS]: `${A}\texited\n${B}\tcreated\n`,
-  [VOLUMES]: `${A}\tcom.docker.volume.anonymous=\npostgres-data\tcom.docker.compose.project=shop\n${C}\t\n`,
+  [VOLUMES]: `${A}\npostgres-data\n${C}\n`,
+  [ANONYMOUS]: `${A}\n`,
   [DF]: '{"Active":"18","Reclaimable":"2.912GB (29%)","Size":"9.745GB","TotalCount":"30","Type":"Images"}\n{"Active":"0","Reclaimable":"9.456GB","Size":"11.87GB","TotalCount":"182","Type":"Build Cache"}\n',
 };
 
@@ -90,7 +92,7 @@ test("an id that is not one Docker prints is dropped and said so", async () => {
 
 test("a socket this user may not open is a permission state that names the fix", async () => {
   const denied = { capability: { status: "permission-denied", explanation: "docker could not be run by this user." }, stdout: "", stderr: "permission denied while trying to connect to the Docker daemon socket", exitCode: 1 };
-  const discovery = await createContainerAdapter("docker", { tools: tools({ [IMAGES]: denied, [CONTAINERS]: denied, [VOLUMES]: denied, [DF]: denied }) }).discover();
+  const discovery = await createContainerAdapter("docker", { tools: tools({ [IMAGES]: denied, [CONTAINERS]: denied, [VOLUMES]: denied, [ANONYMOUS]: denied, [DF]: denied }) }).discover();
   assert.equal(discovery.capability.status, "permission-denied");
   assert.match(discovery.capability.explanation, /docker group|rootless/);
   assert.deepEqual(discovery.proposals, []);
@@ -128,4 +130,23 @@ test("an image still listed after its removal is a failure", async () => {
   const verification = await docker.verify(scope, new Set([0, 1]), []);
   assert.equal(verification.verdicts.get(0).outcome, "completed");
   assert.equal(verification.verdicts.get(1).outcome, "failed");
+});
+
+test("a named volume whose label text imitates the anonymous marker is never offered", async () => {
+  const spoof = "d".repeat(64);
+  const docker = createContainerAdapter("docker", {
+    tools: tools({
+      [IMAGES]: "",
+      [CONTAINERS]: "",
+      "docker volume ls --filter dangling=true --format {{.Name}}": `${A}\n${spoof}\n`,
+      "docker volume ls --filter dangling=true --filter label=com.docker.volume.anonymous --format {{.Name}}": `${A}\n`,
+      [DF]: "",
+    }),
+  });
+  const discovery = await docker.discover();
+  const anonymous = discovery.proposals.find((proposal) => proposal.action === "docker.remove-anonymous-volumes" && proposal.slug === undefined);
+  assert.deepEqual(anonymous.items.map((item) => item.id), [A]);
+  const named = discovery.proposals.find((proposal) => proposal.slug === "docker.named-volumes");
+  assert.equal(named.offered, false);
+  assert.ok(named.evidence.some((line) => line.includes(spoof.slice(0, 16))));
 });
