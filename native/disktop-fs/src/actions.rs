@@ -919,6 +919,20 @@ fn compress_one(
     let mut archive_name = parent.name.clone();
     archive_name.extend_from_slice(archive::suffix(live.kind));
 
+    // The archive keeps the source's name so somebody can tell what it holds,
+    // and a name with no room left for the suffix has nowhere to put it.
+    if archive_name.len() > NAME_MAX {
+        return refuse(
+            "invalid-arguments",
+            format!(
+                "Its archive would be called '{}', longer than the {NAME_MAX} bytes a filesystem \
+                 allows in one name, so it was not compressed.",
+                String::from_utf8_lossy(&archive_name),
+            ),
+            Outcome::Failed,
+        );
+    }
+
     if sys::target_exists(destination, &archive_name) {
         return refuse(
             "destination-exists",
@@ -1051,10 +1065,7 @@ fn stage_archive(
     record: &StagingRecord<'_>,
 ) -> Result<Staged, (&'static str, String)> {
     for attempt in 0..64u32 {
-        let mut staging = archive_name.to_vec();
-        staging.extend_from_slice(
-            format!(".disktop-partial-{}-{attempt}", std::process::id()).as_bytes(),
-        );
+        let staging = staging_name(archive_name, attempt);
         if sys::target_exists(destination, &staging) {
             continue;
         }
@@ -1469,10 +1480,7 @@ fn stage_copy(
     staging: &StagingRecord<'_>,
 ) -> Result<Staged, (&'static str, String)> {
     for attempt in 0..64u32 {
-        let mut name = parent.name.clone();
-        name.extend_from_slice(
-            format!(".disktop-partial-{}-{attempt}", std::process::id()).as_bytes(),
-        );
+        let name = staging_name(&parent.name, attempt);
         if sys::target_exists(destination, &name) {
             continue;
         }
@@ -3076,7 +3084,7 @@ fn reserve(
     for attempt in 0..1000u32 {
         let candidate = candidate_name(name, attempt);
         let mut info_name = candidate.clone();
-        info_name.extend_from_slice(b".trashinfo");
+        info_name.extend_from_slice(TRASHINFO);
 
         match sys::openat_write_exclusive(
             destination.info_descriptor,
@@ -3116,28 +3124,67 @@ fn reserve(
     ))
 }
 
-/// `notes.txt`, then `notes.1.txt`, and so on, so the extension keeps working.
-fn candidate_name(name: &[u8], attempt: u32) -> Vec<u8> {
-    if attempt == 0 {
-        return name.to_vec();
+/// The longest name a directory entry can have on the filesystems Linux
+/// mounts, in bytes.
+const NAME_MAX: usize = 255;
+
+const TRASHINFO: &[u8] = b".trashinfo";
+
+/// `stem` followed by `tail`, the stem cut short so the whole fits in
+/// `limit` bytes.
+///
+/// A stem that is text is never cut through the middle of a character: a
+/// shortened name is still one a file manager can show. One that is not text
+/// is cut where the bytes run out, because it never had characters to keep.
+fn fitted(stem: &[u8], tail: &[u8], limit: usize) -> Vec<u8> {
+    let mut cut = stem.len().min(limit.saturating_sub(tail.len()));
+    if cut < stem.len() && std::str::from_utf8(stem).is_ok() {
+        while cut > 0 && stem[cut] & 0xC0 == 0x80 {
+            cut -= 1;
+        }
     }
+    let mut name = stem[..cut].to_vec();
+    name.extend_from_slice(tail);
+    name
+}
+
+/// The name something is staged under beside where it will be published.
+///
+/// It starts with the name it will have, for whoever finds it, and is cut
+/// short when that name is already near the limit: a staging name that does
+/// not fit would refuse to move any file whose own name is long.
+fn staging_name(name: &[u8], attempt: u32) -> Vec<u8> {
+    let tail = format!(".disktop-partial-{}-{attempt}", std::process::id());
+    fitted(name, tail.as_bytes(), NAME_MAX)
+}
+
+/// `notes.txt`, then `notes.1.txt`, and so on, so the extension keeps working.
+///
+/// The name and its `.trashinfo` both have to fit, so a name near the limit is
+/// shortened in Trash. Nothing depends on the shortened one: the original path
+/// is in the metadata beside it and in the journal.
+fn candidate_name(name: &[u8], attempt: u32) -> Vec<u8> {
+    let limit = NAME_MAX - TRASHINFO.len();
+    let marker = if attempt == 0 {
+        Vec::new()
+    } else {
+        format!(".{attempt}").into_bytes()
+    };
     let dot = name
         .iter()
         .rposition(|byte| *byte == b'.')
         .filter(|position| *position > 0);
-    let mut candidate = Vec::with_capacity(name.len() + 8);
-    match dot {
-        Some(position) => {
-            candidate.extend_from_slice(&name[..position]);
-            candidate.extend_from_slice(format!(".{attempt}").as_bytes());
-            candidate.extend_from_slice(&name[position..]);
+    let (stem, extension) = match dot {
+        // An "extension" taking up half the name is not one worth keeping at
+        // the expense of everything before it.
+        Some(position) if name.len() - position <= limit / 2 => {
+            (&name[..position], &name[position..])
         }
-        None => {
-            candidate.extend_from_slice(name);
-            candidate.extend_from_slice(format!(".{attempt}").as_bytes());
-        }
-    }
-    candidate
+        _ => (name, &b""[..]),
+    };
+    let mut tail = marker;
+    tail.extend_from_slice(extension);
+    fitted(stem, &tail, limit)
 }
 
 fn relative_to(top: &[u8], path: &[u8]) -> Vec<u8> {
@@ -3223,6 +3270,7 @@ fn parent_path(path: &[u8]) -> Vec<u8> {
 mod tests {
     use super::*;
     use crate::testing::Sandbox;
+    use std::os::unix::ffi::{OsStrExt, OsStringExt};
 
     fn joined(sandbox: &Sandbox, relative: &[u8]) -> Vec<u8> {
         let mut path = sandbox.bytes();
@@ -3500,7 +3548,7 @@ mod tests {
         );
     }
 
-    fn staging_name(name: &str, attempt: u32) -> String {
+    fn staged_as(name: &str, attempt: u32) -> String {
         format!("{name}.disktop-partial-{}-{attempt}", std::process::id())
     }
 
@@ -3516,10 +3564,7 @@ mod tests {
         sandbox.file(b"work/tree/mine", 100);
         let request = moving(&sandbox, b"work/tree", SourceDisposition::Trash);
 
-        let theirs = sandbox
-            .path()
-            .join("elsewhere")
-            .join(staging_name("tree", 0));
+        let theirs = sandbox.path().join("elsewhere").join(staged_as("tree", 0));
         let planted = theirs.clone();
         at_checkpoint(move |at| {
             if at == Checkpoint::NameChosen && !planted.exists() {
@@ -3561,7 +3606,7 @@ mod tests {
         let theirs = sandbox
             .path()
             .join("elsewhere")
-            .join(staging_name("data.bin", 0));
+            .join(staged_as("data.bin", 0));
         let planted = theirs.clone();
         at_checkpoint(move |at| {
             if at == Checkpoint::NameChosen && !planted.exists() {
@@ -3832,6 +3877,185 @@ mod tests {
                 .collect();
             assert!(held.is_empty(), "Trash {half} holds {held:?}");
         }
+    }
+
+    /// A name as long as a filesystem allows, ending in an extension, made of
+    /// multi-byte characters so a cut in the wrong place would be visible.
+    fn longest_name(extension: &str) -> Vec<u8> {
+        let mut name = String::new();
+        while name.len() + "é".len() + extension.len() <= 255 {
+            name.push('é');
+        }
+        name.push_str(extension);
+        name.into_bytes()
+    }
+
+    fn under_work(name: &[u8]) -> Vec<u8> {
+        let mut relative = b"work/".to_vec();
+        relative.extend_from_slice(name);
+        relative
+    }
+
+    #[test]
+    fn a_file_whose_name_is_as_long_as_allowed_goes_to_trash_and_comes_back() {
+        let sandbox = Sandbox::new("trash-long-name");
+        sandbox.directory(b"state");
+        sandbox.directory(b"work");
+        let name = longest_name(".txt");
+        assert!(name.len() > 250);
+        sandbox.file(&under_work(&name), 64);
+        let request = TrashRequest {
+            plan_id: "plan-0123456789abcd".to_owned(),
+            journal_directory: sandbox.path().join("state"),
+            home_trash_directory: joined(&sandbox, b"trash-home"),
+            targets: vec![reviewed(&joined(&sandbox, &under_work(&name)), 64)],
+        };
+
+        let (summary, items) =
+            collect(|report| run_trash(&request, report, &AtomicBool::new(false)));
+        let summary = summary.ok().expect("the action ran");
+        assert_eq!(
+            items[0].outcome,
+            Outcome::Completed,
+            "{:?}",
+            items[0].message
+        );
+
+        let held: Vec<_> = std::fs::read_dir(sandbox.path().join("trash-home/files"))
+            .unwrap()
+            .flatten()
+            .map(|entry| entry.file_name().into_vec())
+            .collect();
+        assert_eq!(held.len(), 1);
+        assert!(
+            std::str::from_utf8(&held[0]).is_ok(),
+            "a shortened name is not cut through a character"
+        );
+        let mut info = held[0].clone();
+        info.extend_from_slice(b".trashinfo");
+        assert!(
+            sandbox
+                .path()
+                .join("trash-home/info")
+                .join(std::ffi::OsStr::from_bytes(&info))
+                .exists()
+        );
+
+        let restore = RestoreRequest {
+            journal_directory: sandbox.path().join("state"),
+            journal_id: summary.journal_id,
+        };
+        let (restored, items) =
+            collect(|report| run_restore(&restore, report, &AtomicBool::new(false)));
+        assert_eq!(
+            restored.ok().expect("the undo ran").completed,
+            1,
+            "{:?}",
+            items[0].message
+        );
+        assert!(
+            sandbox
+                .path()
+                .join("work")
+                .join(std::ffi::OsStr::from_bytes(&name))
+                .exists(),
+            "it is back under its whole name"
+        );
+    }
+
+    #[test]
+    fn a_file_whose_name_is_as_long_as_allowed_can_be_moved() {
+        let sandbox = Sandbox::new("move-long-name");
+        sandbox.directory(b"state");
+        sandbox.directory(b"elsewhere");
+        sandbox.directory(b"work");
+        let name = longest_name(".bin");
+        sandbox.file(&under_work(&name), 4096);
+        let request = moving(&sandbox, &under_work(&name), SourceDisposition::Permanent);
+
+        let (summary, items) =
+            collect(|report| run_copy_move(&request, report, &AtomicBool::new(false)));
+        assert_eq!(
+            summary.ok().expect("the move ran").completed,
+            1,
+            "{:?}",
+            items[0].message
+        );
+        let arrived = sandbox
+            .path()
+            .join("elsewhere")
+            .join(std::ffi::OsStr::from_bytes(&name));
+        assert_eq!(std::fs::read(arrived).unwrap().len(), 4096);
+    }
+
+    #[test]
+    fn a_long_name_is_compressed_when_its_archive_name_fits_and_refused_when_not() {
+        let sandbox = Sandbox::new("compress-long-name");
+        sandbox.directory(b"state");
+        sandbox.directory(b"work");
+        // Room for ".zst" and not for a staging suffix on top of it.
+        let fits = vec![b'f'; 250];
+        // No room for ".zst" at all.
+        let too_long = vec![b'g'; 253];
+        sandbox.file(&under_work(&fits), 4096);
+        sandbox.file(&under_work(&too_long), 4096);
+        let request = CompressRequest {
+            plan_id: "plan-0123456789abcd".to_owned(),
+            journal_directory: sandbox.path().join("state"),
+            home_trash_directory: joined(&sandbox, b"trash-home"),
+            destination_directory: Vec::new(),
+            source_disposition: SourceDisposition::Permanent,
+            targets: vec![
+                reviewed(&joined(&sandbox, &under_work(&fits)), 4096),
+                reviewed(&joined(&sandbox, &under_work(&too_long)), 4096),
+            ],
+        };
+
+        let (summary, items) =
+            collect(|report| run_compress(&request, report, &AtomicBool::new(false)));
+        summary.ok().expect("the compress ran");
+
+        assert_eq!(
+            items[0].outcome,
+            Outcome::Completed,
+            "{:?}",
+            items[0].message
+        );
+        let mut archive = fits.clone();
+        archive.extend_from_slice(b".zst");
+        assert!(
+            sandbox
+                .path()
+                .join("work")
+                .join(std::ffi::OsStr::from_bytes(&archive))
+                .exists()
+        );
+        assert_eq!(items[1].outcome, Outcome::Failed);
+        assert_eq!(items[1].reason, Some("invalid-arguments"));
+        assert!(
+            items[1].message.as_deref().unwrap().contains("name"),
+            "{:?}",
+            items[1].message
+        );
+        assert!(
+            sandbox
+                .path()
+                .join("work")
+                .join(std::ffi::OsStr::from_bytes(&too_long))
+                .exists(),
+            "the source was left alone"
+        );
+        let staged: Vec<_> = std::fs::read_dir(sandbox.path().join("work"))
+            .unwrap()
+            .flatten()
+            .filter(|entry| {
+                entry
+                    .file_name()
+                    .to_string_lossy()
+                    .contains(".disktop-partial")
+            })
+            .collect();
+        assert!(staged.is_empty());
     }
 
     fn linking(sandbox: &Sandbox, keep: &[u8], targets: &[&[u8]]) -> DedupHardlinkRequest {
