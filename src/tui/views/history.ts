@@ -14,7 +14,7 @@ export function canUndo(record: JournalRecord): boolean {
     RESTORABLE.has(record.operation) &&
     record.state !== "uncertain" &&
     record.state !== "in-progress" &&
-    record.items.some((item) => item.outcome === "completed" && item.destination !== undefined)
+    (record.items.some((item) => item.outcome === "completed" && item.destination !== undefined) || (record.itemsOmitted ?? 0n) > 0n)
   );
 }
 
@@ -163,7 +163,9 @@ function detailLines(record: JournalRecord, height: number, context: ViewContext
       );
     }
   }
-  for (const item of record.items.slice(0, Math.max(0, height - lines.length))) {
+  const omitted = record.itemsOmitted ?? 0n;
+  const room = Math.max(0, height - lines.length - (omitted > 0n ? 1 : 0));
+  for (const item of record.items.slice(0, room)) {
     const style: StyleName = item.outcome === "completed" ? "ok" : item.outcome === "failed" || item.outcome === "uncertain" ? "danger" : "warn";
     const icon = item.outcome === "completed" ? theme.glyphs.ok : item.outcome === "skipped" ? "-" : theme.glyphs.fail;
     const where = home !== undefined && item.path.display.startsWith(`${home}/`) ? `${theme.glyphs.home}${item.path.display.slice(home.length)}` : item.path.display;
@@ -174,6 +176,9 @@ function detailLines(record: JournalRecord, height: number, context: ViewContext
         .add(item.message === undefined ? "" : `  ${item.message}`, "dim")
         .build(),
     );
+  }
+  if (omitted > 0n) {
+    lines.push(new LineBuilder(width).add(`  ${theme.glyphs.ellipsis} ${groupDigits(omitted)} more item(s) not listed here; 'disktop history --json' has the counts, and undo reads them all`, "muted").build());
   }
   return lines.slice(0, height);
 }

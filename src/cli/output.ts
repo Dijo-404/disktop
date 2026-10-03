@@ -417,5 +417,6 @@ export function encodeJournalRecord(record: JournalRecord): Record<string, unkno
       ...(item.message === undefined ? {} : { message: item.message }),
       bytes: decimalBytes(item.bytes),
     })),
+    ...(record.itemsOmitted === undefined || record.itemsOmitted === 0n ? {} : { itemsOmitted: decimalBytes(record.itemsOmitted) }),
   };
 }
