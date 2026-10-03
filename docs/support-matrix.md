@@ -9,7 +9,9 @@ Status: **release targets, not validated support claims**. Phase 0 has fixed the
 | Node.js | 24.21.0 LTS or 26.10.0 Current, within those major lines | The CLI refuses older and unsupported majors. npm checks `engines`, but may only warn unless `engine-strict` is enabled. |
 | Linux kernel for scanning and mutation | 5.6, for `openat2` with `RESOLVE_BENEATH` and `RESOLVE_NO_MAGICLINKS` | The helper's `hello` reports `openat2` unavailable with the errno reason; scans and every mutation are refused as `unsupported-kernel`. Inventory stays available. |
 | Kernel with `openat2` present but blocked (a seccomp policy, some container runtimes) | — | Identical to the above: probed at startup, refused explicitly, never retried through an unsafe path. |
-| Architecture and libc | x86-64 or ARM64, glibc or musl | No bundled binary matches; `unsupported-architecture`, helper-backed features disabled, inventory still available. |
+| Architecture and libc | x86-64 or ARM64, glibc or musl | No bundled binary matches; `unsupported-architecture`, helper-backed features disabled, inventory still available. `package.json` deliberately declares no `cpu`, because npm would then refuse the install and take the inventory away too. |
+| glibc, for the glibc helper builds | 2.28 (Debian 10, RHEL 8, Ubuntu 20.04 and later) | Node 24's own Linux binaries need 2.28, so Node does not start below it. The helpers ask for no newer symbol; `scripts/build-release.mjs` refuses a build that does. |
+| musl, for the musl helper builds | any; the builds are static | Selected when Node itself runs on musl (Alpine and others). |
 | Operating system | Linux, enforced by `os` in `package.json` | Not installable. The macOS adapter boundary exists; no macOS behaviour ships in `1.0.0`. |
 
 `openat2` is the hard floor because containment is what the safety rules rest on; there
@@ -23,13 +25,28 @@ owns traversal.
 | --- | --- | --- |
 | Node.js | 24 LTS baseline; 26 Current compatibility | CLI, TUI, reports, and packed-package smoke tests on the latest patched release of each supported line. |
 | Linux kernel | 5.6 or newer for full native scan and mutation | Probe `openat2` and action behavior. Older or restricted kernels must show explicit unsupported states. |
-| x86-64 glibc | Bundled `disktop-fs` binary | Check checksum, permissions, protocol, and clean-account install. |
-| x86-64 musl | Bundled `disktop-fs` binary | Same checks in a musl environment. |
-| ARM64 glibc | Bundled `disktop-fs` binary | Same checks on ARM64. |
-| ARM64 musl | Bundled `disktop-fs` binary | Same checks on ARM64 musl. |
+| x86-64 glibc | `vendor/bin/disktop-fs-linux-x64-gnu` | Check checksum, permissions, protocol, and clean-account install. |
+| x86-64 musl | `vendor/bin/disktop-fs-linux-x64-musl` | Same checks in a musl environment. |
+| ARM64 glibc | `vendor/bin/disktop-fs-linux-arm64-gnu` | Same checks on ARM64. |
+| ARM64 musl | `vendor/bin/disktop-fs-linux-arm64-musl` | Same checks on ARM64 musl. |
 | macOS | Platform boundary only | No macOS behavior promised in Linux `1.0.0`. |
 
 The package must select a binary without running a Rust compiler during installation. If there is no matching helper or required kernel primitive, inventory and other safe read-only functions may remain available, but unsupported scans or actions must be disabled explicitly. Binary packaging and integrity checks are a publication gate.
+
+### What CI runs for each target
+
+`scripts/build-release.mjs` builds all four helpers on every push, and the publish
+workflow builds the release the same way; see [adr/0003](adr/0003-prebuilt-binary-packaging.md).
+
+| Check | Where it runs |
+| --- | --- |
+| Build `--release --locked` with `cargo zigbuild`; ELF machine, interpreter, stripping, and glibc floor checked against each name; `SHA256SUMS` written and checked with `sha256sum --check --strict` | x86-64 runner, all four targets |
+| `hello` handshake: package version and a release build checksum | each glibc build on its own runner (Ubuntu 24.04) and on AlmaLinux 8 (glibc 2.28); each musl build on Alpine and on the glibc runner |
+| Package smoke test: allowlist, modes, checksums, global install and `npm exec` with a throwaway home and npm cache, `--help`, `--version`, `--json`, `devices --json`, a scan through the packaged helper, and refusal of a tampered helper or `SHA256SUMS` | Node 24 and 26 on x86-64 and ARM64 runners (glibc builds); `node:24-alpine` on x86-64 and ARM64 (musl builds); Ubuntu, Fedora, and Arch containers |
+| The publish artifact | the same smoke test on the one tarball that will be published: x86-64 glibc in the build job, then ARM64 glibc and x86-64 and ARM64 musl, each checked by SHA-256 first |
+
+Locally, `npm run test:package` runs the same smoke test once `vendor/bin/` holds this
+machine's helper (`node scripts/build-release.mjs --target host`).
 
 Node 24 remains the [LTS baseline](https://nodejs.org/en/about/previous-releases). Security fixes are issued on maintained release lines, including [the July 2026 fixes for both 24.x and 26.x](https://nodejs.org/en/blog/vulnerability/july-2026-security-releases), so a newer major alone is not a security update. The minimum versions above include the published fixes available on 2026-09-30; users should keep their chosen supported line at its latest security release. Node 25 is end of life and is not a supported runtime.
 
@@ -37,9 +54,9 @@ Node 24 remains the [LTS baseline](https://nodejs.org/en/about/previous-releases
 
 | Environment | Planned checks | Current status |
 | --- | --- | --- |
-| Ubuntu | TypeScript/Rust checks, dpkg and apt adapters, integration tests, PTY tests, packed install. | Not validated. |
-| Fedora | rpm/dnf adapters and Linux integration tests in container or VM. | Not validated. |
-| Arch | pacman adapter and Linux integration tests in container or VM. | Not validated. |
+| Ubuntu | TypeScript/Rust checks, dpkg and apt adapters, integration tests, PTY tests, packed install. | CI container (`ubuntu:24.04`): PTY tests, inventory, and the package smoke test as an unprivileged account; a root-owned global install run as root. Adapters not validated. |
+| Fedora | rpm/dnf adapters and Linux integration tests in container or VM. | CI container (`fedora:latest`): the same checks. Adapters not validated. |
+| Arch | pacman adapter and Linux integration tests in container or VM. | CI container (`archlinux:latest`): the same checks. Adapters not validated. |
 | Host or VM with systemd and representative mounts | User timer, scoped privilege, mount topology, SMART where hardware permits, Btrfs/ZFS where available. | Not validated. |
 | WSL | Detect Windows mounts and exclude `/mnt/c` by default; explicit selection behavior. | Not validated. |
 | tmux and SSH terminal | 80×24 layout, mouse fallback, `NO_COLOR`, ASCII rendering, and terminal restoration. | Not validated. |
