@@ -556,11 +556,16 @@ It compiles to the same `EntryFilter` as `explore`'s flags.
 A plan is reviewed in a dialog showing its operation, whether and how it can be undone,
 the selected bytes and item count, the permission it needs, its expiry, its warnings,
 and its entries. `y` applies a reversible plan; an irreversible one needs `yes` typed
-and Enter. `o` re-plans with the finding's other operation. The TUI plans Trash,
-permanent removal, emptying Trash, and manager actions, and for a copy in a duplicate
-group offers Trash or a hardlink replacement (byte-compared by the helper) — never a
-plain permanent removal; move and compress need a destination and are planned with
-`clean plan`. A plan that needs root
+and Enter. `o` re-plans with the next operation on offer. The TUI plans Trash,
+permanent removal, emptying Trash, manager actions, and — for an Explore entry, or a
+finding that offers them — a move to another disk and a compression; for a copy in a
+duplicate group it offers Trash or a hardlink replacement (byte-compared by the helper)
+and never a plain permanent removal. A move or a compression asks first, in a dialog
+that plans nothing, for the directory its output goes into (absolute, or `~/` for
+home; a compression left empty goes beside its source) and, with Tab, whether the
+source then goes to Trash or is removed permanently — the same `--destination` and
+`--source` that `clean plan` takes. The last answer is offered again, and `o` on a
+move review asks again for a compression with it. A plan that needs root
 suspends the TUI while `sudo` or `pkexec` asks for the password, then takes the
 terminal back. Results keep selected bytes, bytes moved to Trash, and the observed
 free-space change apart, as `clean apply --json` does.

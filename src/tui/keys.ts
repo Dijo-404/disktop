@@ -36,6 +36,8 @@ export type Intent =
   | { readonly kind: "backspace" }
   | { readonly kind: "submit" }
   | { readonly kind: "clear-input" }
+  /** Flip the one choice a typed field has beside it, such as Trash or permanent. */
+  | { readonly kind: "toggle" }
   | { readonly kind: "none" };
 
 /** Intents for a key while the user is typing into a field. */
@@ -53,6 +55,8 @@ export function textIntentForKey(key: string): Intent {
       return { kind: "backspace" };
     case "CTRL_U":
       return { kind: "clear-input" };
+    case "TAB":
+      return { kind: "toggle" };
     default:
       return isPrintable(key) ? { kind: "type", text: key } : { kind: "none" };
   }

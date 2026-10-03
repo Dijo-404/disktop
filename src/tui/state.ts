@@ -3,7 +3,7 @@ import type { DecidedGroup } from "../application/duplicates.js";
 import type { FootprintSummary } from "../application/footprint.js";
 import type { ApplyOutcome } from "../application/apply-action.js";
 import type { UndoOutcome } from "../application/undo.js";
-import type { ActionOperation, ActionPlan } from "../domain/actions.js";
+import type { ActionOperation, ActionPlan, SourceDisposition } from "../domain/actions.js";
 import type { DuplicateFile } from "../domain/duplicates.js";
 import type { OperationFailure } from "../domain/errors.js";
 import type { Finding, FindingCategory } from "../domain/findings.js";
@@ -157,6 +157,25 @@ export type Dialog =
       readonly path?: RawPath;
       /** For a duplicate copy: the copy a hardlink replacement would keep, and this one. */
       readonly pair?: { readonly keep: RawPath; readonly copy: RawPath };
+      /** For a move or a compression: what the destination dialog was told. */
+      readonly asked?: DestinationAnswer;
+    }
+  | {
+      /**
+       * Where a move or a compression publishes, asked before anything is
+       * planned. It only plans: the review that follows is what applies.
+       */
+      readonly kind: "destination";
+      readonly operation: "move" | "compress";
+      /** The destination as typed; `~/` means the home directory. */
+      readonly text: string;
+      readonly disposition: SourceDisposition;
+      readonly alternatives: readonly ActionOperation[];
+      readonly origin: "finding" | "path";
+      readonly findingId?: string;
+      readonly path?: RawPath;
+      /** Why the last Enter was refused, shown in the dialog until the next edit. */
+      readonly error?: string;
     }
   | { readonly kind: "applied"; readonly outcome: ApplyOutcome }
   | { readonly kind: "undo-confirm"; readonly record: JournalRecord }
@@ -165,6 +184,27 @@ export type Dialog =
   | { readonly kind: "unavailable"; readonly title: string; readonly capability: Capability }
   | { readonly kind: "confirm-scan"; readonly path: RawPath; readonly reason: string }
   | { readonly kind: "finding"; readonly finding: Finding; readonly scroll: number };
+
+export interface DestinationAnswer {
+  readonly text: string;
+  readonly disposition: SourceDisposition;
+}
+
+/** Operations that publish an output, and so ask where before they are planned. */
+export function needsDestination(operation: ActionOperation): operation is "move" | "compress" {
+  return operation === "move" || operation === "compress";
+}
+
+/**
+ * The operation `o` offers after `current`: the next one along, round to the
+ * first. An irreversible review takes typed input and has no `o`, which is why
+ * callers list the irreversible operations last.
+ */
+export function nextOperation(alternatives: readonly ActionOperation[], current: ActionOperation): ActionOperation | undefined {
+  const index = alternatives.indexOf(current);
+  const next = alternatives[(index + 1) % alternatives.length];
+  return next === current ? undefined : next;
+}
 
 export interface Prompt {
   readonly kind: "search";
