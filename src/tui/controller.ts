@@ -442,7 +442,7 @@ export class TuiController {
             this.#set({ ...state, dialog: { ...dialog, typed: "" } });
           } else if (intent.kind === "submit") {
             if (dialog.typed.trim().toLowerCase() === "yes") {
-              this.#apply(dialog.plan);
+              this.#apply(dialog.plan, dialog.origin);
             } else {
               this.#set(withNotice(state, "Type yes to apply this irreversible plan, or press Esc.", "warn"));
             }
@@ -450,7 +450,7 @@ export class TuiController {
           return;
         }
         if (intent.kind === "confirm") {
-          this.#apply(dialog.plan);
+          this.#apply(dialog.plan, dialog.origin);
         } else if (intent.kind === "operation") {
           const others = dialog.alternatives.filter((operation) => operation !== dialog.plan.operation);
           const next = others[0];
@@ -1250,7 +1250,7 @@ export class TuiController {
     });
   }
 
-  #apply(plan: ActionPlan): void {
+  #apply(plan: ActionPlan, origin: "finding" | "path"): void {
     const privileged = plan.permission === "manager-privilege";
     this.#set(withoutDialog(this.#state));
     this.#run("apply", { label: "Applying", detail: plan.scopeSummary, cancellable: false }, async (signal) => {
@@ -1273,7 +1273,12 @@ export class TuiController {
         // What was freed shows on the Disks tab, and the action in History.
         this.#refreshInventory(false);
         this.#set({ ...this.#state, history: { ...this.#state.history, loaded: false } });
-        if (this.#state.findings.summary !== undefined) {
+        // A stored scan and a list of findings are readings from before the
+        // action. They are left as they were and labelled, never edited to look
+        // like a fresh measurement.
+        if (origin === "path") {
+          this.#set(withNotice(this.#state, "The stored scan still lists what was moved until the next scan (S).", "info"));
+        } else if (this.#state.findings.summary !== undefined) {
           this.#set(withNotice(this.#state, "Findings were measured before this action; press r on Clean to look again.", "info"));
         }
       }
