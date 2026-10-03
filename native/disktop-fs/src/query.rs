@@ -166,8 +166,8 @@ pub struct QueryPage {
 /// One page, plus the cursor that continues it when more rows remain.
 pub fn query(connection: &Connection, request: &QueryRequest) -> rusqlite::Result<QueryPage> {
     let limit = request.limit.clamp(1, MAX_LIMIT);
-    let mut clauses = vec!["scan_id = ?".to_owned()];
-    let mut arguments: Vec<Value> = vec![Value::Text(request.scan_id.clone())];
+    let mut clauses: Vec<String> = Vec::new();
+    let mut arguments: Vec<Value> = Vec::new();
     push_filters(&request.filter, &mut clauses, &mut arguments);
 
     if let Some(cursor) = &request.cursor {
@@ -189,7 +189,11 @@ pub fn query(connection: &Connection, request: &QueryRequest) -> rusqlite::Resul
                 apparent_bytes, allocated_bytes, owner_id, modified_ns, shared, child_entries,
                 broken
          FROM entry WHERE {} ORDER BY {} {}, id {} LIMIT ?",
-        clauses.join(" AND "),
+        if clauses.is_empty() {
+            "1".to_owned()
+        } else {
+            clauses.join(" AND ")
+        },
         request.sort.column(),
         request.order.keyword(),
         request.order.keyword(),
@@ -266,12 +270,8 @@ fn owner_totals(
     connection: &Connection,
     request: &QueryRequest,
 ) -> rusqlite::Result<Vec<OwnerTotal>> {
-    let mut clauses = vec![
-        "scan_id = ?".to_owned(),
-        "kind = 0".to_owned(),
-        "shared = 0".to_owned(),
-    ];
-    let mut arguments: Vec<Value> = vec![Value::Text(request.scan_id.clone())];
+    let mut clauses = vec!["kind = 0".to_owned(), "shared = 0".to_owned()];
+    let mut arguments: Vec<Value> = Vec::new();
     let filter = EntryFilter {
         under: request.filter.under,
         parent_id: request.filter.parent_id,
@@ -318,12 +318,8 @@ fn type_totals(
     connection: &Connection,
     request: &QueryRequest,
 ) -> rusqlite::Result<Vec<TypeTotal>> {
-    let mut clauses = vec![
-        "scan_id = ?".to_owned(),
-        "kind = 0".to_owned(),
-        "shared = 0".to_owned(),
-    ];
-    let mut arguments: Vec<Value> = vec![Value::Text(request.scan_id.clone())];
+    let mut clauses = vec!["kind = 0".to_owned(), "shared = 0".to_owned()];
+    let mut arguments: Vec<Value> = Vec::new();
     let mut filter = EntryFilter {
         under: request.filter.under,
         parent_id: request.filter.parent_id,
@@ -491,7 +487,12 @@ mod tests {
         };
         let totals = walk(&options, &mut writer, &AtomicBool::new(false)).unwrap();
         writer.finish(&totals, &limits).unwrap();
-        (crate::index::open(&index_directory).unwrap(), scan_id)
+        (
+            crate::index::open_scan(&index_directory, &scan_id)
+                .unwrap()
+                .unwrap(),
+            scan_id,
+        )
     }
 
     fn request(scan_id: &str) -> QueryRequest {
@@ -703,7 +704,9 @@ mod subtree_tests {
         let totals = walk(&options, &mut writer, &AtomicBool::new(false)).unwrap();
         writer.finish(&totals, &limits).unwrap();
         (
-            index::open(&index_directory).unwrap(),
+            index::open_scan(&index_directory, &scan_id)
+                .unwrap()
+                .unwrap(),
             scan_id,
             index_directory,
         )
@@ -721,7 +724,7 @@ mod subtree_tests {
         let (connection, scan_id, _index) = scan(&sandbox, "filter");
         let mut under = sandbox.bytes();
         under.extend_from_slice(b"/inside");
-        let range = index::subtree_range(&connection, &scan_id, &under)
+        let range = index::subtree_range(&connection, &under)
             .unwrap()
             .expect("the path is in this scan");
 
@@ -767,20 +770,14 @@ mod subtree_tests {
     fn a_path_that_is_not_in_the_scan_resolves_to_nothing_rather_than_everything() {
         let sandbox = Sandbox::new("query-subtree-missing");
         sandbox.file(b"a.bin", 10);
-        let (connection, scan_id, _index) = scan(&sandbox, "missing");
+        let (connection, _scan_id, _index) = scan(&sandbox, "missing");
 
         let mut absent = sandbox.bytes();
         absent.extend_from_slice(b"/never-created");
-        assert_eq!(
-            index::subtree_range(&connection, &scan_id, &absent).unwrap(),
-            None
-        );
+        assert_eq!(index::subtree_range(&connection, &absent).unwrap(), None);
 
         // A path above the scan root is not in the scan either.
-        assert_eq!(
-            index::subtree_range(&connection, &scan_id, b"/").unwrap(),
-            None
-        );
+        assert_eq!(index::subtree_range(&connection, b"/").unwrap(), None);
     }
 
     #[test]
@@ -792,9 +789,7 @@ mod subtree_tests {
 
         let mut target = sandbox.bytes();
         target.extend_from_slice(b"/only.bin");
-        let range = index::subtree_range(&connection, &scan_id, &target)
-            .unwrap()
-            .unwrap();
+        let range = index::subtree_range(&connection, &target).unwrap().unwrap();
 
         let page = query(
             &connection,

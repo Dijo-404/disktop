@@ -30,7 +30,6 @@ pub const MAX_GROUPS: u32 = 1000;
 pub const MAX_FILES_PER_GROUP: u32 = 1000;
 
 pub struct Request {
-    pub scan_id: String,
     /// The primary-key range of the path being searched, from `subtree_range`.
     pub under: Option<(i64, i64)>,
     /// Files below this size are not candidates. Zero-length files are all
@@ -84,12 +83,7 @@ pub fn find(
         files_hashed: 0,
     };
 
-    let classes = index::size_candidates(
-        connection,
-        &request.scan_id,
-        request.under,
-        request.minimum_bytes.max(1),
-    )?;
+    let classes = index::size_candidates(connection, request.under, request.minimum_bytes.max(1))?;
     let mut resolver = index::PathResolver::new(connection);
 
     let maximum_groups = request.maximum_groups.min(MAX_GROUPS);
@@ -340,12 +334,16 @@ mod tests {
         };
         let totals = walk(&options, &mut writer, &AtomicBool::new(false)).unwrap();
         writer.finish(&totals, &limits).unwrap();
-        (index::open(&index_directory).unwrap(), scan_id)
+        (
+            index::open_scan(&index_directory, &scan_id)
+                .unwrap()
+                .unwrap(),
+            scan_id,
+        )
     }
 
-    fn request(scan_id: &str) -> Request {
+    fn request(_scan_id: &str) -> Request {
         Request {
-            scan_id: scan_id.to_owned(),
             under: None,
             minimum_bytes: 1,
             maximum_groups: MAX_GROUPS,
@@ -611,7 +609,7 @@ mod tests {
         let (connection, scan_id) = scanned(&sandbox, "subtree");
         let mut under = sandbox.bytes();
         under.extend_from_slice(b"/inside");
-        let range = index::subtree_range(&connection, &scan_id, &under)
+        let range = index::subtree_range(&connection, &under)
             .unwrap()
             .expect("the path is in this scan");
 

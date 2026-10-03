@@ -804,6 +804,46 @@ impl ScanSink for ReportingSink<'_> {
     }
 }
 
+/// Open one finished scan, or answer the request with why not.
+///
+/// A scan ID names a file in the index directory, so one that could not be a
+/// scan ID is refused as an argument rather than looked up. A scan the index
+/// no longer holds is routine — the cache rolls over — and is answered as
+/// `unknown-request` so a client can say "run a new scan" rather than "error".
+fn open_scan(
+    responder: &Responder,
+    index_directory: &std::path::Path,
+    scan_id: &str,
+) -> Option<rusqlite::Connection> {
+    if !crate::index::valid_scan_id(scan_id) {
+        fail(
+            responder,
+            "invalid-arguments",
+            "scanId must be 8 to 128 ASCII letters, digits, '.', '-', or '_'",
+        );
+        return None;
+    }
+    match crate::index::open_scan(index_directory, scan_id) {
+        Ok(Some(connection)) => Some(connection),
+        Ok(None) => {
+            fail(
+                responder,
+                "unknown-request",
+                "That scan is not in the index. It may have been pruned; run a new scan.",
+            );
+            None
+        }
+        Err(error) => {
+            fail(
+                responder,
+                "internal-error",
+                &format!("The index could not be read: {error}"),
+            );
+            None
+        }
+    }
+}
+
 fn query_index(responder: &Responder, arguments: Map<String, Value>) {
     let arguments: QueryIndexArguments = match decode(arguments) {
         Ok(arguments) => arguments,
@@ -819,41 +859,16 @@ fn query_index(responder: &Responder, arguments: Map<String, Value>) {
         Err(message) => return fail(responder, "invalid-arguments", &message),
     };
 
-    let connection = match crate::index::open(&index_directory) {
-        Ok(connection) => connection,
-        Err(error) => {
-            return fail(
-                responder,
-                "internal-error",
-                &format!("The index could not be opened: {error}"),
-            );
-        }
+    let Some(connection) = open_scan(responder, &index_directory, &request.scan_id) else {
+        return;
     };
-
-    match crate::index::scan_exists(&connection, &request.scan_id) {
-        Ok(true) => {}
-        Ok(false) => {
-            return fail(
-                responder,
-                "unknown-request",
-                "That scan is not in the index. It may have been pruned; run a new scan.",
-            );
-        }
-        Err(error) => {
-            return fail(
-                responder,
-                "internal-error",
-                &format!("The index could not be read: {error}"),
-            );
-        }
-    }
 
     if let Some(encoded) = &arguments.filter.under_path {
         let path = match decode_path(encoded) {
             Ok(path) => path,
             Err(message) => return fail(responder, "invalid-arguments", &message),
         };
-        match crate::index::subtree_range(&connection, &request.scan_id, &path) {
+        match crate::index::subtree_range(&connection, &path) {
             // A path the scan never saw is refused by name. An empty page
             // would read as "there is nothing under there".
             Ok(None) => {
@@ -1017,37 +1032,13 @@ fn hash_candidates(server: &Arc<Server>, responder: Responder, arguments: Map<St
         return fail(&responder, "unsupported-kernel", &message);
     }
 
-    let connection = match crate::index::open(&index_directory) {
-        Ok(connection) => connection,
-        Err(error) => {
-            return fail(
-                &responder,
-                "internal-error",
-                &format!("The index could not be opened: {error}"),
-            );
-        }
+    let Some(connection) = open_scan(&responder, &index_directory, &arguments.scan_id) else {
+        return;
     };
-    match crate::index::scan_exists(&connection, &arguments.scan_id) {
-        Ok(true) => {}
-        Ok(false) => {
-            return fail(
-                &responder,
-                "unknown-request",
-                "That scan is not in the index. It may have been pruned; run a new scan.",
-            );
-        }
-        Err(error) => {
-            return fail(
-                &responder,
-                "internal-error",
-                &format!("The index could not be read: {error}"),
-            );
-        }
-    }
 
     let under = match under_path {
         None => None,
-        Some(path) => match crate::index::subtree_range(&connection, &arguments.scan_id, &path) {
+        Some(path) => match crate::index::subtree_range(&connection, &path) {
             // A path the scan never saw is refused by name; no groups would
             // read as "there are no duplicates under there".
             Ok(None) => {
@@ -1069,8 +1060,8 @@ fn hash_candidates(server: &Arc<Server>, responder: Responder, arguments: Map<St
     };
     drop(connection);
 
+    let scan_id = arguments.scan_id;
     let request = duplicates::Request {
-        scan_id: arguments.scan_id,
         under,
         minimum_bytes,
         maximum_groups: arguments.maximum_groups.unwrap_or(duplicates::MAX_GROUPS),
@@ -1087,15 +1078,8 @@ fn hash_candidates(server: &Arc<Server>, responder: Responder, arguments: Map<St
         move |responder, cancelled| {
             // The connection is opened on the worker thread: a rusqlite
             // connection belongs to the thread that made it.
-            let connection = match crate::index::open(&index_directory) {
-                Ok(connection) => connection,
-                Err(error) => {
-                    return fail(
-                        responder,
-                        "internal-error",
-                        &format!("The index could not be opened: {error}"),
-                    );
-                }
+            let Some(connection) = open_scan(responder, &index_directory, &scan_id) else {
+                return;
             };
             match duplicates::find(&connection, &request, cancelled) {
                 Ok(report) => {

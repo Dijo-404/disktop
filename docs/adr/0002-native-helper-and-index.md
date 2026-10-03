@@ -24,6 +24,10 @@ normalized searchable column, parents are referenced by ID rather than by repeat
 paths, and size, extension, timestamp, and owner are indexed. Node asks for filtered,
 sorted, paginated results; it never receives the whole tree.
 
+Each scan is its own SQLite file, appended to without secondary indexes while the walk
+runs, indexed once when it ends, and published by a rename; from then on it is only
+read. Pruning a scan removes its file.
+
 ## Consequences
 
 Node memory is a function of page size, not entry count, which is what makes the budget
