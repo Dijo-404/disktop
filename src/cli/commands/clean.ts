@@ -1,3 +1,4 @@
+import { sanitizeText } from "../../domain/paths.js";
 import type { FootprintRequest } from "../../application/footprint.js";
 import { FINDING_CATEGORIES, type FindingCategory } from "../../domain/findings.js";
 import type { CliContext } from "../context.js";
@@ -134,7 +135,7 @@ function refuse(context: CliContext, asJson: boolean, message: string): number {
       }),
     );
   } else {
-    context.output.stderr(`${message}\n`);
+    context.output.stderr(`${sanitizeText(message)}\n`);
   }
   return EXIT.operationalError;
 }

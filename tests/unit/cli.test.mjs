@@ -278,3 +278,20 @@ test("an argument whose bytes were not UTF-8 is refused, because it no longer na
     assert.match(result.message, /not valid UTF-8/);
   }
 });
+
+test("every refusal that quotes what was typed prints it without its escape sequences", async () => {
+  const hostile = "x\u001b]0;owned\u0007\u009b2J";
+  for (const args of [
+    ["snapshots", hostile],
+    ["snapshots", "diff", "--from", hostile],
+    ["find", hostile],
+    ["timer", hostile],
+    ["undo", hostile],
+    ["clean", "--category", hostile],
+    ["explore", "--sort", "name", "--cursor", hostile],
+  ]) {
+    const context = fakeContext();
+    await runCli(args, context);
+    assert.doesNotMatch(context.captured.stderr, /[\u001b\u0007\u009b]/, JSON.stringify(args));
+  }
+});
