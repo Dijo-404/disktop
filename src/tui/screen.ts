@@ -61,7 +61,7 @@ export function renderScreen(state: AppState, size: ScreenSize, options: ScreenO
     height: bodyHeight,
     top: bodyTop,
     now: options.now,
-    threshold: state.disks.view.alerts[0]?.thresholdPercent ?? 90,
+    threshold: options.threshold,
   };
   const tabs = tabLine(state, columns, 1);
   const view = viewFor(context, options.home);

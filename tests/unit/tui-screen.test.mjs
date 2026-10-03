@@ -194,3 +194,11 @@ test("rows can be clicked: every listed row and every tab has a region", () => {
     assert.ok(hit.row >= 0 && hit.row < 24 && hit.from < hit.to);
   }
 });
+
+test("the configured space threshold colours the bars, not a fixed 90", () => {
+  const at = (threshold) =>
+    renderScreen(BASE, MINIMUM_SIZE, { theme: UNICODE, now: NOW, threshold, home: HOME }).lines[3].spans.map((span) => span.style);
+  // The root filesystem is 52% used: past a 50% threshold, comfortably under 90%.
+  assert.ok(at(50).includes("barDanger"));
+  assert.ok(!at(90).includes("barDanger"));
+});
