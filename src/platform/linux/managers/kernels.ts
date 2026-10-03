@@ -8,6 +8,13 @@ export interface KernelPorts {
   readonly tools: ToolPort;
   readonly runningRelease: () => string;
   readonly installed: (tool: string) => Promise<boolean>;
+  /** Releases with modules installed under /lib/modules: what is really a kernel here. */
+  readonly kernelReleases: () => Promise<ReadonlySet<string>>;
+}
+
+/** `-unsigned`, `-dbg`, and `-dbgsym` packages belong to the release they name. */
+export function normalizeRelease(release: string): string {
+  return release.replace(/(-unsigned|-dbgsym|-dbg)+$/, "");
 }
 
 interface Installed {
@@ -70,7 +77,7 @@ export function createKernelAdapter(ports: KernelPorts): ManagerAdapter {
         }
         packages.push({
           name,
-          release: name.slice(prefix.length),
+          release: normalizeRelease(name.slice(prefix.length)),
           ...(size !== undefined && /^[0-9]+$/.test(size) ? { bytes: BigInt(size) * 1024n } : {}),
         });
       }
@@ -136,8 +143,14 @@ export function createKernelAdapter(ports: KernelPorts): ManagerAdapter {
     };
   }
 
-  function select(packages: readonly Installed[], running: string): readonly Installed[] {
-    const releases = [...new Set(packages.filter((entry) => !entry.name.startsWith("linux-headers-")).map((entry) => entry.release))];
+  function select(packages: readonly Installed[], running: string, verified: ReadonlySet<string>): readonly Installed[] {
+    const releases = [
+      ...new Set(
+        packages
+          .filter((entry) => !entry.name.startsWith("linux-headers-") && verified.has(entry.release))
+          .map((entry) => entry.release),
+      ),
+    ];
     if (releases.length < 2) {
       return [];
     }
@@ -174,7 +187,7 @@ export function createKernelAdapter(ports: KernelPorts): ManagerAdapter {
     }
     const running = ports.runningRelease();
     const pattern = MANAGER_ACTIONS[chosen.action].itemPattern as RegExp;
-    const candidates = select(packages, running).filter((entry) => pattern.test(entry.name));
+    const candidates = select(packages, running, await ports.kernelReleases()).filter((entry) => pattern.test(entry.name));
     if (candidates.length === 0) {
       return { adapter: "kernels", capability: { status: "available", explanation: "Only the running and the newest kernel are installed." }, proposals: [], warnings: [] };
     }
@@ -227,6 +240,18 @@ export function createKernelAdapter(ports: KernelPorts): ManagerAdapter {
       const chosen = await family();
       if ("adapter" in chosen) {
         return { refusal: chosen.capability.explanation, skipped: new Map() };
+      }
+      const packages = await chosen.list();
+      if (packages === undefined) {
+        return { refusal: "The package database could not be read, so nothing was run.", skipped: new Map() };
+      }
+      const current = new Set(select(packages, running, await ports.kernelReleases()).map((entry) => entry.name));
+      const stale = names.find((name) => !current.has(name));
+      if (stale !== undefined) {
+        return {
+          refusal: `${sanitizeText(stale)} is no longer an old kernel here: it may be the running or the newest one now. Nothing was run.`,
+          skipped: new Map(),
+        };
       }
       const simulation = await chosen.simulate(names);
       if (simulation === undefined || simulation.extra.length > 0) {
