@@ -21,6 +21,7 @@ use crate::guard::{self, Fingerprint, Guard, GuardContext};
 use crate::journal::{Counts, Identity, Journal, Outcome, State};
 use crate::sys::{self, EntryKind};
 use crate::transfer;
+use std::os::fd::{AsRawFd, FromRawFd};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 
@@ -40,6 +41,9 @@ pub(crate) enum Checkpoint {
     Staged,
     /// An output was published and the source is about to be dealt with.
     Published,
+    /// A duplicate's bytes matched the kept file's and its name is about to
+    /// be exchanged for a link to it.
+    Compared,
 }
 
 #[cfg(test)]
@@ -413,8 +417,10 @@ fn hardlink_one(
         );
     }
 
-    let descriptor = match sys::openat_read_no_symlinks(parent.descriptor(), &parent.name) {
-        Ok(descriptor) => descriptor,
+    // Held open until the exchange has happened, so what the exchange swapped
+    // out can be checked against the very inode whose bytes were compared.
+    let compared = match sys::openat_read_no_symlinks(parent.descriptor(), &parent.name) {
+        Ok(descriptor) => unsafe { std::os::fd::OwnedFd::from_raw_fd(descriptor) },
         Err(error) => {
             return refuse(
                 "permission-denied",
@@ -423,10 +429,19 @@ fn hardlink_one(
             );
         }
     };
+    // The name was opened a moment after it was revalidated, and could have
+    // been replaced in between. The bytes compared have to be the reviewed
+    // inode's.
+    if !same_file(compared.as_raw_fd(), &live) {
+        return refuse(
+            "changed-target",
+            CHANGED_AFTER_REVIEW.to_owned(),
+            Outcome::Skipped,
+        );
+    }
     // The gate. A digest said these were probably identical; this is the only
     // thing that says they are. See docs/adr/0006.
-    let identical = content::bytes_equal(keep.descriptor, descriptor);
-    sys::close(descriptor);
+    let identical = content::bytes_equal(keep.descriptor, compared.as_raw_fd());
     match identical {
         Ok(true) => {}
         Ok(false) => {
@@ -495,6 +510,8 @@ fn hardlink_one(
         );
     }
 
+    checkpoint(Checkpoint::Compared);
+
     // After this the reviewed name holds the kept inode and the staging name
     // holds the old one. The name never points at nothing in between.
     if let Err(error) = sys::renameat_exchange(
@@ -528,6 +545,59 @@ fn hardlink_one(
             target,
             refuse(code, message, Outcome::Failed),
         );
+    }
+
+    // The exchange took whatever was under the name at that instant, which is
+    // not necessarily what was compared: an editor saves by renaming a new
+    // file over the old one, and a program can write into the old one. What
+    // the staging name holds now has to be the inode that was compared,
+    // unchanged since it was reviewed, before releasing it is anything but a
+    // guess. Anything else is exchanged straight back.
+    let swapped_out = sys::metadata_at(parent.descriptor(), &staging);
+    let unchanged = matches!(&swapped_out, Ok(held) if held.device == live.device && held.inode == live.inode)
+        && same_file(compared.as_raw_fd(), &live);
+    drop(compared);
+    if !unchanged {
+        let report = match sys::renameat_exchange(
+            parent.descriptor(),
+            &staging,
+            parent.descriptor(),
+            &parent.name,
+        ) {
+            Ok(()) => {
+                // The staging name holds the link to the kept file again, and
+                // removing a link to a file that has other names frees nothing.
+                let kept_link = sys::metadata_at(parent.descriptor(), &staging).is_ok_and(|held| {
+                    held.device == keep.metadata.device && held.inode == keep.metadata.inode
+                });
+                if kept_link {
+                    let _ = sys::unlinkat(parent.descriptor(), &staging, false);
+                }
+                record.forget();
+                refuse(
+                    "changed-target",
+                    "It changed after its bytes were compared, so it was put back under its \
+                     name exactly as it now is and left alone."
+                        .to_owned(),
+                    Outcome::Skipped,
+                )
+            }
+            Err(error) => {
+                // Nothing is removed: the staging name holds what was under
+                // the reviewed name, and it stays there for somebody to see.
+                refuse(
+                    "changed-target",
+                    format!(
+                        "It changed after its bytes were compared and could not be put back: \
+                         what was under its name is now '{}' in the same directory, and the \
+                         name holds a link to the kept file: {error}",
+                        String::from_utf8_lossy(&staging),
+                    ),
+                    Outcome::Uncertain,
+                )
+            }
+        };
+        return settle(journal, journal_id, position, target, report);
     }
 
     // Removing the staging name releases the old inode, if this was its last
@@ -565,6 +635,20 @@ fn hardlink_one(
         bytes: freed,
     };
     settle(journal, journal_id, position, target, report)
+}
+
+const CHANGED_AFTER_REVIEW: &str =
+    "The live entry differs from the one the plan reviewed; nothing was changed.";
+
+/// Whether an open file is still the reviewed inode, with the size and
+/// modification time it was reviewed with.
+fn same_file(descriptor: libc::c_int, reviewed: &sys::Metadata) -> bool {
+    sys::metadata_of(descriptor).is_ok_and(|now| {
+        now.device == reviewed.device
+            && now.inode == reviewed.inode
+            && now.apparent_bytes == reviewed.apparent_bytes
+            && now.modified_nanoseconds == reviewed.modified_nanoseconds
+    })
 }
 
 impl KeptFile {
@@ -3632,6 +3716,98 @@ mod tests {
             vec![std::ffi::OsString::from("data.bin")],
             "no archive, staged or published"
         );
+    }
+
+    fn linking(sandbox: &Sandbox, keep: &[u8], targets: &[&[u8]]) -> DedupHardlinkRequest {
+        DedupHardlinkRequest {
+            plan_id: "plan-0123456789abcd".to_owned(),
+            journal_directory: sandbox.path().join("state"),
+            keep: reviewed(&joined(sandbox, keep), 0),
+            targets: targets
+                .iter()
+                .map(|target| reviewed(&joined(sandbox, target), 0))
+                .collect(),
+        }
+    }
+
+    fn duplicates(label: &str) -> Sandbox {
+        let sandbox = Sandbox::new(label);
+        sandbox.directory(b"state");
+        sandbox.directory(b"work");
+        std::fs::write(sandbox.path().join("work/keep.txt"), b"the same words").unwrap();
+        std::fs::write(sandbox.path().join("work/copy.txt"), b"the same words").unwrap();
+        sandbox
+    }
+
+    fn leftovers(sandbox: &Sandbox) -> Vec<String> {
+        std::fs::read_dir(sandbox.path().join("work"))
+            .unwrap()
+            .flatten()
+            .map(|entry| entry.file_name().to_string_lossy().into_owned())
+            .filter(|name| name.starts_with(".disktop-link"))
+            .collect()
+    }
+
+    /// An editor saves by writing a new file and renaming it over the old
+    /// one. If that lands after the bytes were compared, the name no longer
+    /// holds what was compared, and exchanging it would swap the saved
+    /// version out and release it.
+    #[test]
+    fn a_duplicate_saved_over_after_the_compare_keeps_what_was_saved() {
+        let sandbox = duplicates("link-saved-over");
+        let request = linking(&sandbox, b"work/keep.txt", &[b"work/copy.txt"]);
+
+        let work = sandbox.path().join("work");
+        at_checkpoint(move |at| {
+            if at == Checkpoint::Compared {
+                std::fs::write(work.join("copy.txt.new"), b"an edit nobody reviewed").unwrap();
+                std::fs::rename(work.join("copy.txt.new"), work.join("copy.txt")).unwrap();
+            }
+        });
+        let (summary, items) =
+            collect(|report| run_dedup_hardlink(&request, report, &AtomicBool::new(false)));
+        summary.ok().expect("the replacement ran");
+
+        assert_eq!(items[0].outcome, Outcome::Skipped, "{:?}", items[0].message);
+        assert_eq!(items[0].reason, Some("changed-target"));
+        assert_eq!(
+            std::fs::read(sandbox.path().join("work/copy.txt")).unwrap(),
+            b"an edit nobody reviewed",
+            "the saved version is still under its name",
+        );
+        assert_eq!(
+            std::fs::read(sandbox.path().join("work/keep.txt")).unwrap(),
+            b"the same words"
+        );
+        assert!(leftovers(&sandbox).is_empty(), "{:?}", leftovers(&sandbox));
+    }
+
+    #[test]
+    fn a_duplicate_written_to_after_the_compare_keeps_what_was_written() {
+        let sandbox = duplicates("link-written-to");
+        let request = linking(&sandbox, b"work/keep.txt", &[b"work/copy.txt"]);
+
+        let copy = sandbox.path().join("work/copy.txt");
+        at_checkpoint(move |at| {
+            if at == Checkpoint::Compared {
+                append_to(&copy, b", and then some");
+            }
+        });
+        let (summary, items) =
+            collect(|report| run_dedup_hardlink(&request, report, &AtomicBool::new(false)));
+        summary.ok().expect("the replacement ran");
+
+        assert_eq!(items[0].outcome, Outcome::Skipped, "{:?}", items[0].message);
+        assert_eq!(
+            std::fs::read(sandbox.path().join("work/copy.txt")).unwrap(),
+            b"the same words, and then some",
+        );
+        assert_eq!(
+            std::fs::read(sandbox.path().join("work/keep.txt")).unwrap(),
+            b"the same words",
+            "the kept file did not take on the write",
+        );
+        assert!(leftovers(&sandbox).is_empty(), "{:?}", leftovers(&sandbox));
     }
 
     /// An item whose output was published and whose source could not then be
