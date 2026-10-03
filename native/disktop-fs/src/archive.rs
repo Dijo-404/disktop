@@ -13,10 +13,12 @@
 //! mount stops the item rather than being silently swallowed into the archive.
 
 use crate::sys::{self, EntryKind};
+use crate::transfer::check;
 use sha2::{Digest, Sha256};
 use std::io::{self, Read, Write};
 use std::os::fd::{AsRawFd, OwnedFd};
 use std::os::unix::io::{FromRawFd, RawFd};
+use std::sync::atomic::AtomicBool;
 
 /// Enough to be worth the time on a storage tool's archive, and not so much
 /// that compressing a virtual machine image takes an afternoon.
@@ -43,6 +45,7 @@ pub fn compress_file(
     name: &[u8],
     permissions: u32,
     on_created: &mut dyn FnMut(RawFd) -> io::Result<()>,
+    cancelled: &AtomicBool,
 ) -> io::Result<[u8; 32]> {
     let staged = sys::openat_create_exclusive(destination_parent, name, permissions)?;
     if let Err(error) = on_created(staged) {
@@ -56,6 +59,7 @@ pub fn compress_file(
         let mut buffer = vec![0u8; READ_BYTES];
         let mut offset = 0u64;
         loop {
+            check(cancelled)?;
             let read = pread(source, &mut buffer, offset)?;
             if read == 0 {
                 break;
@@ -74,18 +78,23 @@ pub fn compress_file(
 
 /// Read a staged `.zst` back the way a person recovering from it would, and
 /// report the digest of what comes out.
-pub fn verify_file(destination_parent: RawFd, name: &[u8]) -> io::Result<[u8; 32]> {
+pub fn verify_file(
+    destination_parent: RawFd,
+    name: &[u8],
+    cancelled: &AtomicBool,
+) -> io::Result<[u8; 32]> {
     // The decoder owns the descriptor from here on and closes it once, when it
     // is dropped, on every path out of this function.
     let mut decoder = zstd::stream::read::Decoder::new(Source::open(destination_parent, name)?)?;
-    digest_stream(&mut decoder)
+    digest_stream(&mut decoder, cancelled)
 }
 
 /// Digest everything a reader yields, a bounded buffer at a time.
-fn digest_stream(reader: &mut dyn Read) -> io::Result<[u8; 32]> {
+fn digest_stream(reader: &mut dyn Read, cancelled: &AtomicBool) -> io::Result<[u8; 32]> {
     let mut hasher = Sha256::new();
     let mut buffer = vec![0u8; READ_BYTES];
     loop {
+        check(cancelled)?;
         let read = reader.read(&mut buffer)?;
         if read == 0 {
             break;
@@ -106,6 +115,7 @@ pub fn compress_tree(
     name: &[u8],
     permissions: u32,
     on_created: &mut dyn FnMut(RawFd) -> io::Result<()>,
+    cancelled: &AtomicBool,
 ) -> io::Result<[u8; 32]> {
     let staged = sys::openat_create_exclusive(destination_parent, name, permissions)?;
     if let Err(error) = on_created(staged) {
@@ -129,7 +139,7 @@ pub fn compress_tree(
         });
         builder.follow_symlinks(false);
         let mut entries = 0u64;
-        append_children(&mut builder, source, root, &mut entries)?;
+        append_children(&mut builder, source, root, &mut entries, cancelled)?;
 
         let digesting = builder.into_inner()?;
         let digest: [u8; 32] = digesting.hasher.finalize().into();
@@ -165,23 +175,36 @@ impl<W: Write> Write for Digesting<W> {
 /// and the bytes are digested as they emerge. Comparing that against the digest
 /// taken while writing is what makes "it can be read back" a statement about
 /// the content rather than about the entry count.
-pub fn verify_tree(destination_parent: RawFd, name: &[u8]) -> io::Result<[u8; 32]> {
+pub fn verify_tree(
+    destination_parent: RawFd,
+    name: &[u8],
+    cancelled: &AtomicBool,
+) -> io::Result<[u8; 32]> {
     let mut decoder = zstd::stream::read::Decoder::new(Source::open(destination_parent, name)?)?;
-    digest_stream(&mut decoder)
+    digest_stream(&mut decoder, cancelled)
 }
 
 /// Walk a staged `.tar.zst` as an archive, so a malformed member is found.
 ///
 /// The digest says the bytes survived the round trip; this says they are still
 /// a tar anybody can unpack.
-pub fn readable_as_tar(destination_parent: RawFd, name: &[u8]) -> io::Result<u64> {
+pub fn readable_as_tar(
+    destination_parent: RawFd,
+    name: &[u8],
+    cancelled: &AtomicBool,
+) -> io::Result<u64> {
     let decoder = zstd::stream::read::Decoder::new(Source::open(destination_parent, name)?)?;
     let mut reader = tar::Archive::new(decoder);
     let mut entries = 0u64;
     let mut buffer = vec![0u8; READ_BYTES];
     for entry in reader.entries()? {
         let mut entry = entry?;
-        while entry.read(&mut buffer)? > 0 {}
+        loop {
+            check(cancelled)?;
+            if entry.read(&mut buffer)? == 0 {
+                break;
+            }
+        }
         entries += 1;
     }
     Ok(entries)
@@ -223,6 +246,7 @@ fn append_children<W: Write>(
     source: RawFd,
     root: &[u8],
     entries: &mut u64,
+    cancelled: &AtomicBool,
 ) -> io::Result<()> {
     let mut stack = vec![Frame::enter(owned(duplicate(source)?), root.to_vec())?];
     while let Some(frame) = stack.last_mut() {
@@ -230,6 +254,7 @@ fn append_children<W: Write>(
             stack.pop();
             continue;
         };
+        check(cancelled)?;
         let source = frame.source.as_raw_fd();
         let metadata = sys::metadata_at(source, &name)?;
         let mut path = frame.prefix.clone();
@@ -255,7 +280,11 @@ fn append_children<W: Write>(
                 stack.push(Frame::enter(child, path)?);
             }
             EntryKind::File => {
-                let mut reader = Member::new(Source::open(source, &name)?, metadata.apparent_bytes);
+                let mut reader = Member::new(
+                    Source::open(source, &name)?,
+                    metadata.apparent_bytes,
+                    cancelled,
+                );
                 let mut header = tar::Header::new_gnu();
                 header.set_entry_type(tar::EntryType::Regular);
                 header.set_size(metadata.apparent_bytes);
@@ -296,16 +325,18 @@ fn append_children<W: Write>(
 /// is misread, and a tail of zeros reads as the end of the archive, silently
 /// dropping the rest. A member that does not match its header is an error, and
 /// the archive is not published.
-struct Member {
+struct Member<'a> {
     source: Source,
     remaining: u64,
+    cancelled: &'a AtomicBool,
 }
 
-impl Member {
-    fn new(source: Source, length: u64) -> Member {
+impl<'a> Member<'a> {
+    fn new(source: Source, length: u64, cancelled: &'a AtomicBool) -> Member<'a> {
         Member {
             source,
             remaining: length,
+            cancelled,
         }
     }
 
@@ -322,11 +353,14 @@ impl Member {
     }
 }
 
-impl Read for Member {
+impl Read for Member<'_> {
     fn read(&mut self, buffer: &mut [u8]) -> io::Result<usize> {
         if self.remaining == 0 || buffer.is_empty() {
             return Ok(0);
         }
+        // A single member can be most of a large archive, so a cancel is
+        // heard inside it rather than only between members.
+        check(self.cancelled)?;
         let wanted = buffer
             .len()
             .min(usize::try_from(self.remaining).unwrap_or(usize::MAX));
@@ -441,6 +475,8 @@ mod tests {
     use crate::testing::Sandbox;
     use std::os::unix::io::AsRawFd;
 
+    static NOT_CANCELLED: AtomicBool = AtomicBool::new(false);
+
     /// The digest has to be over the archive's content, not over what the
     /// compressor emitted and not over a count of its members. A member
     /// rewritten to the same length while the archive is being built keeps the
@@ -462,6 +498,7 @@ mod tests {
             b"first.tar.zst",
             0o600,
             &mut |_| Ok(()),
+            &NOT_CANCELLED,
         )
         .expect("the archive is written");
 
@@ -475,6 +512,7 @@ mod tests {
             b"second.tar.zst",
             0o600,
             &mut |_| Ok(()),
+            &NOT_CANCELLED,
         )
         .expect("the second archive is written");
 
@@ -483,23 +521,23 @@ mod tests {
             "two archives of different content must not share a digest",
         );
         assert_eq!(
-            verify_tree(destination.as_raw_fd(), b"first.tar.zst").unwrap(),
+            verify_tree(destination.as_raw_fd(), b"first.tar.zst", &NOT_CANCELLED).unwrap(),
             written,
             "an archive reads back as what went into it",
         );
         assert_ne!(
-            verify_tree(destination.as_raw_fd(), b"second.tar.zst").unwrap(),
+            verify_tree(destination.as_raw_fd(), b"second.tar.zst", &NOT_CANCELLED).unwrap(),
             written,
             "an archive of other bytes does not pass the first one's check",
         );
     }
 
-    fn member_over(sandbox: &Sandbox, bytes: usize, length: u64) -> Member {
+    fn member_over(sandbox: &Sandbox, bytes: usize, length: u64) -> Member<'static> {
         sandbox.file(b"member.bin", bytes);
         let parent = sys::open_root(&sandbox.bytes()).unwrap();
         let source = Source::open(parent, b"member.bin").unwrap();
         sys::close(parent);
-        Member::new(source, length)
+        Member::new(source, length, &NOT_CANCELLED)
     }
 
     #[test]
@@ -549,6 +587,7 @@ mod tests {
             b"a.tar.zst",
             0o600,
             &mut |_| Ok(()),
+            &NOT_CANCELLED,
         )
         .unwrap();
 
@@ -562,8 +601,8 @@ mod tests {
             .unwrap();
 
         assert!(
-            readable_as_tar(destination.as_raw_fd(), b"a.tar.zst").is_err()
-                || verify_tree(destination.as_raw_fd(), b"a.tar.zst").is_err(),
+            readable_as_tar(destination.as_raw_fd(), b"a.tar.zst", &NOT_CANCELLED).is_err()
+                || verify_tree(destination.as_raw_fd(), b"a.tar.zst", &NOT_CANCELLED).is_err(),
             "half an archive is not an archive",
         );
     }
