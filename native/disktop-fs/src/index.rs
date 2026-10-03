@@ -4,21 +4,51 @@
 //! than a repeated absolute path. Full paths are rebuilt a page at a time when
 //! a query asks for them, so neither the helper nor Node ever holds the tree.
 //!
+//! Each scan is its own SQLite file. A scan is written to `<id>.sqlite.partial`
+//! as a plain append into a table with no secondary index, the indexes are
+//! built once over the finished table, and the file is renamed to
+//! `<id>.sqlite`, after which nothing writes to it again. That shape is what
+//! the costs depend on: an append is far cheaper than keeping a dozen B-trees
+//! ordered row by row, a reader of one scan never waits on the writer of
+//! another, and pruning a scan is removing a file, which returns its space at
+//! once rather than leaving free pages inside a shared one.
+//!
 //! The index is a cache: it is bounded by a scan count and a byte budget, and
 //! old scans are pruned rather than accumulated. Nothing here can be read as
 //! authority for a mutation; a reviewed plan revalidates every target live.
 
 use crate::sys::EntryKind;
 use crate::walk::{DirectoryTotals, EntryRecord, Progress, ScanSink, ScanTotals, ScanWarning};
-use rusqlite::{Connection, OptionalExtension, params};
+use rusqlite::{Connection, OpenFlags, OptionalExtension, params};
 use std::collections::HashMap;
+use std::fs::File;
 use std::io;
+use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt};
+use std::os::unix::io::AsRawFd;
 use std::path::{Path, PathBuf};
 
-pub const INDEX_FILE: &str = "index-v1.sqlite";
+/// The directory, inside the index directory, that holds this layout's scans.
+/// A layout this build cannot read lives somewhere else and is never opened.
+pub const LAYOUT_DIRECTORY: &str = "index-v3";
+
+/// What earlier builds left in the index directory itself. They are caches
+/// this build cannot read, so they are removed when a scan begins rather than
+/// left to hold their space for ever.
+const LEGACY_FILES: [&str; 3] = [
+    "index-v1.sqlite",
+    "index-v1.sqlite-wal",
+    "index-v1.sqlite-shm",
+];
+
+const FINISHED_SUFFIX: &str = ".sqlite";
+const PARTIAL_SUFFIX: &str = ".sqlite.partial";
+
+/// Recorded in every scan file. A file with any other version is a cache from
+/// another build and is not served.
+const SCHEMA_VERSION: i64 = 3;
 
 /// Rows per transaction. Large enough that the per-commit cost disappears,
-/// small enough that the write-ahead log does not grow with the scan.
+/// small enough that the dirty pages of one commit stay bounded.
 const BATCH_ROWS: usize = 20_000;
 
 /// The page cache the helper allows SQLite, in kibibytes. Negative values mean
@@ -39,79 +69,94 @@ impl Default for IndexLimits {
     }
 }
 
-pub fn index_path(directory: &Path) -> PathBuf {
-    directory.join(INDEX_FILE)
+/// Whether `id` can name a scan file. The same rule as the contract's
+/// `scanId`: a scan ID becomes a file name here, so the helper checks it
+/// itself rather than trusting that the client did.
+pub fn valid_scan_id(id: &str) -> bool {
+    (8..=128).contains(&id.len())
+        && id
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'-'))
 }
 
-/// Bumped whenever the index's shape changes. An index written under a
-/// different version is a cache from another build, and a cache is rebuilt
-/// rather than migrated.
-const SCHEMA_VERSION: i64 = 2;
+fn layout(directory: &Path) -> PathBuf {
+    directory.join(LAYOUT_DIRECTORY)
+}
 
-/// Open the index, discarding one this build cannot read.
+fn finished_path(layout: &Path, scan_id: &str) -> PathBuf {
+    layout.join(format!("{scan_id}{FINISHED_SUFFIX}"))
+}
+
+fn partial_path(layout: &Path, scan_id: &str) -> PathBuf {
+    layout.join(format!("{scan_id}{PARTIAL_SUFFIX}"))
+}
+
+fn sqlite_failure(error: io::Error) -> rusqlite::Error {
+    rusqlite::Error::ToSqlConversionFailure(Box::new(error))
+}
+
+/// Open one finished scan for reading, or `None` when the index does not
+/// hold it.
 ///
-/// The index is a cache: every row in it can be produced again by scanning.
-/// An older build's file would otherwise fail on the first write with a
-/// missing-column error, which reaches the user as an internal error on a
-/// command they ran casually.
-pub fn open(directory: &Path) -> rusqlite::Result<Connection> {
-    let path = index_path(directory);
-    if let Ok(existing) = Connection::open(&path) {
-        let version: i64 = existing
-            .pragma_query_value(None, "user_version", |row| row.get(0))
-            .unwrap_or(0);
-        let populated: i64 = existing
-            .query_row(
-                "SELECT count(*) FROM sqlite_master WHERE type = 'table' AND name = 'entry'",
-                [],
-                |row| row.get(0),
-            )
-            .unwrap_or(0);
-        drop(existing);
-        if populated > 0 && version != SCHEMA_VERSION {
-            for suffix in ["", "-wal", "-shm"] {
-                let mut companion = path.clone().into_os_string();
-                companion.push(suffix);
-                let _ = std::fs::remove_file(PathBuf::from(companion));
+/// A scan that was pruned, never finished, or written by a build with another
+/// layout is the same answer to a caller: run a new scan. A file that is not a
+/// database at all is a damaged cache and gets that answer too, rather than an
+/// internal error on a command somebody ran casually.
+pub fn open_scan(directory: &Path, scan_id: &str) -> rusqlite::Result<Option<Connection>> {
+    if !valid_scan_id(scan_id) {
+        return Ok(None);
+    }
+    let path = finished_path(&layout(directory), scan_id);
+    if !path.is_file() {
+        return Ok(None);
+    }
+    let connection = match Connection::open_with_flags(
+        &path,
+        OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
+    ) {
+        Ok(connection) => connection,
+        // Pruned between the check above and the open.
+        Err(error) if is_missing_or_damaged(&error) => return Ok(None),
+        Err(error) => return Err(error),
+    };
+    let served = connection
+        .pragma_query_value(None, "user_version", |row| row.get::<_, i64>(0))
+        .and_then(|version| {
+            if version != SCHEMA_VERSION {
+                return Ok(false);
             }
-        }
+            connection
+                .query_row(
+                    "SELECT 1 FROM scan WHERE id = ?1 AND finished = 1",
+                    params![scan_id],
+                    |_| Ok(()),
+                )
+                .optional()
+                .map(|found| found.is_some())
+        });
+    match served {
+        Ok(true) => {}
+        Ok(false) => return Ok(None),
+        Err(error) if is_missing_or_damaged(&error) => return Ok(None),
+        Err(error) => return Err(error),
     }
-
-    // SQLite creates a database 0644 and gives its -wal and -shm files the
-    // database's own mode. The index holds the name of every file below a
-    // scan root, so the file exists, private, before SQLite ever opens it.
-    private_file(&path)
-        .map_err(|error| rusqlite::Error::ToSqlConversionFailure(Box::new(error)))?;
-    let connection = Connection::open(&path)?;
-    // auto_vacuum has to be chosen before the first table exists, or pruning a
-    // scan would shrink the row count without ever returning the file's pages.
-    connection.pragma_update(None, "auto_vacuum", "INCREMENTAL")?;
-    connection.pragma_update(None, "journal_mode", "WAL")?;
-    connection.pragma_update(None, "synchronous", "NORMAL")?;
     connection.pragma_update(None, "cache_size", -PAGE_CACHE_KIB)?;
-    connection.pragma_update(None, "foreign_keys", "ON")?;
-    connection.execute_batch(SCHEMA)?;
-    connection.pragma_update(None, "user_version", SCHEMA_VERSION)?;
-    Ok(connection)
+    Ok(Some(connection))
 }
 
-/// Create `path` readable by its owner alone, or take an existing one an
-/// older build left shared back to that.
-fn private_file(path: &Path) -> io::Result<()> {
-    use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
-    let file = std::fs::OpenOptions::new()
-        .create(true)
-        .append(true)
-        .mode(0o600)
-        .open(path)?;
-    if file.metadata()?.permissions().mode() & 0o077 != 0 {
-        file.set_permissions(std::fs::Permissions::from_mode(0o600))?;
-    }
-    Ok(())
+fn is_missing_or_damaged(error: &rusqlite::Error) -> bool {
+    matches!(
+        error.sqlite_error_code(),
+        Some(
+            rusqlite::ErrorCode::CannotOpen
+                | rusqlite::ErrorCode::NotADatabase
+                | rusqlite::ErrorCode::DatabaseCorrupt
+        )
+    )
 }
 
-const SCHEMA: &str = "
-CREATE TABLE IF NOT EXISTS scan (
+const TABLES: &str = "
+CREATE TABLE scan (
   id TEXT PRIMARY KEY,
   started_at INTEGER NOT NULL,
   finished INTEGER NOT NULL DEFAULT 0,
@@ -127,9 +172,8 @@ CREATE TABLE IF NOT EXISTS scan (
   warnings TEXT NOT NULL DEFAULT '[]'
 );
 
-CREATE TABLE IF NOT EXISTS entry (
+CREATE TABLE entry (
   id INTEGER PRIMARY KEY,
-  scan_id TEXT NOT NULL REFERENCES scan(id) ON DELETE CASCADE,
   parent_id INTEGER,
   name BLOB NOT NULL,
   search_name TEXT NOT NULL,
@@ -149,22 +193,35 @@ CREATE TABLE IF NOT EXISTS entry (
   subtree_entries INTEGER NOT NULL DEFAULT 1,
   subtree_max_id INTEGER NOT NULL DEFAULT 0
 );
-
-CREATE INDEX IF NOT EXISTS entry_allocated ON entry(scan_id, allocated_bytes DESC, id DESC);
-CREATE INDEX IF NOT EXISTS entry_apparent ON entry(scan_id, apparent_bytes DESC, id DESC);
-CREATE INDEX IF NOT EXISTS entry_modified ON entry(scan_id, modified_ns DESC, id DESC);
-CREATE INDEX IF NOT EXISTS entry_name ON entry(scan_id, search_name, id);
-CREATE INDEX IF NOT EXISTS entry_extension ON entry(scan_id, extension);
-CREATE INDEX IF NOT EXISTS entry_parent ON entry(scan_id, parent_id);
-CREATE INDEX IF NOT EXISTS entry_owner ON entry(scan_id, owner_id);
 ";
 
-/// A scan's writer. Rows go in inside bounded transactions; the scan row is
-/// only marked finished once its totals are written, so an interrupted scan is
-/// visibly unfinished rather than silently short.
+/// Built once, after the last row is in. Building an index over a finished
+/// table is a sort; keeping it ordered while rows arrive in walk order is a
+/// random write per row per index.
+const INDEXES: &str = "
+CREATE INDEX entry_allocated ON entry(allocated_bytes, id);
+CREATE INDEX entry_apparent ON entry(apparent_bytes, id);
+CREATE INDEX entry_modified ON entry(modified_ns, id);
+CREATE INDEX entry_name ON entry(search_name, id);
+CREATE INDEX entry_extension ON entry(extension);
+CREATE INDEX entry_parent ON entry(parent_id);
+CREATE INDEX entry_owner ON entry(owner_id);
+";
+
+/// A scan's writer. Rows go into a partial file that only this writer holds;
+/// the file is published under its final name once its totals and indexes
+/// are written, so an interrupted scan is never served as though it were
+/// whole.
 pub struct IndexWriter {
-    connection: Connection,
+    connection: Option<Connection>,
+    layout: PathBuf,
     scan_id: String,
+    /// An exclusive `flock` on the partial file for as long as this writer
+    /// lives. Pruning removes a partial file only when it can take that lock
+    /// itself, which is how a scan another process is still writing is told
+    /// from one whose writer died.
+    lock: Option<File>,
+    published: bool,
     pending: usize,
     in_transaction: bool,
     failure: Option<io::Error>,
@@ -178,7 +235,58 @@ impl IndexWriter {
         accounting: &str,
         limits: &IndexLimits,
     ) -> rusqlite::Result<IndexWriter> {
-        let connection = open(directory)?;
+        if !valid_scan_id(scan_id) {
+            return Err(sqlite_failure(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "a scan ID cannot name an index file",
+            )));
+        }
+        let layout = layout(directory);
+        // The index names every file below the roots, including the ones in
+        // directories nobody else may list, so it is as private as the most
+        // private of them.
+        std::fs::DirBuilder::new()
+            .recursive(true)
+            .mode(0o700)
+            .create(&layout)
+            .map_err(sqlite_failure)?;
+        for legacy in LEGACY_FILES {
+            let _ = std::fs::remove_file(directory.join(legacy));
+        }
+        prune(&layout, limits.keep_scans.saturating_sub(1) as usize)?;
+
+        let partial = partial_path(&layout, scan_id);
+        let lock = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create_new(true)
+            .mode(0o600)
+            .open(&partial)
+            .map_err(sqlite_failure)?;
+        if let Err(error) = flock(&lock, libc::LOCK_EX | libc::LOCK_NB) {
+            let _ = std::fs::remove_file(&partial);
+            return Err(sqlite_failure(error));
+        }
+
+        let mut writer = IndexWriter {
+            connection: None,
+            layout,
+            scan_id: scan_id.to_owned(),
+            lock: Some(lock),
+            published: false,
+            pending: 0,
+            in_transaction: false,
+            failure: None,
+        };
+        let connection = Connection::open(&partial)?;
+        // Nothing reads this file until it is published, and a crash leaves a
+        // file that is thrown away rather than recovered, so a rollback
+        // journal and fsync on every commit would buy nothing.
+        connection.pragma_update(None, "journal_mode", "OFF")?;
+        connection.pragma_update(None, "synchronous", "OFF")?;
+        connection.pragma_update(None, "locking_mode", "EXCLUSIVE")?;
+        connection.pragma_update(None, "cache_size", -PAGE_CACHE_KIB)?;
+        connection.execute_batch(TABLES)?;
         connection.execute(
             "INSERT INTO scan (id, started_at, accounting, roots) VALUES (?1, ?2, ?3, ?4)",
             params![
@@ -188,22 +296,20 @@ impl IndexWriter {
                 serde_json::to_string(&encode_paths(roots)).unwrap_or_else(|_| "[]".to_owned()),
             ],
         )?;
-        prune(&connection, limits, scan_id)?;
-
-        let mut writer = IndexWriter {
-            connection,
-            scan_id: scan_id.to_owned(),
-            pending: 0,
-            in_transaction: false,
-            failure: None,
-        };
+        writer.connection = Some(connection);
         writer.start_transaction()?;
         Ok(writer)
     }
 
+    fn connection(&self) -> &Connection {
+        self.connection
+            .as_ref()
+            .expect("the connection lives until the writer is published")
+    }
+
     fn start_transaction(&mut self) -> rusqlite::Result<()> {
         if !self.in_transaction {
-            self.connection.execute_batch("BEGIN")?;
+            self.connection().execute_batch("BEGIN")?;
             self.in_transaction = true;
         }
         Ok(())
@@ -211,21 +317,26 @@ impl IndexWriter {
 
     fn commit(&mut self) -> rusqlite::Result<()> {
         if self.in_transaction {
-            self.connection.execute_batch("COMMIT")?;
+            self.connection().execute_batch("COMMIT")?;
             self.in_transaction = false;
         }
         self.pending = 0;
         Ok(())
     }
 
-    /// Write the scan's totals and mark it usable, then bring the file back
-    /// inside its byte budget.
+    /// Write the scan's totals, build its indexes, and publish it; then bring
+    /// the index directory back inside its byte budget.
     pub fn finish(mut self, totals: &ScanTotals, limits: &IndexLimits) -> rusqlite::Result<()> {
         if let Some(failure) = self.failure.take() {
-            return Err(rusqlite::Error::ToSqlConversionFailure(Box::new(failure)));
+            return Err(sqlite_failure(failure));
         }
         self.commit()?;
-        self.connection.execute(
+        let connection = self
+            .connection
+            .take()
+            .expect("the connection lives until the writer is published");
+        connection.execute_batch(INDEXES)?;
+        connection.execute(
             "UPDATE scan SET finished = 1, complete = ?2, scanned_entries = ?3,
                     inaccessible_directories = ?4, allocated_bytes = ?5, apparent_bytes = ?6,
                     shared_bytes = ?7, excluded_mounts = ?8, warnings = ?9
@@ -244,38 +355,52 @@ impl IndexWriter {
                     .unwrap_or_else(|_| "[]".to_owned()),
             ],
         )?;
-        enforce_byte_budget(&self.connection, limits, &self.scan_id)?;
-        Ok(())
+        connection.pragma_update(None, "user_version", SCHEMA_VERSION)?;
+        connection.close().map_err(|(_, error)| error)?;
+
+        // The bytes reach the disk before the name that says they are whole.
+        let lock = self.lock.as_ref().expect("the lock is held until publish");
+        lock.sync_all().map_err(sqlite_failure)?;
+        let finished = finished_path(&self.layout, &self.scan_id);
+        std::fs::rename(partial_path(&self.layout, &self.scan_id), &finished)
+            .map_err(sqlite_failure)?;
+        self.published = true;
+        if let Ok(directory) = File::open(&self.layout) {
+            let _ = directory.sync_all();
+        }
+        self.lock = None;
+
+        enforce_byte_budget(&self.layout, limits, &self.scan_id)
     }
 
     fn record(&mut self, record: &EntryRecord<'_>) -> rusqlite::Result<i64> {
         let metadata = record.metadata;
-        self.connection.execute(
+        let connection = self.connection();
+        let mut insert = connection.prepare_cached(
             "INSERT INTO entry (
-                scan_id, parent_id, name, search_name, extension, kind, device, inode, mount_id,
+                parent_id, name, search_name, extension, kind, device, inode, mount_id,
                 link_count, apparent_bytes, allocated_bytes, owner_id, modified_ns, shared,
                 broken
-             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16)",
-            params![
-                self.scan_id,
-                record.parent,
-                record.name,
-                searchable(record.name),
-                extension_of(record.name),
-                metadata.kind.code(),
-                metadata.device.to_string(),
-                metadata.inode.to_string(),
-                metadata.mount_id.to_string(),
-                clamp(metadata.link_count),
-                clamp(metadata.apparent_bytes),
-                clamp(metadata.allocated_bytes),
-                i64::from(metadata.owner_id),
-                clamp(metadata.modified_nanoseconds),
-                i64::from(record.shared),
-                i64::from(record.broken),
-            ],
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)",
         )?;
-        let id = self.connection.last_insert_rowid();
+        let id = insert.insert(params![
+            record.parent,
+            record.name,
+            searchable(record.name),
+            extension_of(record.name),
+            metadata.kind.code(),
+            metadata.device.to_string(),
+            metadata.inode.to_string(),
+            metadata.mount_id.to_string(),
+            clamp(metadata.link_count),
+            clamp(metadata.apparent_bytes),
+            clamp(metadata.allocated_bytes),
+            i64::from(metadata.owner_id),
+            clamp(metadata.modified_nanoseconds),
+            i64::from(record.shared),
+            i64::from(record.broken),
+        ])?;
+        drop(insert);
 
         self.pending += 1;
         if self.pending >= BATCH_ROWS {
@@ -283,6 +408,36 @@ impl IndexWriter {
             self.start_transaction()?;
         }
         Ok(id)
+    }
+
+    fn total(&mut self, id: i64, totals: &DirectoryTotals) -> rusqlite::Result<()> {
+        let mut update = self.connection().prepare_cached(
+            "UPDATE entry SET allocated_bytes = ?2, apparent_bytes = ?3, subtree_entries = ?4,
+                    child_entries = ?5, subtree_max_id = max(?1, last_insert_rowid())
+             WHERE id = ?1",
+        )?;
+        update.execute(params![
+            id,
+            clamp(totals.allocated_bytes),
+            clamp(totals.apparent_bytes),
+            clamp(totals.entries),
+            clamp(totals.child_entries),
+        ])?;
+        Ok(())
+    }
+}
+
+/// A writer that is dropped without being published takes its partial file
+/// with it. A process that dies leaves the file, and the next scan's pruning
+/// finds it unlocked and removes it.
+impl Drop for IndexWriter {
+    fn drop(&mut self) {
+        if self.published {
+            return;
+        }
+        drop(self.connection.take());
+        let _ = std::fs::remove_file(partial_path(&self.layout, &self.scan_id));
+        self.lock = None;
     }
 }
 
@@ -308,82 +463,119 @@ impl ScanSink for IndexWriter {
     /// can apply without walking parent links or materialising a descendant
     /// set.
     fn finish_directory(&mut self, id: i64, totals: &DirectoryTotals) -> io::Result<()> {
-        self.connection
-            .execute(
-                "UPDATE entry SET allocated_bytes = ?2, apparent_bytes = ?3, subtree_entries = ?4,
-                        child_entries = ?5, subtree_max_id = max(?1, last_insert_rowid())
-                 WHERE id = ?1",
-                params![
-                    id,
-                    clamp(totals.allocated_bytes),
-                    clamp(totals.apparent_bytes),
-                    clamp(totals.entries),
-                    clamp(totals.child_entries),
-                ],
-            )
-            .map(|_| ())
-            .map_err(|error| {
-                let failure =
-                    io::Error::other(format!("The directory total could not be written: {error}"));
-                self.failure = Some(io::Error::other(failure.to_string()));
-                failure
-            })
+        self.total(id, totals).map_err(|error| {
+            let failure =
+                io::Error::other(format!("The directory total could not be written: {error}"));
+            self.failure = Some(io::Error::other(failure.to_string()));
+            failure
+        })
     }
 
     fn progress(&mut self, _snapshot: &Progress) {}
 }
 
-/// Keep at most `keep_scans` scans, newest first, always including the one
-/// being written.
-fn prune(connection: &Connection, limits: &IndexLimits, keep: &str) -> rusqlite::Result<()> {
-    connection.execute(
-        "DELETE FROM entry WHERE scan_id IN (
-             SELECT id FROM scan WHERE id != ?1
-             ORDER BY started_at DESC LIMIT -1 OFFSET ?2
-         )",
-        params![keep, i64::from(limits.keep_scans.saturating_sub(1))],
-    )?;
-    connection.execute(
-        "DELETE FROM scan WHERE id != ?1
-         AND id NOT IN (SELECT id FROM scan WHERE id != ?1 ORDER BY started_at DESC LIMIT ?2)",
-        params![keep, i64::from(limits.keep_scans.saturating_sub(1))],
-    )?;
-    connection.pragma_update(None, "incremental_vacuum", 0)?;
+fn flock(file: &File, operation: libc::c_int) -> io::Result<()> {
+    if unsafe { libc::flock(file.as_raw_fd(), operation) } < 0 {
+        return Err(io::Error::last_os_error());
+    }
     Ok(())
 }
 
-/// Drop whole scans, oldest first, until the file fits its budget. The scan
-/// just written is never the one dropped, so a scan always leaves a usable
-/// index behind even on a tight budget.
-fn enforce_byte_budget(
-    connection: &Connection,
-    limits: &IndexLimits,
-    keep: &str,
-) -> rusqlite::Result<()> {
-    loop {
-        if file_bytes(connection)? <= limits.max_bytes {
-            return Ok(());
-        }
-        let oldest: Option<String> = connection
-            .query_row(
-                "SELECT id FROM scan WHERE id != ?1 ORDER BY started_at ASC LIMIT 1",
-                params![keep],
-                |row| row.get(0),
-            )
-            .optional()?;
-        let Some(oldest) = oldest else {
-            return Ok(());
+/// One published scan file, as pruning sees it.
+struct Stored {
+    scan_id: String,
+    path: PathBuf,
+    bytes: u64,
+    modified: std::time::SystemTime,
+}
+
+/// The published scans in the layout directory, newest first.
+///
+/// A partial file whose writer is gone is removed on the way: it can never be
+/// published, and nothing else would ever remove it. One whose writer is alive
+/// is left alone, whichever process holds it.
+fn stored_scans(layout: &Path) -> rusqlite::Result<Vec<Stored>> {
+    let mut stored = Vec::new();
+    let entries = match std::fs::read_dir(layout) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(stored),
+        Err(error) => return Err(sqlite_failure(error)),
+    };
+    for entry in entries {
+        let Ok(entry) = entry else {
+            continue;
         };
-        connection.execute("DELETE FROM entry WHERE scan_id = ?1", params![oldest])?;
-        connection.execute("DELETE FROM scan WHERE id = ?1", params![oldest])?;
-        connection.pragma_update(None, "incremental_vacuum", 0)?;
+        let name = entry.file_name();
+        let Some(name) = name.to_str() else {
+            continue;
+        };
+        if let Some(scan_id) = name.strip_suffix(PARTIAL_SUFFIX) {
+            if valid_scan_id(scan_id) {
+                remove_if_abandoned(&entry.path());
+            }
+            continue;
+        }
+        let Some(scan_id) = name.strip_suffix(FINISHED_SUFFIX) else {
+            continue;
+        };
+        if !valid_scan_id(scan_id) {
+            continue;
+        }
+        let Ok(metadata) = entry.metadata() else {
+            continue;
+        };
+        if !metadata.is_file() {
+            continue;
+        }
+        stored.push(Stored {
+            scan_id: scan_id.to_owned(),
+            path: entry.path(),
+            bytes: metadata.len(),
+            modified: metadata.modified().unwrap_or(std::time::UNIX_EPOCH),
+        });
+    }
+    stored.sort_by(|left, right| right.modified.cmp(&left.modified));
+    Ok(stored)
+}
+
+fn remove_if_abandoned(path: &Path) {
+    let Ok(file) = std::fs::OpenOptions::new().read(true).open(path) else {
+        return;
+    };
+    // The writer holds this lock for its whole life, so taking it means the
+    // writer is gone. It is held across the removal so no writer can be
+    // between creating the file and locking it.
+    if flock(&file, libc::LOCK_EX | libc::LOCK_NB).is_ok() {
+        let _ = std::fs::remove_file(path);
     }
 }
 
-fn file_bytes(connection: &Connection) -> rusqlite::Result<u64> {
-    let pages: i64 = connection.query_row("PRAGMA page_count", [], |row| row.get(0))?;
-    let size: i64 = connection.query_row("PRAGMA page_size", [], |row| row.get(0))?;
-    Ok((pages.max(0) as u64).saturating_mul(size.max(0) as u64))
+/// Keep the `keep` newest published scans and remove the rest.
+fn prune(layout: &Path, keep: usize) -> rusqlite::Result<()> {
+    for doomed in stored_scans(layout)?.into_iter().skip(keep) {
+        let _ = std::fs::remove_file(&doomed.path);
+    }
+    Ok(())
+}
+
+/// Drop whole scans, oldest first, until the directory fits its budget. The
+/// scan just written is never the one dropped, so a scan always leaves a
+/// usable index behind even on a tight budget.
+fn enforce_byte_budget(layout: &Path, limits: &IndexLimits, keep: &str) -> rusqlite::Result<()> {
+    let stored = stored_scans(layout)?;
+    let mut total: u64 = stored.iter().map(|scan| scan.bytes).sum();
+    for oldest in stored.iter().rev() {
+        if total <= limits.max_bytes {
+            break;
+        }
+        if oldest.scan_id == keep {
+            continue;
+        }
+        if std::fs::remove_file(&oldest.path).is_ok() {
+            total = total.saturating_sub(oldest.bytes);
+        }
+    }
+    Ok(())
 }
 
 /// Rebuild absolute paths for one page of rows.
@@ -416,19 +608,17 @@ impl<'a> PathResolver<'a> {
         if let Some(cached) = self.cache.get(&id) {
             return Ok(cached.clone());
         }
+        let mut lookup = self
+            .connection
+            .prepare_cached("SELECT parent_id, name FROM entry WHERE id = ?1")?;
         let mut chain: Vec<(i64, Option<i64>, Vec<u8>)> = Vec::new();
         let mut current = Some(id);
         while let Some(next) = current {
             if self.cache.contains_key(&next) {
                 break;
             }
-            let row: Option<(Option<i64>, Vec<u8>)> = self
-                .connection
-                .query_row(
-                    "SELECT parent_id, name FROM entry WHERE id = ?1",
-                    params![next],
-                    |row| Ok((row.get(0)?, row.get(1)?)),
-                )
+            let row: Option<(Option<i64>, Vec<u8>)> = lookup
+                .query_row(params![next], |row| Ok((row.get(0)?, row.get(1)?)))
                 .optional()?;
             let Some((parent, name)) = row else {
                 break;
@@ -442,8 +632,8 @@ impl<'a> PathResolver<'a> {
                 None => name,
                 Some(parent) => match self.cache.get(&parent) {
                     Some(prefix) => crate::walk::join(prefix, &name),
-                    // A parent row that is missing means a pruned or partial
-                    // scan; the name alone is still byte-accurate.
+                    // A parent row that is missing means a partial scan; the
+                    // name alone is still byte-accurate.
                     None => name,
                 },
             };
@@ -532,7 +722,6 @@ pub struct SizeCandidate {
 /// caller never opens a file that had no possible twin.
 pub fn size_candidates(
     connection: &Connection,
-    scan_id: &str,
     under: Option<(i64, i64)>,
     minimum_bytes: u64,
 ) -> rusqlite::Result<Vec<(u64, Vec<SizeCandidate>)>> {
@@ -540,19 +729,18 @@ pub fn size_candidates(
     // so one statement serves both shapes and neither can bind the wrong count.
     let (first, last) = under.unwrap_or((i64::MIN, i64::MAX));
     let sql = "SELECT apparent_bytes, id, parent_id, name FROM entry
-         WHERE scan_id = ?1 AND kind = ?2 AND shared = 0 AND apparent_bytes >= ?3
-           AND id BETWEEN ?4 AND ?5
+         WHERE kind = ?1 AND shared = 0 AND apparent_bytes >= ?2
+           AND id BETWEEN ?3 AND ?4
            AND apparent_bytes IN (
              SELECT apparent_bytes FROM entry
-             WHERE scan_id = ?1 AND kind = ?2 AND shared = 0 AND apparent_bytes >= ?3
-               AND id BETWEEN ?4 AND ?5
+             WHERE kind = ?1 AND shared = 0 AND apparent_bytes >= ?2
+               AND id BETWEEN ?3 AND ?4
              GROUP BY apparent_bytes HAVING count(*) > 1
            )
          ORDER BY apparent_bytes DESC, id ASC";
 
     let mut statement = connection.prepare(sql)?;
     let mut rows = statement.query(params![
-        scan_id,
         EntryKind::File.code(),
         clamp(minimum_bytes),
         first,
@@ -582,16 +770,11 @@ fn unclamp(value: i64) -> u64 {
 ///
 /// Returns `None` when the path is not in this scan, which a caller must
 /// report as such: an empty page would read as "there is nothing there".
-pub fn subtree_range(
-    connection: &Connection,
-    scan_id: &str,
-    path: &[u8],
-) -> rusqlite::Result<Option<(i64, i64)>> {
+pub fn subtree_range(connection: &Connection, path: &[u8]) -> rusqlite::Result<Option<(i64, i64)>> {
     let mut best: Option<(i64, Vec<u8>)> = None;
     {
-        let mut roots = connection
-            .prepare("SELECT id, name FROM entry WHERE scan_id = ?1 AND parent_id IS NULL")?;
-        let mut rows = roots.query(params![scan_id])?;
+        let mut roots = connection.prepare("SELECT id, name FROM entry WHERE parent_id IS NULL")?;
+        let mut rows = roots.query([])?;
         while let Some(row) = rows.next()? {
             let id: i64 = row.get(0)?;
             let name: Vec<u8> = row.get(1)?;
@@ -610,16 +793,14 @@ pub fn subtree_range(
     let Some((mut current, root)) = best else {
         return Ok(None);
     };
+    let mut child =
+        connection.prepare("SELECT id FROM entry WHERE parent_id = ?1 AND name = ?2")?;
     for segment in path[root.len()..].split(|byte| *byte == b'/') {
         if segment.is_empty() {
             continue;
         }
-        let found: Option<i64> = connection
-            .query_row(
-                "SELECT id FROM entry WHERE scan_id = ?1 AND parent_id = ?2 AND name = ?3",
-                params![scan_id, current, segment],
-                |row| row.get(0),
-            )
+        let found: Option<i64> = child
+            .query_row(params![current, segment], |row| row.get(0))
             .optional()?;
         let Some(next) = found else {
             return Ok(None);
@@ -633,19 +814,6 @@ pub fn subtree_range(
         |row| row.get(0),
     )?;
     Ok(Some((current, maximum)))
-}
-
-/// Whether the index still holds this scan. A pruned scan is a refusal, never
-/// an empty page that would read as "nothing here".
-pub fn scan_exists(connection: &Connection, scan_id: &str) -> rusqlite::Result<bool> {
-    let found: Option<i64> = connection
-        .query_row(
-            "SELECT 1 FROM scan WHERE id = ?1 AND finished = 1",
-            params![scan_id],
-            |row| row.get(0),
-        )
-        .optional()?;
-    Ok(found.is_some())
 }
 
 pub fn kind_of(code: i64) -> EntryKind {
@@ -669,87 +837,311 @@ mod tests {
     fn search_text_is_lossy_but_the_name_bytes_are_not_involved() {
         assert_eq!(searchable(&[b'A', 0xff, b'B']), "a\u{fffd}b");
     }
+
+    #[test]
+    fn a_scan_id_that_could_leave_its_directory_cannot_name_a_file() {
+        assert!(valid_scan_id("scan-1790000000-0123456789abcdef"));
+        assert!(!valid_scan_id("../../../etc/passwd"));
+        assert!(!valid_scan_id("scan/with/slash"));
+        assert!(!valid_scan_id("short"));
+        assert!(!valid_scan_id(&"a".repeat(129)));
+    }
 }
 
 #[cfg(test)]
-mod schema_tests {
+mod storage_tests {
     use super::*;
     use crate::testing::Sandbox;
+    use crate::walk::ScanTotals;
+    use std::os::unix::fs::PermissionsExt;
+
+    fn totals() -> ScanTotals {
+        ScanTotals {
+            complete: true,
+            scanned_entries: 0,
+            inaccessible_directories: 0,
+            allocated_bytes: 0,
+            apparent_bytes: 0,
+            shared_bytes: 0,
+            excluded_mounts: Vec::new(),
+            warnings: Vec::new(),
+            filesystems: Vec::new(),
+        }
+    }
+
+    fn write_scan(directory: &Path, scan_id: &str, rows: usize, limits: &IndexLimits) {
+        let mut writer = IndexWriter::begin(
+            directory,
+            scan_id,
+            &[b"/root".to_vec()],
+            "allocated",
+            limits,
+        )
+        .expect("a writer");
+        let metadata = crate::sys::metadata_of(
+            File::open(directory)
+                .expect("the index directory opens")
+                .as_raw_fd(),
+        )
+        .expect("metadata");
+        for index in 0..rows {
+            let name = format!("file-{index}");
+            writer
+                .entry(&EntryRecord {
+                    parent: None,
+                    name: name.as_bytes(),
+                    metadata: &metadata,
+                    shared: false,
+                    broken: false,
+                })
+                .expect("a row");
+        }
+        writer.finish(&totals(), limits).expect("finish");
+    }
+
+    fn files_in(directory: &Path) -> Vec<String> {
+        let mut names: Vec<String> = std::fs::read_dir(directory.join(LAYOUT_DIRECTORY))
+            .expect("the layout directory lists")
+            .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+            .collect();
+        names.sort();
+        names
+    }
+
+    fn bytes_in(directory: &Path) -> u64 {
+        std::fs::read_dir(directory.join(LAYOUT_DIRECTORY))
+            .expect("the layout directory lists")
+            .map(|entry| entry.unwrap().metadata().unwrap().len())
+            .sum()
+    }
 
     #[test]
-    fn an_index_from_another_build_is_rebuilt_rather_than_failing() {
-        let sandbox = Sandbox::new("index-version");
-        let directory = sandbox.path();
-        {
-            // A file in the shape an older build left behind: the entry table
-            // exists, the column this build writes does not, and no version is
-            // recorded.
-            let old = Connection::open(index_path(directory)).expect("open");
-            old.execute_batch(
-                "CREATE TABLE entry (id INTEGER PRIMARY KEY, name BLOB NOT NULL);
-                 INSERT INTO entry (name) VALUES (x'6f6c64');",
-            )
-            .expect("write the old shape");
-        }
+    fn a_finished_scan_is_served_and_an_unknown_one_is_not() {
+        let sandbox = Sandbox::new("index-served");
+        write_scan(sandbox.path(), "scan-served-1", 10, &IndexLimits::default());
 
-        let connection = open(directory).expect("the stale index is replaced, not reported");
-
-        let columns: i64 = connection
-            .query_row(
-                "SELECT count(*) FROM pragma_table_info('entry') WHERE name = 'subtree_max_id'",
-                [],
-                |row| row.get(0),
-            )
-            .expect("query the rebuilt schema");
-        assert_eq!(columns, 1, "the rebuilt index has this build's columns");
-
+        let connection = open_scan(sandbox.path(), "scan-served-1")
+            .expect("open")
+            .expect("the scan is held");
         let rows: i64 = connection
             .query_row("SELECT count(*) FROM entry", [], |row| row.get(0))
             .expect("count");
-        assert_eq!(rows, 0, "a cache is rebuilt, never migrated");
+        assert_eq!(rows, 10);
+
+        assert!(
+            open_scan(sandbox.path(), "scan-never-run")
+                .unwrap()
+                .is_none()
+        );
+        assert!(
+            open_scan(sandbox.path(), "../escape-attempt")
+                .unwrap()
+                .is_none()
+        );
     }
 
     #[test]
-    fn an_index_an_older_build_left_shared_is_made_private() {
-        use std::os::unix::fs::PermissionsExt;
-        let sandbox = Sandbox::new("index-private");
-        let directory = sandbox.path();
-        std::fs::write(index_path(directory), b"").expect("an empty index file");
-        std::fs::set_permissions(
-            index_path(directory),
-            std::fs::Permissions::from_mode(0o644),
+    fn pruning_a_scan_returns_its_space_to_the_filesystem() {
+        let sandbox = Sandbox::new("index-prune");
+        let limits = IndexLimits {
+            max_bytes: u64::MAX,
+            keep_scans: 2,
+        };
+        write_scan(sandbox.path(), "scan-prune-1", 20_000, &limits);
+        let one_scan = bytes_in(sandbox.path());
+        write_scan(sandbox.path(), "scan-prune-2", 20_000, &limits);
+        write_scan(sandbox.path(), "scan-prune-3", 20_000, &limits);
+
+        assert_eq!(
+            files_in(sandbox.path()),
+            vec!["scan-prune-2.sqlite", "scan-prune-3.sqlite"],
+        );
+        // Two scans' worth of bytes, not three: the pruned scan's pages are
+        // gone from the disk rather than left free inside a shared file.
+        assert!(
+            bytes_in(sandbox.path()) <= one_scan * 2 + one_scan / 10,
+            "{} bytes held for two scans of {one_scan}",
+            bytes_in(sandbox.path())
+        );
+        assert!(open_scan(sandbox.path(), "scan-prune-1").unwrap().is_none());
+    }
+
+    #[test]
+    fn the_byte_budget_drops_older_scans_but_never_the_newest() {
+        let sandbox = Sandbox::new("index-budget");
+        let generous = IndexLimits {
+            max_bytes: u64::MAX,
+            keep_scans: 10,
+        };
+        write_scan(sandbox.path(), "scan-budget-1", 5_000, &generous);
+        write_scan(sandbox.path(), "scan-budget-2", 5_000, &generous);
+        let tight = IndexLimits {
+            max_bytes: 1,
+            keep_scans: 10,
+        };
+        write_scan(sandbox.path(), "scan-budget-3", 5_000, &tight);
+
+        assert_eq!(files_in(sandbox.path()), vec!["scan-budget-3.sqlite"]);
+    }
+
+    #[test]
+    fn a_scan_being_written_never_holds_up_a_reader_of_another() {
+        let sandbox = Sandbox::new("index-reader");
+        let limits = IndexLimits::default();
+        write_scan(sandbox.path(), "scan-reader-1", 100, &limits);
+
+        // A second scan is mid-write, inside an open transaction, as a
+        // timer-driven scan would be while somebody browses the last one.
+        let mut writer = IndexWriter::begin(
+            sandbox.path(),
+            "scan-reader-2",
+            &[b"/root".to_vec()],
+            "allocated",
+            &limits,
         )
-        .expect("chmod");
+        .expect("a writer");
+        let metadata = crate::sys::metadata_of(
+            File::open(sandbox.path())
+                .expect("the sandbox opens")
+                .as_raw_fd(),
+        )
+        .expect("metadata");
+        writer
+            .entry(&EntryRecord {
+                parent: None,
+                name: b"pending",
+                metadata: &metadata,
+                shared: false,
+                broken: false,
+            })
+            .expect("a row");
 
-        drop(open(directory).expect("the index opens"));
-
-        let mode = std::fs::metadata(index_path(directory))
-            .expect("the index exists")
-            .permissions()
-            .mode();
-        assert_eq!(mode & 0o777, 0o600);
+        let started = std::time::Instant::now();
+        let connection = open_scan(sandbox.path(), "scan-reader-1")
+            .expect("open")
+            .expect("the finished scan is served");
+        let rows: i64 = connection
+            .query_row("SELECT count(*) FROM entry", [], |row| row.get(0))
+            .expect("count");
+        assert_eq!(rows, 100);
+        assert!(
+            started.elapsed() < std::time::Duration::from_secs(1),
+            "a reader waited {:?} on a writer of another scan",
+            started.elapsed()
+        );
+        drop(writer);
     }
 
     #[test]
-    fn an_index_this_build_wrote_is_kept() {
-        let sandbox = Sandbox::new("index-version-kept");
-        let directory = sandbox.path();
+    fn a_scan_being_written_is_invisible_and_its_abandoned_file_is_removed() {
+        let sandbox = Sandbox::new("index-partial");
+        let limits = IndexLimits::default();
+        let writer = IndexWriter::begin(
+            sandbox.path(),
+            "scan-partial-1",
+            &[b"/root".to_vec()],
+            "allocated",
+            &limits,
+        )
+        .expect("a writer");
+        assert!(
+            open_scan(sandbox.path(), "scan-partial-1")
+                .unwrap()
+                .is_none()
+        );
+
+        // Another scan beginning meanwhile leaves a live writer's file alone.
+        write_scan(sandbox.path(), "scan-partial-2", 1, &limits);
+        assert!(files_in(sandbox.path()).contains(&"scan-partial-1.sqlite.partial".to_owned()));
+
+        // A writer that is dropped unpublished takes its file with it.
+        drop(writer);
+        assert_eq!(files_in(sandbox.path()), vec!["scan-partial-2.sqlite"]);
+
+        // A writer that died without dropping anything leaves an unlocked
+        // partial behind, and the next scan removes it.
+        let orphan = sandbox
+            .path()
+            .join(LAYOUT_DIRECTORY)
+            .join("scan-orphan-1.sqlite.partial");
+        std::fs::write(&orphan, b"half a scan").expect("an orphan");
+        write_scan(sandbox.path(), "scan-partial-3", 1, &limits);
+        assert!(
+            !orphan.exists(),
+            "an abandoned partial scan was left behind"
+        );
+    }
+
+    #[test]
+    fn an_index_from_another_build_is_removed_and_never_served() {
+        let sandbox = Sandbox::new("index-legacy");
+        let legacy = sandbox.path().join("index-v1.sqlite");
+        std::fs::write(&legacy, b"an older layout").expect("a legacy index");
+        write_scan(sandbox.path(), "scan-legacy-1", 1, &IndexLimits::default());
+        assert!(!legacy.exists(), "the legacy cache still holds its space");
+
+        // A file in this layout's directory with another schema version is a
+        // cache from another build and is not read as this one.
+        let path = finished_path(&layout(sandbox.path()), "scan-legacy-1");
         {
-            let first = open(directory).expect("create");
-            first
-                .execute(
-                    "INSERT INTO scan (id, started_at, finished, complete, accounting, roots)
-                     VALUES ('scan-1', 0, 1, 1, 'allocated', '[]')",
-                    [],
-                )
-                .expect("write a scan");
+            let connection = Connection::open(&path).expect("open");
+            connection
+                .pragma_update(None, "user_version", SCHEMA_VERSION + 1)
+                .expect("restamp");
         }
+        assert!(
+            open_scan(sandbox.path(), "scan-legacy-1")
+                .unwrap()
+                .is_none()
+        );
 
-        let connection = open(directory).expect("reopen");
+        std::fs::write(&path, b"not a database").expect("damage");
+        assert!(
+            open_scan(sandbox.path(), "scan-legacy-1")
+                .unwrap()
+                .is_none()
+        );
+    }
 
-        let rows: i64 = connection
-            .query_row("SELECT count(*) FROM scan", [], |row| row.get(0))
-            .expect("count");
-        assert_eq!(rows, 1, "this build's own index is not thrown away");
+    #[test]
+    fn every_index_file_is_private_to_its_owner() {
+        let sandbox = Sandbox::new("index-private");
+        let writer = IndexWriter::begin(
+            sandbox.path(),
+            "scan-private-1",
+            &[b"/root".to_vec()],
+            "allocated",
+            &IndexLimits::default(),
+        )
+        .expect("a writer");
+        let mut modes = vec![
+            std::fs::metadata(sandbox.path().join(LAYOUT_DIRECTORY))
+                .unwrap()
+                .permissions()
+                .mode(),
+        ];
+        for name in files_in(sandbox.path()) {
+            modes.push(
+                std::fs::metadata(sandbox.path().join(LAYOUT_DIRECTORY).join(name))
+                    .unwrap()
+                    .permissions()
+                    .mode(),
+            );
+        }
+        writer
+            .finish(&totals(), &IndexLimits::default())
+            .expect("finish");
+        for name in files_in(sandbox.path()) {
+            modes.push(
+                std::fs::metadata(sandbox.path().join(LAYOUT_DIRECTORY).join(name))
+                    .unwrap()
+                    .permissions()
+                    .mode(),
+            );
+        }
+        assert_eq!(modes.len(), 3);
+        for mode in modes {
+            assert_eq!(mode & 0o077, 0, "mode {mode:o} is open to other users");
+        }
     }
 }
