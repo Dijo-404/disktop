@@ -1,4 +1,5 @@
-import { lstat, readdir, readFile } from "node:fs/promises";
+import { constants } from "node:fs";
+import { lstat, open, readdir } from "node:fs/promises";
 import { pathBytes, rawPathFromBytes } from "../../domain/paths.js";
 import { allocatedBytesFromBlocks } from "../../domain/sizes.js";
 import type { PathFacts, PathProbe } from "../../ports/providers.js";
@@ -52,12 +53,40 @@ export function createPathProbe(): PathProbe {
         .map((name) => rawPathFromBytes(new Uint8Array(Buffer.concat([prefix, name]))));
     },
 
+    /**
+     * The first `maxBytes` of a regular file, and only those are read.
+     *
+     * Detectors read files other people can replace — a Steam library on a
+     * shared disk, a logrotate rule — so a named pipe must not block discovery
+     * and `/dev/zero` must not be read whole to keep its first kilobytes. The
+     * open does not block, anything but a regular file is no answer, and procfs
+     * files, which report no size, are still read up to the limit.
+     */
     async readText(path, maxBytes) {
+      let handle;
       try {
-        const contents = await readFile(Buffer.from(pathBytes(path)));
-        return contents.subarray(0, maxBytes).toString("utf8");
+        handle = await open(Buffer.from(pathBytes(path)), constants.O_RDONLY | constants.O_NONBLOCK);
       } catch {
         return undefined;
+      }
+      try {
+        if (!(await handle.stat()).isFile()) {
+          return undefined;
+        }
+        const buffer = Buffer.alloc(Math.max(0, maxBytes));
+        let filled = 0;
+        while (filled < buffer.length) {
+          const { bytesRead } = await handle.read(buffer, filled, buffer.length - filled, null);
+          if (bytesRead === 0) {
+            break;
+          }
+          filled += bytesRead;
+        }
+        return buffer.subarray(0, filled).toString("utf8");
+      } catch {
+        return undefined;
+      } finally {
+        await handle.close();
       }
     },
   };
