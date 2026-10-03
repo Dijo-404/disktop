@@ -12,9 +12,26 @@ test("help is generated from the command table, so nothing can drift out of it",
     }
     assert.match(help, new RegExp(command.path.join(" ")), `${command.path.join(" ")} is missing from help`);
   }
-  assert.match(help, /\[planned\]/, "an unbuilt command must be marked");
-  assert.match(help, /are not implemented/, "the marker must be explained");
+  // Every declared command is built, so nothing may be marked as planned and
+  // the help must not explain a marker no command carries.
+  for (const command of COMMANDS) {
+    assert.equal(command.implemented, true, `${command.path.join(" ")} is declared but not built`);
+  }
+  assert.doesNotMatch(help, /\[planned\]/);
+  assert.doesNotMatch(help, /not implemented/);
   assert.match(help, /Exit status: 0 complete, 1 alert threshold reached/);
+});
+
+test("a command declared before it is built says so in its own help", () => {
+  const unbuilt = { path: ["someday"], summary: "Not here yet", options: [], implemented: false };
+  assert.match(renderHelp(unbuilt), /declared but not implemented yet/);
+});
+
+test("a command whose operand is one of fixed words lists them in its help", () => {
+  const find = COMMANDS.find((command) => command.path.join(" ") === "find");
+  assert.match(renderHelp(find), /KIND is one of: duplicates, stale, empty, broken\./);
+  const completion = COMMANDS.find((command) => command.path.join(" ") === "completion");
+  assert.match(renderHelp(completion), /SHELL is one of: bash, zsh, fish\./);
 });
 
 test("help fits an 80 column terminal, for every command", () => {
@@ -132,17 +149,15 @@ test("an incomplete inventory reports 3 and says what it missed", async () => {
   assert.equal(envelope.warnings.length, 1);
 });
 
-test("a declared but unbuilt command refuses in the same envelope shape", async () => {
+test("report and completion run rather than refusing as unbuilt", async () => {
   const context = fakeContext();
-  assert.equal(await runCli(["report", "--json"], context), 2);
-  const envelope = JSON.parse(context.captured.stdout);
-  assert.equal(envelope.status, "error");
-  assert.equal(envelope.error.code, "not-implemented");
+  assert.equal(await runCli(["report", "--format", "json"], context), 0);
+  assert.equal(JSON.parse(context.captured.stdout).document, "disktop-report");
 
   const text = fakeContext();
-  assert.equal(await runCli(["completion", "bash"], text), 2);
-  assert.equal(text.captured.stdout, "");
-  assert.match(text.captured.stderr, /not implemented yet/);
+  assert.equal(await runCli(["completion", "bash"], text), 0);
+  assert.match(text.captured.stdout, /complete -F _disktop disktop/);
+  assert.equal(text.captured.stderr, "");
 });
 
 test("--units changes presentation without changing a byte value", async () => {

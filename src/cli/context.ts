@@ -4,6 +4,7 @@ import type { ApplyService } from "../application/apply-action.js";
 import type { FindService } from "../application/find.js";
 import type { FootprintService } from "../application/footprint.js";
 import type { PlanService } from "../application/plan-action.js";
+import type { ReportService } from "../application/report.js";
 import type { UndoService } from "../application/undo.js";
 import type { ScanService } from "../application/scan.js";
 import type { SnapshotService } from "../application/snapshots.js";
@@ -87,6 +88,8 @@ export interface CliContext {
   readonly footprint: FootprintService;
   /** Reviewing, applying, undoing, and finding. The only path to a mutation. */
   readonly actions: ActionServices;
+  /** Gathering a report and publishing it as a new file; it replaces nothing. */
+  readonly report: ReportService;
   readonly signals: InterruptSource;
   /** Absent where nothing can show a notification. */
   readonly notifications?: AlertNotifications;

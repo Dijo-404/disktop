@@ -1,0 +1,11 @@
+{
+  "schemaVersion": "1",
+  "command": "report",
+  "generatedAt": "2026-09-29T08:15:04.117Z",
+  "status": "error",
+  "exitCode": 130,
+  "error": {
+    "code": "cancelled",
+    "message": "The report was interrupted, so nothing was written."
+  }
+}
