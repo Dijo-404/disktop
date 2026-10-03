@@ -2,7 +2,7 @@ import { boundedLimit, olderThanNanoseconds, parseSize } from "../../application
 import type { EntryFilter, EntrySort, SortOrder } from "../../ports/scan.js";
 import type { SnapshotSummary } from "../../ports/snapshots.js";
 import type { RawPath } from "../../domain/models.js";
-import { isWithin, pathBytes, rawPathFromUtf8 } from "../../domain/paths.js";
+import { isWithin, pathBytes, rawPathFromUtf8, sanitizeText } from "../../domain/paths.js";
 import type { CliContext } from "../context.js";
 import {
   EXIT,
@@ -62,7 +62,7 @@ export async function runExplore(context: CliContext, options: ExploreOptions): 
       "'--cursor' takes a cursor Disktop printed. Run the command without it to start again.",
     );
   }
-  if (options.limit !== undefined && !/^[1-9][0-9]*$/.test(options.limit)) {
+  if (options.limit !== undefined && (!/^[1-9][0-9]{0,3}$/.test(options.limit) || Number(options.limit) > 1000)) {
     return refuse(context, options.asJson, "invalid-input", "'--limit' accepts a whole number of entries from 1 to 1000.");
   }
 
@@ -232,7 +232,7 @@ function refuse(context: CliContext, asJson: boolean, code: "invalid-input" | "u
       }),
     );
   } else {
-    context.output.stderr(`${message}\n`);
+    context.output.stderr(`${sanitizeText(message)}\n`);
   }
   return EXIT.operationalError;
 }

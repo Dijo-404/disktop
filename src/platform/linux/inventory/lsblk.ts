@@ -1,4 +1,5 @@
 import type { Warning } from "../../../domain/models.js";
+import { sanitizeText } from "../../../domain/paths.js";
 
 /** One row of `lsblk --json --bytes` with the columns Disktop asks for by name. */
 export interface BlockDevice {
@@ -106,8 +107,16 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
+/**
+ * A text column, made safe to print where it is read.
+ *
+ * A device's model and transport come from the device itself, so a USB stick
+ * can name itself with an escape sequence; `disktop devices` would otherwise
+ * send it straight to the terminal. Every column is treated the same way, so
+ * the names that join one row to another still match after sanitizing.
+ */
 function text(value: unknown): string | undefined {
-  return typeof value === "string" && value !== "" ? value : undefined;
+  return typeof value === "string" && value !== "" ? sanitizeText(value) : undefined;
 }
 
 /** lsblk has reported booleans as `true`, as `"1"`, and as `null` across releases. */
