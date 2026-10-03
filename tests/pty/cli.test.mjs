@@ -195,3 +195,66 @@ test("every tab draws inside a real terminal and the keyboard reaches each one",
     rmSync(home, { recursive: true, force: true });
   }
 });
+
+test("a mouse click on a tab switches to it, and mouse reporting is switched off on the way out", async (context) => {
+  if (!haveScript(context)) {
+    return;
+  }
+  // The tab bar is row 2. Tabs are drawn as " N Name " separated by one
+  // space from column 2, so the History tab's first cell is found by adding up
+  // the labels before it.
+  const labels = ["Disks", "Explore", "Clean", "Dev", "Apps"].map((name, index) => ` ${index + 1} ${name} `.length + 1);
+  const historyColumn = 2 + labels.reduce((sum, width) => sum + width, 0) + 2;
+  const click = `\u001b[<0;${historyColumn};2M\u001b[<0;${historyColumn};2m`;
+  const home = mkdtempSync(join(tmpdir(), "disktop-pty-"));
+  try {
+    const result = await drivePty("node dist/bin/disktop.js", [click, "q"], {
+      TERM: "xterm-256color",
+      LANG: "C.UTF-8",
+      HOME: home,
+      XDG_STATE_HOME: join(home, "state"),
+      XDG_DATA_HOME: join(home, "data"),
+      XDG_CACHE_HOME: join(home, "cache"),
+      XDG_CONFIG_HOME: join(home, "config"),
+    });
+    assert.ok([0, 3].includes(result.status), `unexpected exit ${result.status}`);
+    assert.match(visible(result.stdout), /No action has been applied yet/, "the click opened History");
+    assert.match(result.stdout, /\u001b\[\?1006h/, "SGR mouse reporting was requested");
+    assert.match(result.stdout, /\u001b\[\?1000l/, "and turned off again on exit");
+  } finally {
+    rmSync(home, { recursive: true, force: true });
+  }
+});
+
+test("an exception thrown while the TUI runs restores the terminal before the report and exits 2", async () => {
+  // A renderer that records what was done to the terminal, and a dashboard
+  // whose second reading throws from a timer — outside any promise chain the
+  // app awaits — which is the case only the process-level handler can catch.
+  const script = `
+    import { runTui } from "./dist/tui/app.js";
+    import { buildTheme } from "./dist/tui/themes.js";
+    const view = { capability: { status: "available", explanation: "" }, devices: [], filesystems: [], alerts: [], warnings: [], complete: true };
+    const renderer = {
+      size: () => ({ columns: 80, rows: 24 }),
+      async start() { process.stdout.write("START\\n"); setTimeout(() => { throw new Error("boom"); }, 50); },
+      draw() {}, onKey() {}, onMouse() {}, onResize() {}, suspend() {}, resume() {},
+      stop() { process.stdout.write("RESTORED\\n"); },
+    };
+    const services = {
+      dashboard: { inventory: async () => view, dashboard: async () => view },
+      defaults: { excludes: [], retention: { keepLatest: 1 }, staleAfterDays: 1 },
+      home: { bytesBase64: "Lw==", display: "/" },
+      now: () => new Date(),
+    };
+    await runTui({ services, units: "iec", theme: buildTheme("none", false), createRenderer: async () => renderer });
+  `;
+  const child = spawn(process.execPath, ["--input-type=module", "-e", script], { cwd: process.cwd() });
+  let stdout = "";
+  let stderr = "";
+  child.stdout.setEncoding("utf8").on("data", (chunk) => { stdout += chunk; });
+  child.stderr.setEncoding("utf8").on("data", (chunk) => { stderr += chunk; });
+  const status = await new Promise((resolve) => child.on("close", resolve));
+  assert.equal(status, 2);
+  assert.match(stdout, /START\nRESTORED/, "the terminal is restored");
+  assert.match(stderr, /boom/, "and the reason is reported where it can be read");
+});
