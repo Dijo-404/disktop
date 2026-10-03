@@ -1,13 +1,15 @@
 #!/usr/bin/env node
 
 import { readFileSync } from "node:fs";
+import { homedir } from "node:os";
 import { resolve } from "node:path";
 import { bootstrapCli } from "../cli/bootstrap.js";
 import type { CliContext } from "../cli/context.js";
 import { createServices } from "../composition/root.js";
 import { runTui } from "../tui/app.js";
 import { createTerminalRenderer } from "../tui/render.js";
-import { selectTheme } from "../tui/themes.js";
+import { selectTheme, supportsFullScreen } from "../tui/themes.js";
+import { rawPathFromUtf8 } from "../domain/paths.js";
 
 const packageJson = JSON.parse(
   readFileSync(new URL("../../package.json", import.meta.url), "utf8"),
@@ -24,7 +26,9 @@ const output = {
  */
 async function buildContext(): Promise<CliContext> {
   const services = await createServices();
-  const interactive = process.stdout.isTTY === true && process.stdin.isTTY === true;
+  // A terminal that cannot address its cursor (TERM=dumb or unset) gets the
+  // text dashboard and no progress line, exactly like a pipe.
+  const interactive = process.stdout.isTTY === true && process.stdin.isTTY === true && supportsFullScreen(process.env);
 
   return {
     version: packageJson.version,
@@ -66,10 +70,29 @@ async function buildContext(): Promise<CliContext> {
     interactive,
     launchTui: (settings) =>
       runTui({
-        dashboard: services.dashboard,
+        services: {
+          dashboard: services.dashboard,
+          scan: services.scan,
+          explore: services.explore,
+          snapshots: services.snapshots,
+          find: services.find,
+          footprint: services.footprint,
+          plan: (request, signal) => services.plan.plan(request, signal),
+          apply: (request, signal) => services.apply.apply(request, signal),
+          history: (cursor, limit) => services.undo.history(cursor, limit),
+          restore: (journalId, signal) => services.undo.restore(journalId, signal),
+          defaults: {
+            excludes: services.scanDefaults.excludes,
+            retention: services.scanDefaults.retention,
+            staleAfterDays: services.findDefaults.staleAfterDays,
+          },
+          home: rawPathFromUtf8(homedir()),
+          now: () => new Date(),
+        },
         units: settings.units,
+        threshold: settings.thresholds.spacePercent,
         theme: selectTheme(process.env, interactive),
-        createRenderer: (theme) => createTerminalRenderer({ theme, mouse: true }),
+        createRenderer: (theme) => createTerminalRenderer({ theme, mouse: process.env.DISKTOP_NO_MOUSE === undefined }),
       }),
   };
 }
