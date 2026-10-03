@@ -557,31 +557,97 @@ fn openat2_raw(parent: RawFd, name: &CString, flags: u64, resolve: u64) -> io::R
     Ok(result as RawFd)
 }
 
-/// Metadata for one directory entry, never following a final symlink.
-pub fn metadata_at(parent: RawFd, name: &[u8]) -> io::Result<Metadata> {
-    metadata_at_flags(
-        parent,
-        name,
-        libc::AT_SYMLINK_NOFOLLOW | libc::AT_STATX_DONT_SYNC,
-    )
+/// `struct statx_timestamp` from `<linux/stat.h>`.
+#[repr(C)]
+#[derive(Clone, Copy)]
+#[allow(dead_code)]
+struct StatxTimestamp {
+    tv_sec: i64,
+    tv_nsec: u32,
+    reserved: i32,
 }
 
-fn metadata_at_flags(parent: RawFd, name: &[u8], flags: libc::c_int) -> io::Result<Metadata> {
-    let child = cstring(name)?;
-    let mut buffer = std::mem::MaybeUninit::<libc::statx>::zeroed();
+/// `struct statx` from `<linux/stat.h>`, as the kernel lays it out.
+///
+/// The helper calls `statx(2)` as a raw syscall with its own copy of the
+/// structure rather than through libc's wrapper, because the `libc` crate only
+/// exposes the wrapper, the structure, and the flags for musl when built with a
+/// cfg asserting musl 1.2.3 — a static musl release build would otherwise need
+/// that flag to compile at all. The layout is the kernel's ABI: fixed at 256
+/// bytes since the call was added in Linux 4.11, with later fields taken from
+/// the spare space at the end, so a buffer of this size is right for every
+/// kernel.
+#[repr(C)]
+#[derive(Clone, Copy)]
+// Fields this helper does not read are still part of the layout the kernel
+// writes into.
+#[allow(dead_code)]
+struct RawStatx {
+    stx_mask: u32,
+    stx_blksize: u32,
+    stx_attributes: u64,
+    stx_nlink: u32,
+    stx_uid: u32,
+    stx_gid: u32,
+    stx_mode: u16,
+    spare0: u16,
+    stx_ino: u64,
+    stx_size: u64,
+    stx_blocks: u64,
+    stx_attributes_mask: u64,
+    stx_atime: StatxTimestamp,
+    stx_btime: StatxTimestamp,
+    stx_ctime: StatxTimestamp,
+    stx_mtime: StatxTimestamp,
+    stx_rdev_major: u32,
+    stx_rdev_minor: u32,
+    stx_dev_major: u32,
+    stx_dev_minor: u32,
+    stx_mnt_id: u64,
+    stx_dio_mem_align: u32,
+    stx_dio_offset_align: u32,
+    spare3: [u64; 12],
+}
+
+const _: () = assert!(size_of::<RawStatx>() == 0x100);
+
+// From `<linux/fcntl.h>` and `<linux/stat.h>`; see `RawStatx` for why they are
+// spelled out here.
+const AT_STATX_DONT_SYNC: libc::c_int = 0x4000;
+const STATX_TYPE: u32 = 0x0001;
+const STATX_BASIC_STATS: u32 = 0x07ff;
+const STATX_MNT_ID: u32 = 0x1000;
+
+/// `statx(2)` into a zeroed buffer; the kernel fills in what `mask` asks for
+/// and reports in `stx_mask` what it actually filled in.
+fn raw_statx(parent: RawFd, name: &CString, flags: libc::c_int, mask: u32) -> io::Result<RawStatx> {
+    let mut buffer = std::mem::MaybeUninit::<RawStatx>::zeroed();
     let result = unsafe {
-        libc::statx(
+        libc::syscall(
+            libc::SYS_statx,
             parent,
-            child.as_ptr(),
+            name.as_ptr(),
             flags,
-            libc::STATX_BASIC_STATS | libc::STATX_MNT_ID,
+            mask,
             buffer.as_mut_ptr(),
         )
     };
     if result < 0 {
         return Err(io::Error::last_os_error());
     }
-    let stat = unsafe { buffer.assume_init() };
+    // Every field is an integer and the buffer started zeroed, so whatever the
+    // kernel did not write is a valid zero rather than uninitialised memory.
+    Ok(unsafe { buffer.assume_init() })
+}
+
+/// Metadata for one directory entry, never following a final symlink.
+pub fn metadata_at(parent: RawFd, name: &[u8]) -> io::Result<Metadata> {
+    metadata_at_flags(parent, name, libc::AT_SYMLINK_NOFOLLOW | AT_STATX_DONT_SYNC)
+}
+
+fn metadata_at_flags(parent: RawFd, name: &[u8], flags: libc::c_int) -> io::Result<Metadata> {
+    let child = cstring(name)?;
+    let stat = raw_statx(parent, &child, flags, STATX_BASIC_STATS | STATX_MNT_ID)?;
 
     let mode = u32::from(stat.stx_mode);
     let kind = match mode & libc::S_IFMT {
@@ -592,7 +658,7 @@ fn metadata_at_flags(parent: RawFd, name: &[u8], flags: libc::c_int) -> io::Resu
     };
 
     let device = device_number(stat.stx_dev_major, stat.stx_dev_minor);
-    let mount_id = if stat.stx_mask & libc::STATX_MNT_ID != 0 {
+    let mount_id = if stat.stx_mask & STATX_MNT_ID != 0 {
         stat.stx_mnt_id
     } else {
         device
@@ -629,26 +695,18 @@ pub fn target_exists(parent: RawFd, name: &[u8]) -> bool {
     let Ok(child) = cstring(name) else {
         return false;
     };
-    let mut buffer = std::mem::MaybeUninit::<libc::statx>::zeroed();
-    let result = unsafe {
-        libc::statx(
-            parent,
-            child.as_ptr(),
-            libc::AT_STATX_DONT_SYNC | libc::AT_NO_AUTOMOUNT,
-            libc::STATX_TYPE,
-            buffer.as_mut_ptr(),
-        )
-    };
-    result == 0
+    raw_statx(
+        parent,
+        &child,
+        AT_STATX_DONT_SYNC | libc::AT_NO_AUTOMOUNT,
+        STATX_TYPE,
+    )
+    .is_ok()
 }
 
 /// Metadata for an already-open descriptor, used for a scan root.
 pub fn metadata_of(descriptor: RawFd) -> io::Result<Metadata> {
-    metadata_at_flags(
-        descriptor,
-        b"",
-        libc::AT_EMPTY_PATH | libc::AT_STATX_DONT_SYNC,
-    )
+    metadata_at_flags(descriptor, b"", libc::AT_EMPTY_PATH | AT_STATX_DONT_SYNC)
 }
 
 fn device_number(major: u32, minor: u32) -> u64 {
@@ -758,6 +816,74 @@ unsafe impl Send for Directory {}
 mod tests {
     use super::*;
     use crate::testing::Sandbox;
+
+    /// The raw `statx` call reads its own copy of the kernel's structure, so it
+    /// is checked field by field against what the standard library's `lstat`
+    /// says about the same entries: a file, a directory, a symlink, and an
+    /// open descriptor.
+    #[test]
+    fn the_raw_statx_call_reads_what_lstat_reads() {
+        use std::os::unix::fs::MetadataExt;
+        let sandbox = Sandbox::new("sys-raw-statx");
+        sandbox.file(b"file", 70_000);
+        sandbox.directory(b"directory");
+        sandbox.symlink(b"/nonexistent/target", b"link");
+        sandbox.hardlink(b"file", b"second-name");
+        sandbox.chmod(b"directory", 0o1750);
+        let parent = open_root(&sandbox.bytes()).unwrap();
+
+        for (name, kind) in [
+            (&b"file"[..], EntryKind::File),
+            (b"directory", EntryKind::Directory),
+            (b"link", EntryKind::Symlink),
+        ] {
+            let ours = metadata_at(parent, name).unwrap();
+            let theirs =
+                std::fs::symlink_metadata(sandbox.path().join(std::str::from_utf8(name).unwrap()))
+                    .unwrap();
+            let label = String::from_utf8_lossy(name);
+            assert_eq!(ours.kind, kind, "{label}");
+            assert_eq!(ours.device, theirs.dev(), "{label}");
+            assert_eq!(ours.inode, theirs.ino(), "{label}");
+            assert_eq!(ours.link_count, theirs.nlink(), "{label}");
+            assert_eq!(ours.apparent_bytes, theirs.size(), "{label}");
+            assert_eq!(ours.allocated_bytes, theirs.blocks() * 512, "{label}");
+            assert_eq!(ours.owner_id, theirs.uid(), "{label}");
+            assert_eq!(ours.group_id, theirs.gid(), "{label}");
+            assert_eq!(ours.permissions, theirs.mode() & 0o7777, "{label}");
+            assert_eq!(
+                ours.modified_nanoseconds,
+                theirs.mtime() as u64 * 1_000_000_000 + theirs.mtime_nsec() as u64,
+                "{label}"
+            );
+        }
+        assert_eq!(metadata_at(parent, b"file").unwrap().link_count, 2);
+        assert_eq!(
+            metadata_at(parent, b"directory").unwrap().permissions,
+            0o1750,
+            "the sticky bit comes through"
+        );
+
+        let descriptor = openat_read_no_symlinks(parent, b"file").unwrap();
+        let through_descriptor = metadata_of(descriptor).unwrap();
+        assert_eq!(
+            through_descriptor.inode,
+            metadata_at(parent, b"file").unwrap().inode
+        );
+        close(descriptor);
+
+        assert!(target_exists(parent, b"file"));
+        assert!(
+            !target_exists(parent, b"link"),
+            "a dangling link resolves to nothing"
+        );
+        assert_eq!(
+            metadata_at(parent, b"missing").unwrap_err().raw_os_error(),
+            Some(libc::ENOENT),
+            "an error comes back with its errno",
+        );
+        close(parent);
+    }
 
     /// The check every other test relies on to catch a descriptor closed by two
     /// owners: without it, a double close only shows up as some other thread's
