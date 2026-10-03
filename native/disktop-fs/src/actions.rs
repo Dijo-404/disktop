@@ -2275,7 +2275,12 @@ fn release_one(left: &crate::journal::AbandonedStaging) -> Released {
 
 fn empty_directory(parent: libc::c_int, name: &[u8]) -> std::io::Result<()> {
     // `remove_children` takes the descriptor and closes it with its stream.
-    remove_children(sys::open_directory_no_symlinks(parent, name)?)
+    remove_children(open_for_removal(parent, name)?)
+}
+
+/// Open a directory being removed: never through a symlink, never into another mount.
+fn open_for_removal(parent: libc::c_int, name: &[u8]) -> std::io::Result<libc::c_int> {
+    sys::open_child_directory(parent, name, false)
 }
 
 /// Remove one entry, recursively if it is a directory.
@@ -2287,7 +2292,7 @@ fn remove_entry(parent: libc::c_int, name: &[u8], kind: EntryKind) -> std::io::R
     if kind != EntryKind::Directory {
         return sys::unlinkat(parent, name, false);
     }
-    let descriptor = sys::open_directory_no_symlinks(parent, name)?;
+    let descriptor = open_for_removal(parent, name)?;
     remove_children(descriptor)?;
     sys::unlinkat(parent, name, true)
 }
@@ -2318,7 +2323,7 @@ fn remove_children(descriptor: libc::c_int) -> std::io::Result<()> {
             Err(error) => return Err(error),
         };
         if metadata.kind == EntryKind::Directory {
-            let child = sys::open_directory_no_symlinks(descriptor, &name)?;
+            let child = open_for_removal(descriptor, &name)?;
             remove_children(child)?;
             sys::unlinkat(descriptor, &name, true)?;
         } else {
@@ -2771,5 +2776,31 @@ fn parent_path(path: &[u8]) -> Vec<u8> {
     match path.iter().rposition(|byte| *byte == b'/') {
         Some(0) | None => b"/".to_vec(),
         Some(position) => path[..position].to_vec(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::testing::Sandbox;
+
+    #[test]
+    fn a_removal_never_descends_into_another_filesystem() {
+        let root = sys::open_root(b"/").unwrap();
+        let crossing = open_for_removal(root, b"proc");
+        sys::close(root);
+        assert_eq!(
+            crossing.err().and_then(|error| error.raw_os_error()),
+            Some(libc::EXDEV),
+            "/proc is its own mount, so a removal walk must refuse to enter it"
+        );
+
+        let sandbox = Sandbox::new("removal-same-filesystem");
+        sandbox.directory(b"inner");
+        let parent = sys::open_root(&sandbox.bytes()).unwrap();
+        let inner =
+            open_for_removal(parent, b"inner").expect("a directory on the same filesystem opens");
+        sys::close(inner);
+        sys::close(parent);
     }
 }
