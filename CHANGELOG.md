@@ -110,6 +110,17 @@ phases that were never published; this is the first version anybody can install.
   - A history page is bounded: a record lists at most 1000 items and counts the rest in
     `itemsOmitted`; undo still reads the whole record.
   - Reconciliation no longer treats the helper's own in-flight actions as abandoned.
+  - A move into Trash and an undo's move back are durable before the journal records
+    them: both directories are fsynced after the rename, and an fsync that fails leaves
+    the item uncertain. A power cut could otherwise leave History saying a file moved
+    while the disk still had it where it was.
+  - A sparse file keeps its holes when it is moved to another disk; it was written out
+    in full, so a disk image could arrive as large as it claimed to be and fill a
+    destination the free-space check said it fit.
+  - A file with several names inside a moved tree is copied once and linked under the
+    rest, and inside a compressed tree it is stored once with tar hard-link members;
+    each name used to become a copy of its own, needing more room than the plan
+    measured.
 - Scan and index (measured on a million-entry tree, release build):
   - Each scan is its own SQLite file, appended to with no secondary index and indexed
     once when the walk ends: a million-entry scan takes 5.2 s instead of 48 s and its

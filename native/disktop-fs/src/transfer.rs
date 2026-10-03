@@ -17,6 +17,7 @@
 use crate::content;
 use crate::sys::{self, EntryKind};
 use sha2::{Digest, Sha256};
+use std::collections::HashMap;
 use std::io;
 use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
 use std::os::unix::io::RawFd;
@@ -108,22 +109,102 @@ pub fn copy_file(
 }
 
 /// Copy every byte, returning how many there were and their digest.
+///
+/// A hole in the source stays a hole in the copy. It reads as zeros, and
+/// writing those zeros would allocate every one of them, so a sparse disk
+/// image would arrive as large as it claims to be — more than the plan
+/// measured and more than the free-space check asked the destination for.
+/// The holes are found with `SEEK_DATA` and `SEEK_HOLE`, only the data between
+/// them is written, and the length is set at the end so a trailing hole keeps
+/// its size. The digest still covers every byte a reader sees, zeros
+/// included, because that is what the verification reads back.
+///
+/// The length is the source's length when the copy starts. A source that
+/// grows or shrinks while it is read is a source that changed, and the caller
+/// refuses to publish it on that ground; a short read here is an error of its
+/// own so a truncated file never verifies against itself.
 fn stream(source: RawFd, staged: RawFd, cancelled: &AtomicBool) -> io::Result<(u64, [u8; 32])> {
+    let length = sys::metadata_of(source)?.apparent_bytes;
     let mut buffer = vec![0u8; COPY_BYTES];
     let mut hasher = Sha256::new();
     let mut offset = 0u64;
 
-    loop {
-        check(cancelled)?;
-        let read = pread(source, &mut buffer, offset)?;
-        if read == 0 {
+    while offset < length {
+        let data = seek(source, offset, libc::SEEK_DATA)?
+            .unwrap_or(length)
+            .min(length);
+        hash_zeros(&mut hasher, data - offset, cancelled)?;
+        offset = data;
+        if offset == length {
             break;
         }
-        write_all(staged, &buffer[..read], offset)?;
-        hasher.update(&buffer[..read]);
-        offset += read as u64;
+        // The end of the file counts as a hole, so this always finds one.
+        let hole = seek(source, offset, libc::SEEK_HOLE)?
+            .unwrap_or(length)
+            .min(length);
+        while offset < hole {
+            check(cancelled)?;
+            let wanted = usize::try_from(hole - offset)
+                .unwrap_or(usize::MAX)
+                .min(COPY_BYTES);
+            let read = pread(source, &mut buffer[..wanted], offset)?;
+            if read == 0 {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "the file shrank while it was being copied",
+                ));
+            }
+            write_all(staged, &buffer[..read], offset)?;
+            hasher.update(&buffer[..read]);
+            offset += read as u64;
+        }
     }
-    Ok((offset, hasher.finalize().into()))
+    ftruncate(staged, length)?;
+    Ok((length, hasher.finalize().into()))
+}
+
+/// Digest `count` zero bytes: what a hole reads as.
+fn hash_zeros(hasher: &mut Sha256, mut count: u64, cancelled: &AtomicBool) -> io::Result<()> {
+    static ZEROS: [u8; 64 * 1024] = [0; 64 * 1024];
+    while count > 0 {
+        check(cancelled)?;
+        let chunk = count.min(ZEROS.len() as u64) as usize;
+        hasher.update(&ZEROS[..chunk]);
+        count -= chunk as u64;
+    }
+    Ok(())
+}
+
+/// The next data or hole at or after `offset`, or `None` past the last data.
+///
+/// A filesystem that cannot answer is treated as having no holes, which is
+/// exactly what every byte-for-byte copy assumed before.
+fn seek(descriptor: RawFd, offset: u64, whence: libc::c_int) -> io::Result<Option<u64>> {
+    let result = unsafe { libc::lseek(descriptor, offset as libc::off_t, whence) };
+    if result >= 0 {
+        return Ok(Some(result as u64));
+    }
+    let error = io::Error::last_os_error();
+    match error.raw_os_error() {
+        Some(libc::ENXIO) => Ok(None),
+        Some(libc::EINVAL) | Some(libc::EOPNOTSUPP) if whence == libc::SEEK_DATA => {
+            Ok(Some(offset))
+        }
+        Some(libc::EINVAL) | Some(libc::EOPNOTSUPP) => Ok(None),
+        _ => Err(error),
+    }
+}
+
+fn ftruncate(descriptor: RawFd, length: u64) -> io::Result<()> {
+    loop {
+        if unsafe { libc::ftruncate(descriptor, length as libc::off_t) } == 0 {
+            return Ok(());
+        }
+        let error = io::Error::last_os_error();
+        if error.kind() != io::ErrorKind::Interrupted {
+            return Err(error);
+        }
+    }
 }
 
 /// Read the staged copy back and compare it with what was read from the source.
@@ -168,17 +249,23 @@ pub fn copy_tree(
 }
 
 /// One directory being copied: where it is read from, where it is written to,
-/// the permissions it gets once it is complete, and the names it has left, in
-/// reverse so the next one is a `pop`.
+/// where that is below the staged root, the permissions it gets once it is
+/// complete, and the names it has left, in reverse so the next one is a `pop`.
 struct Frame {
     source: OwnedFd,
     destination: OwnedFd,
+    path: Vec<Vec<u8>>,
     permissions: u32,
     names: Vec<Vec<u8>>,
 }
 
 impl Frame {
-    fn enter(source: OwnedFd, destination: OwnedFd, permissions: u32) -> io::Result<Frame> {
+    fn enter(
+        source: OwnedFd,
+        destination: OwnedFd,
+        path: Vec<Vec<u8>>,
+        permissions: u32,
+    ) -> io::Result<Frame> {
         // Names are read before anything is written, so what `readdir` returns
         // is not affected by what this is creating elsewhere.
         let mut stream = sys::Directory::from_descriptor(duplicate(source.as_raw_fd())?)?;
@@ -190,10 +277,48 @@ impl Frame {
         Ok(Frame {
             source,
             destination,
+            path,
             permissions,
             names,
         })
     }
+}
+
+/// The first copy made of a file that has more than one name, so its other
+/// names inside the tree become links to it rather than copies of it.
+struct FirstCopy {
+    /// The directories from the staged root down to it, one name each.
+    directory: Vec<Vec<u8>>,
+    name: Vec<u8>,
+    device: u64,
+    inode: u64,
+}
+
+/// Give a file inside the copy another name, the way it had in the source.
+///
+/// The first copy is reached again from the staged root one directory at a
+/// time, never through a symlink and never onto another filesystem, and the
+/// new name is accepted only if it is that very inode: the staged tree is in a
+/// directory other people may be able to write to, and a link to whatever is
+/// there now would be a link to something nobody copied.
+fn link_to(root: RawFd, first: &FirstCopy, destination: RawFd, name: &[u8]) -> io::Result<()> {
+    let mut directory = owned(duplicate(root)?);
+    for component in &first.directory {
+        directory = owned(sys::open_child_directory(
+            directory.as_raw_fd(),
+            component,
+            false,
+        )?);
+    }
+    sys::linkat(directory.as_raw_fd(), &first.name, destination, name)?;
+    let linked = sys::metadata_at(destination, name)?;
+    if linked.device != first.device || linked.inode != first.inode {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "a file inside the copy changed while it was being written, so it was not published",
+        ));
+    }
+    Ok(())
 }
 
 /// Copy everything under `source` into `destination`, depth first.
@@ -201,6 +326,12 @@ impl Frame {
 /// The directories being copied are kept on an explicit stack rather than the
 /// call stack, so no tree is deep enough to crash the helper partway through a
 /// copy; past `subtree::MAX_DEPTH` levels it stops with an error instead.
+///
+/// A file with several names inside the tree is copied once and linked under
+/// the rest, so the copy needs the room the plan measured — the scan counts
+/// such a file once — and is still one file. A name whose other names are
+/// outside the tree is copied as a file of its own, because what it shares
+/// with is not being moved.
 fn copy_children(
     source: RawFd,
     destination: OwnedFd,
@@ -208,9 +339,12 @@ fn copy_children(
     copied: &mut Copied,
     cancelled: &AtomicBool,
 ) -> io::Result<()> {
+    let root = owned(duplicate(destination.as_raw_fd())?);
+    let mut first_copies: HashMap<(u64, u64), FirstCopy> = HashMap::new();
     let mut stack = vec![Frame::enter(
         owned(duplicate(source)?),
         destination,
+        Vec::new(),
         permissions,
     )?];
     while let Some(frame) = stack.last_mut() {
@@ -232,6 +366,7 @@ fn copy_children(
         let metadata = sys::metadata_at(source, &name)?;
         match metadata.kind {
             EntryKind::Directory => {
+                let mut path = frame.path.clone();
                 // The frames on the stack are this directory's ancestors, so
                 // their count is how deep it is.
                 if stack.len() > crate::subtree::MAX_DEPTH {
@@ -243,9 +378,17 @@ fn copy_children(
                 let child = owned(sys::open_child_directory(source, &name, false)?);
                 sys::mkdirat_exclusive(destination, &name, WORKING_DIRECTORY_MODE)?;
                 let into = owned(sys::open_directory_no_symlinks(destination, &name)?);
-                stack.push(Frame::enter(child, into, metadata.permissions)?);
+                path.push(name);
+                stack.push(Frame::enter(child, into, path, metadata.permissions)?);
             }
             EntryKind::File => {
+                let key = (metadata.device, metadata.inode);
+                if metadata.link_count > 1
+                    && let Some(first) = first_copies.get(&key)
+                {
+                    link_to(root.as_raw_fd(), first, destination, &name)?;
+                    continue;
+                }
                 let descriptor = owned(sys::openat_read_no_symlinks(source, &name)?);
                 let bytes = copy_file(
                     descriptor.as_raw_fd(),
@@ -258,6 +401,18 @@ fn copy_children(
                 )?;
                 copied.files += 1;
                 copied.bytes += bytes;
+                if metadata.link_count > 1 {
+                    let made = sys::metadata_at(destination, &name)?;
+                    first_copies.insert(
+                        key,
+                        FirstCopy {
+                            directory: frame.path.clone(),
+                            name,
+                            device: made.device,
+                            inode: made.inode,
+                        },
+                    );
+                }
             }
             EntryKind::Symlink => {
                 let target = sys::readlinkat(source, &name)?;
@@ -391,6 +546,141 @@ mod tests {
         sys::close(source);
         sys::close(parent);
         assert!(outcome.is_err());
+    }
+
+    fn allocated(path: &std::path::Path) -> u64 {
+        use std::os::unix::fs::MetadataExt;
+        std::fs::metadata(path).unwrap().blocks() * 512
+    }
+
+    /// A file with `data` written at each offset and `length` bytes in all,
+    /// or `None` when this filesystem allocates the holes anyway and so has
+    /// nothing sparse to copy.
+    fn sparse(sandbox: &Sandbox, name: &str, data: &[u64], length: u64) -> Option<()> {
+        use std::os::unix::fs::FileExt;
+        let path = sandbox.path().join(name);
+        let file = std::fs::File::create(&path).unwrap();
+        for offset in data {
+            file.write_all_at(&[7u8; 4096], *offset).unwrap();
+        }
+        file.set_len(length).unwrap();
+        drop(file);
+        (allocated(&path) < length / 2).then_some(())
+    }
+
+    fn copied(sandbox: &Sandbox, from: &[u8], to: &[u8]) -> u64 {
+        let parent = sys::open_root(&sandbox.bytes()).unwrap();
+        let source = sys::openat_read_no_symlinks(parent, from).unwrap();
+        let bytes = copy_file(
+            source,
+            parent,
+            to,
+            0o600,
+            None,
+            &mut |_| Ok(()),
+            &AtomicBool::new(false),
+        )
+        .unwrap();
+        sys::close(source);
+        sys::close(parent);
+        bytes
+    }
+
+    /// A hole reads as zeros. Writing those zeros out would allocate every one
+    /// of them, so a sparse disk image would arrive as large as it claims to be
+    /// and could fill a destination the plan's free-space check said it fit.
+    #[test]
+    fn a_sparse_file_arrives_with_its_holes() {
+        const LENGTH: u64 = 16 * 1024 * 1024;
+        for (name, data) in [
+            ("leading-data", &[0, 8 * 1024 * 1024][..]),
+            ("leading-hole", &[4 * 1024 * 1024][..]),
+            ("only-holes", &[][..]),
+            ("ends-in-data", &[0, LENGTH - 4096][..]),
+        ] {
+            let sandbox = Sandbox::new(&format!("transfer-sparse-{name}"));
+            if sparse(&sandbox, "source.img", data, LENGTH).is_none() {
+                eprintln!("{name}: this filesystem does not keep holes; nothing to check");
+                continue;
+            }
+            assert_eq!(copied(&sandbox, b"source.img", b"copy.img"), LENGTH);
+
+            let source = sandbox.path().join("source.img");
+            let copy = sandbox.path().join("copy.img");
+            assert_eq!(std::fs::metadata(&copy).unwrap().len(), LENGTH, "{name}");
+            assert!(
+                allocated(&copy) <= allocated(&source) + 1024 * 1024,
+                "{name}: the copy allocated {} bytes for a source that holds {}",
+                allocated(&copy),
+                allocated(&source),
+            );
+            assert!(
+                std::fs::read(&copy).unwrap() == std::fs::read(&source).unwrap(),
+                "{name}: the copy reads back as different bytes",
+            );
+        }
+    }
+
+    /// Two names for one file inside a tree are one file in its copy too.
+    /// Copied separately they would need room for each, more than the tree
+    /// the plan measured, and would stop being the same file.
+    #[test]
+    fn names_for_one_file_inside_a_tree_stay_one_file_when_it_is_copied() {
+        use std::os::unix::fs::MetadataExt;
+        let sandbox = Sandbox::new("transfer-hardlinks");
+        sandbox.directory(b"work/inner/deeper");
+        sandbox.directory(b"outside");
+        sandbox.directory(b"elsewhere");
+        sandbox.file(b"work/first", 8192);
+        sandbox.hardlink(b"work/first", b"work/inner/second");
+        sandbox.hardlink(b"work/first", b"work/inner/deeper/third");
+        sandbox.file(b"work/alone", 4096);
+        sandbox.file(b"outside/shared", 2048);
+        sandbox.hardlink(b"outside/shared", b"work/inner/from-outside");
+
+        let source = sys::open_root(&joined(&sandbox, b"work")).unwrap();
+        let destination = sys::open_root(&joined(&sandbox, b"elsewhere")).unwrap();
+        let outcome = copy_tree(
+            source,
+            destination,
+            b"work",
+            0o700,
+            &mut |_| Ok(()),
+            &AtomicBool::new(false),
+        );
+        sys::close(source);
+        sys::close(destination);
+        let copied = outcome.expect("the tree is copied");
+
+        let copy = sandbox.path().join("elsewhere/work");
+        let inode = |relative: &str| std::fs::metadata(copy.join(relative)).unwrap().ino();
+        assert_eq!(inode("first"), inode("inner/second"));
+        assert_eq!(inode("first"), inode("inner/deeper/third"));
+        assert_eq!(std::fs::metadata(copy.join("first")).unwrap().nlink(), 3);
+        assert_ne!(inode("first"), inode("alone"));
+        assert_eq!(
+            std::fs::metadata(copy.join("inner/from-outside"))
+                .unwrap()
+                .nlink(),
+            1,
+            "a name whose other names are outside the tree arrives as a file of its own",
+        );
+        assert_eq!(
+            std::fs::read(copy.join("inner/deeper/third")).unwrap(),
+            vec![b'x'; 8192]
+        );
+        assert_eq!(
+            copied.bytes,
+            8192 + 4096 + 2048,
+            "a file's bytes are written once, however many names it has",
+        );
+    }
+
+    fn joined(sandbox: &Sandbox, relative: &[u8]) -> Vec<u8> {
+        let mut path = sandbox.bytes();
+        path.push(b'/');
+        path.extend_from_slice(relative);
+        path
     }
 
     /// A cancelled copy stops at the next chunk with an error the caller can

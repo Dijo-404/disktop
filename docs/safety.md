@@ -220,10 +220,12 @@ There is a remaining Linux race when another actor with write access to the same
 
 How small the window is depends on the operation. A Trash move and a hardlink replacement check what their rename or exchange actually took and put anything else straight back, so a swap costs nothing but a skipped item. A permanent erase has no way back: `unlinkat` removes whatever holds the name at that instant, and a file renamed over the reviewed one in the microseconds after its last check is removed with it. That is the same exposure `rm` has, it needs an actor already able to write in the target's parent, and closing it would need a removal primitive the kernel does not offer.
 
-### Known limits of a copy
+### What a copy keeps, and its remaining limit
 
-These do not lose data; they are recorded so nobody is surprised by them.
+A copy is meant to need the room the plan measured, and to be the same tree.
 
-- A copy writes every byte, so a sparse file arrives fully allocated. The free-space check before a move asks for the size the plan measured, which is the source's allocated size, so a sparse source can still fill its destination partway. When that happens the copy stops with `no-space`, what was staged is removed, and the source is untouched.
-- Hardlinks inside a moved or compressed tree are copied as separate files, so the copy can need more room than the measured tree. The same `no-space` unwinding applies.
-- The rename into Trash and an undo's rename out of it are not followed by a directory `fsync`. A power cut just after one can leave the journal saying an item moved while the file is still where it was; nothing is lost, and an undo then reports that Trash no longer holds it. The `.trashinfo` written before the move is durable either way.
+- A sparse file keeps its holes. The copy asks the source for its data with `SEEK_DATA` and `SEEK_HOLE`, writes only that, and sets the length at the end, so a disk image arrives no larger than it was. The verification still reads every byte back, holes as zeros. A destination filesystem that cannot hold a hole (FAT and exFAT) allocates it anyway.
+- A file with several names inside a moved tree is copied once and linked under its other names, and inside a compressed tree it is stored once with a hard-link member for each other name, the way `tar` writes it. Each link is checked to be the very file the copy wrote before the next entry is read.
+- A rename into Trash, and an undo's rename out of it, is followed by an `fsync` of both directories before the journal records it, so a power cut cannot leave the journal saying an item moved while the disk still has it where it was. If that `fsync` fails, the item is `uncertain` and says where the file is.
+
+One limit remains, and it does not lose data. A file whose other names are outside the tree is copied as a file of its own, because what it shares with is not being moved, and a scan that reached the outside name first counted its bytes there rather than in the tree. The copy can then need more room than the plan measured. When that happens it stops with `no-space`, what was staged is removed, and the source is untouched.

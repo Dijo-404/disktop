@@ -15,6 +15,7 @@
 use crate::sys::{self, EntryKind};
 use crate::transfer::check;
 use sha2::{Digest, Sha256};
+use std::collections::HashMap;
 use std::io::{self, Read, Write};
 use std::os::fd::{AsRawFd, OwnedFd};
 use std::os::unix::io::{FromRawFd, RawFd};
@@ -241,6 +242,11 @@ impl Frame {
 /// The directories being read are kept on an explicit stack rather than the
 /// call stack, so no tree is deep enough to crash the helper partway through
 /// an archive; past `subtree::MAX_DEPTH` levels it stops with an error instead.
+///
+/// A file with several names inside the tree is stored once, under the first
+/// name the walk reaches, and every later name is a hard-link member pointing
+/// at it — what `tar` itself writes. Unpacking gives back one file with all
+/// its names, and the archive holds its bytes once rather than once a name.
 fn append_children<W: Write>(
     builder: &mut tar::Builder<W>,
     source: RawFd,
@@ -248,6 +254,7 @@ fn append_children<W: Write>(
     entries: &mut u64,
     cancelled: &AtomicBool,
 ) -> io::Result<()> {
+    let mut archived: HashMap<(u64, u64), Vec<u8>> = HashMap::new();
     let mut stack = vec![Frame::enter(owned(duplicate(source)?), root.to_vec())?];
     while let Some(frame) = stack.last_mut() {
         let Some(name) = frame.names.pop() else {
@@ -280,6 +287,22 @@ fn append_children<W: Write>(
                 stack.push(Frame::enter(child, path)?);
             }
             EntryKind::File => {
+                let key = (metadata.device, metadata.inode);
+                if metadata.link_count > 1
+                    && let Some(first) = archived.get(&key)
+                {
+                    let mut header = tar::Header::new_gnu();
+                    header.set_entry_type(tar::EntryType::Link);
+                    header.set_size(0);
+                    header.set_mode(metadata.permissions);
+                    header.set_mtime(metadata.modified_nanoseconds / 1_000_000_000);
+                    builder.append_link(&mut header, osstr(&path), osstr(first))?;
+                    *entries += 1;
+                    continue;
+                }
+                if metadata.link_count > 1 {
+                    archived.insert(key, path.clone());
+                }
                 let mut reader = Member::new(
                     Source::open(source, &name)?,
                     metadata.apparent_bytes,
@@ -569,6 +592,84 @@ mod tests {
             .read_to_end(&mut Vec::new())
             .expect_err("the missing bytes are noticed");
         assert_eq!(error.kind(), io::ErrorKind::InvalidData);
+    }
+
+    /// Two names for one file inside a tree are archived as one member and a
+    /// link to it, the way `tar` itself archives them, so unpacking gives back
+    /// one file with two names rather than two copies of it.
+    #[test]
+    fn names_for_one_file_inside_a_tree_are_archived_once() {
+        use std::os::unix::fs::MetadataExt;
+        let sandbox = Sandbox::new("archive-hardlinks");
+        sandbox.directory(b"work/inner");
+        sandbox.directory(b"out");
+        sandbox.directory(b"unpacked");
+        std::fs::write(sandbox.path().join("work/first"), vec![5u8; 50_000]).unwrap();
+        sandbox.hardlink(b"work/first", b"work/inner/second");
+        sandbox.file(b"work/alone", 1000);
+
+        let source = std::fs::File::open(sandbox.path().join("work")).unwrap();
+        let destination = std::fs::File::open(sandbox.path().join("out")).unwrap();
+        let written = compress_tree(
+            source.as_raw_fd(),
+            b"work",
+            destination.as_raw_fd(),
+            b"work.tar.zst",
+            0o600,
+            &mut |_| Ok(()),
+            &NOT_CANCELLED,
+        )
+        .expect("the archive is written");
+        assert_eq!(
+            verify_tree(destination.as_raw_fd(), b"work.tar.zst", &NOT_CANCELLED).unwrap(),
+            written,
+        );
+        assert_eq!(
+            readable_as_tar(destination.as_raw_fd(), b"work.tar.zst", &NOT_CANCELLED).unwrap(),
+            4,
+            "work/first, work/inner, work/inner/second, and work/alone",
+        );
+
+        let archive = || {
+            let file = std::fs::File::open(sandbox.path().join("out/work.tar.zst")).unwrap();
+            tar::Archive::new(zstd::stream::read::Decoder::new(file).unwrap())
+        };
+        let mut regular = 0;
+        let mut links = Vec::new();
+        for entry in archive().entries().unwrap() {
+            let entry = entry.unwrap();
+            match entry.header().entry_type() {
+                tar::EntryType::Regular => regular += 1,
+                tar::EntryType::Link => links.push((
+                    entry.path().unwrap().into_owned(),
+                    entry.link_name().unwrap().unwrap().into_owned(),
+                )),
+                _ => {}
+            }
+        }
+        assert_eq!(regular, 2, "the shared file's bytes are stored once");
+        assert_eq!(links.len(), 1);
+        let names = [links[0].0.clone(), links[0].1.clone()];
+        assert!(
+            names.contains(&"work/first".into()) && names.contains(&"work/inner/second".into()),
+            "{links:?}"
+        );
+
+        archive()
+            .unpack(sandbox.path().join("unpacked"))
+            .expect("the archive unpacks");
+        let unpacked = sandbox.path().join("unpacked/work");
+        let first = std::fs::metadata(unpacked.join("first")).unwrap();
+        assert_eq!(
+            first.ino(),
+            std::fs::metadata(unpacked.join("inner/second"))
+                .unwrap()
+                .ino()
+        );
+        assert_eq!(
+            std::fs::read(unpacked.join("inner/second")).unwrap(),
+            vec![5u8; 50_000]
+        );
     }
 
     #[test]

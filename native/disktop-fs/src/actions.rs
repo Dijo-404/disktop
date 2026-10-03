@@ -2069,6 +2069,18 @@ enum IntoTrash {
     Failed(std::io::Error),
 }
 
+/// Make a rename that has already happened durable.
+///
+/// A rename changes two directories, and it is only certain to survive a power
+/// cut once both are on the device. Until then the journal must not say it
+/// happened: a record of a move into Trash that the disk never kept sends an
+/// undo looking for something that was never there, and a record of a move
+/// back that the disk lost leaves a file in Trash that History says is home.
+fn make_rename_durable(arrived_in: libc::c_int, left: libc::c_int) -> std::io::Result<()> {
+    sys::fsync(arrived_in)?;
+    sys::fsync(left)
+}
+
 /// Rename a revalidated target into its reserved Trash name, and check that
 /// what arrived is what was revalidated.
 ///
@@ -2099,7 +2111,20 @@ fn move_into_trash(
         String::from_utf8_lossy(&path).into_owned()
     };
     match sys::metadata_at(destination.files_descriptor, &reserved.name) {
-        Ok(held) if held.device == live.device && held.inode == live.inode => IntoTrash::Moved,
+        Ok(held) if held.device == live.device && held.inode == live.inode => {
+            match make_rename_durable(destination.files_descriptor, parent.descriptor()) {
+                Ok(()) => IntoTrash::Moved,
+                Err(error) => IntoTrash::Refused(
+                    "internal-error",
+                    format!(
+                        "It was moved to Trash as '{}', but the move could not be made durable, \
+                         so a power cut could still undo it: {error}",
+                        in_trash(),
+                    ),
+                    Outcome::Uncertain,
+                ),
+            }
+        }
         Ok(_) => match sys::renameat_no_replace(
             destination.files_descriptor,
             &reserved.name,
@@ -2437,16 +2462,31 @@ fn restore_one(
     );
 
     let report = match moved {
-        Ok(()) => {
-            remove_trash_metadata(from);
-            ItemReport {
-                path: target.path.clone(),
-                outcome: Outcome::Completed,
-                reason: None,
-                message: None,
-                bytes: target.reviewed_bytes,
+        Ok(()) => match make_rename_durable(destination.descriptor(), source.descriptor()) {
+            Ok(()) => {
+                remove_trash_metadata(from);
+                ItemReport {
+                    path: target.path.clone(),
+                    outcome: Outcome::Completed,
+                    reason: None,
+                    message: None,
+                    bytes: target.reviewed_bytes,
+                }
             }
-        }
+            // It is back, but not certainly. Its `.trashinfo` stays, because
+            // a power cut could still leave it in Trash, where that is what
+            // lets a file manager put it back.
+            Err(error) => ItemReport {
+                path: target.path.clone(),
+                outcome: Outcome::Uncertain,
+                reason: Some("internal-error"),
+                message: Some(format!(
+                    "It was put back, but the move could not be made durable, so a power cut \
+                     could still leave it in Trash: {error}"
+                )),
+                bytes: 0,
+            },
+        },
         Err(error) => {
             let (code, message, outcome) = match error.raw_os_error() {
                 Some(libc::EEXIST) | Some(libc::ENOTEMPTY) => (
@@ -4148,6 +4188,87 @@ mod tests {
                 .collect();
             assert!(held.is_empty(), "Trash {half} holds {held:?}");
         }
+    }
+
+    /// Whether both directories a rename touched were `fsync`ed after the
+    /// rename that put something under `name`, and before anything else was
+    /// unlinked or renamed.
+    fn renamed_durably(
+        events: &[sys::trace::Event],
+        name: &[u8],
+        directories: [&std::path::Path; 2],
+    ) -> bool {
+        use std::os::unix::fs::MetadataExt;
+        use sys::trace::Event;
+        let Some(renamed) = events
+            .iter()
+            .position(|event| *event == Event::Rename { to: name.to_vec() })
+        else {
+            panic!("nothing was renamed to {name:?}: {events:?}");
+        };
+        let after = &events[renamed + 1..];
+        let next = after
+            .iter()
+            .position(|event| matches!(event, Event::Unlink { .. } | Event::Rename { .. }))
+            .unwrap_or(after.len());
+        directories.iter().all(|directory| {
+            let inode = std::fs::metadata(directory).unwrap().ino();
+            after[..next].contains(&Event::Fsync { inode })
+        })
+    }
+
+    /// A rename is only certain to survive a power cut once both directories
+    /// it changed are `fsync`ed. Without that, the journal can say an item
+    /// went to Trash, or came back, while the disk still has it where it was.
+    #[test]
+    fn a_move_into_trash_and_back_is_durable_before_it_is_recorded() {
+        let sandbox = Sandbox::new("trash-durable");
+        sandbox.directory(b"state");
+        sandbox.directory(b"work");
+        sandbox.file(b"work/notes.txt", 64);
+        let request = TrashRequest {
+            plan_id: "plan-0123456789abcd".to_owned(),
+            journal_directory: sandbox.path().join("state"),
+            home_trash_directory: joined(&sandbox, b"trash-home"),
+            targets: vec![reviewed(&joined(&sandbox, b"work/notes.txt"), 64)],
+        };
+
+        sys::trace::start();
+        let (summary, items) =
+            collect(|report| run_trash(&request, report, &AtomicBool::new(false)));
+        let events = sys::trace::take();
+        let summary = summary.ok().expect("the action ran");
+        assert_eq!(
+            items[0].outcome,
+            Outcome::Completed,
+            "{:?}",
+            items[0].message
+        );
+        let work = sandbox.path().join("work");
+        let files = sandbox.path().join("trash-home/files");
+        assert!(
+            renamed_durably(&events, b"notes.txt", [&files, &work]),
+            "the move into Trash was journalled with neither directory fsynced: {events:?}",
+        );
+
+        let restore = RestoreRequest {
+            journal_directory: sandbox.path().join("state"),
+            journal_id: summary.journal_id,
+        };
+        sys::trace::start();
+        let (restored, items) =
+            collect(|report| run_restore(&restore, report, &AtomicBool::new(false)));
+        let events = sys::trace::take();
+        assert_eq!(
+            restored.ok().expect("the undo ran").completed,
+            1,
+            "{:?}",
+            items[0].message
+        );
+        assert!(
+            renamed_durably(&events, b"notes.txt", [&work, &files]),
+            "the move out of Trash was journalled with neither directory fsynced: {events:?}",
+        );
     }
 
     /// A name as long as a filesystem allows, ending in an extension, made of

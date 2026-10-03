@@ -9,8 +9,9 @@
  */
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
+import { randomBytes } from "node:crypto";
 import { existsSync, readdirSync } from "node:fs";
-import { chmod, mkdir, mkdtemp, readFile, rm, stat, utimes, writeFile } from "node:fs/promises";
+import { chmod, mkdir, mkdtemp, open, readFile, rm, stat, utimes, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { after, test } from "node:test";
@@ -141,6 +142,16 @@ test("two files of the same name both survive in Trash", async () => {
 test("Trash moves nothing out of the way of free space, and emptying it does", async () => {
   const home = await disktopHome();
   const tree = await createActionTree(home);
+  // The free-space readings are of the whole filesystem, which every other
+  // test file is writing to at the same time, and the directory fsync after a
+  // rename can commit their allocations — and this tree's own, still delayed —
+  // between the two. "Reclaims nothing" is judged against a move large enough
+  // to tell apart from that: random bytes, so a compressing filesystem cannot
+  // shrink it, and on the device before the first reading is taken.
+  const handle = await open(join(tree.cache, "large.bin"), "w");
+  await handle.write(randomBytes(32 * 1024 * 1024));
+  await handle.sync();
+  await handle.close();
 
   const { apply } = planAndApply(home, tree.cache);
   const result = apply.data.result;
@@ -148,10 +159,10 @@ test("Trash moves nothing out of the way of free space, and emptying it does", a
   // The gate's own sentence: these are three numbers, not one.
   assert.notEqual(result.bytesMovedToTrash, "0");
   assert.equal(result.selectedBytes, result.bytesMovedToTrash);
-  assert.equal(
-    result.observedFreeSpaceChange,
-    "0",
-    "a rename on one filesystem reclaims nothing, and the result says so",
+  const change = BigInt(result.observedFreeSpaceChange);
+  assert.ok(
+    (change < 0n ? -change : change) < BigInt(result.bytesMovedToTrash) / 2n,
+    `a rename on one filesystem reclaims nothing, and the result says so: ${change} for ${result.bytesMovedToTrash} moved`,
   );
   assert.ok(result.notes.some((note) => /until Trash is emptied/i.test(note)));
 });
