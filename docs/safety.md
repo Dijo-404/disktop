@@ -158,6 +158,15 @@ staged name only if it still holds exactly that inode, the same thing a failed c
 to its own output at runtime; anything else at that name is left in place and named in
 the item's record.
 
+A staging name has to be free when it is created — a file is created exclusively and a
+directory with a `mkdir` that fails on `EEXIST` — so a name somebody took between the
+check and the create is skipped for the next one rather than written into, published as
+the copy, or removed when the item gives up. Directories in a copy are written with the
+owner's permissions and take their own mode once everything inside them has arrived, so
+a read-only directory such as a Go module cache's copies like any other. Taking back a
+staged copy makes its directories writable first, because Disktop made them; a user's
+own read-only directory is never made writable to get a removal through.
+
 Every recursive removal — erasing a tree, emptying Trash, discarding a staged copy —
 opens each directory it descends into without crossing a mount, so a filesystem mounted
 inside a reviewed tree after review is refused rather than deleted through.

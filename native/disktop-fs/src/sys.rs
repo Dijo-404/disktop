@@ -211,6 +211,19 @@ pub fn mkdirat(parent: RawFd, name: &[u8], mode: u32) -> io::Result<()> {
     Ok(())
 }
 
+/// Create a directory that must not already exist.
+///
+/// This is how anything Disktop stages as a directory is created: `EEXIST` is
+/// the refusal, so a directory somebody else put at that name is never
+/// mistaken for one this process made, written into, published, or removed.
+pub fn mkdirat_exclusive(parent: RawFd, name: &[u8], mode: u32) -> io::Result<()> {
+    let child = cstring(name)?;
+    if unsafe { libc::mkdirat(parent, child.as_ptr(), mode as libc::mode_t) } < 0 {
+        return Err(io::Error::last_os_error());
+    }
+    Ok(())
+}
+
 /// Remove one name. `directory` chooses `rmdir` semantics over `unlink`.
 pub fn unlinkat(parent: RawFd, name: &[u8], directory: bool) -> io::Result<()> {
     let child = cstring(name)?;
