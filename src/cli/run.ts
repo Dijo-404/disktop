@@ -1,5 +1,6 @@
+import { sanitizeText } from "../domain/paths.js";
 import type { CliContext } from "./context.js";
-import { parseArguments, renderHelp, type CommandSpec, type ParsedCommand } from "./parser.js";
+import { parseArguments, renderHelp, type CliOutput, type CommandSpec, type ParsedCommand } from "./parser.js";
 import { EXIT, buildEnvelope, writeEnvelope } from "./output.js";
 import { runAlertsCheck, parseThreshold } from "./commands/alerts.js";
 import { runApply, runFind, runHistory, runPlan, runUndo } from "./commands/actions.js";
@@ -11,20 +12,62 @@ import { runScan } from "./commands/scan.js";
 import { runSnapshots } from "./commands/snapshots.js";
 import { runTimer } from "./commands/timer.js";
 
-/** Resolve one argument list to an exit status. Nothing here touches a device. */
-export async function runCli(args: readonly string[], context: CliContext): Promise<number> {
+/**
+ * Answer what the command table alone can answer: help, the version, and a
+ * command line that does not parse. Returns undefined when a command has to
+ * run. Nothing here reads configuration or touches a device.
+ *
+ * A refused command line with `--json` is still one error envelope on stdout,
+ * because a script that asked for JSON reads stdout and nothing else; without
+ * `--json` the reason goes to stderr and stdout stays empty.
+ */
+export function answerFromCommandTable(
+  args: readonly string[],
+  output: CliOutput,
+  version: string,
+  now: Date,
+): number | undefined {
   const result = parseArguments(args);
-
   if (result.kind === "version") {
-    context.output.stdout(`${context.version}\n`);
+    output.stdout(`${version}\n`);
     return EXIT.complete;
   }
   if (result.kind === "help") {
-    context.output.stdout(renderHelp(result.command));
+    output.stdout(renderHelp(result.command));
     return EXIT.complete;
   }
   if (result.kind === "error") {
-    context.output.stderr(`${result.message}\n`);
+    // The message quotes what was typed, and what was typed can be a filename
+    // pasted from somewhere else; it is printed the way any other name is.
+    const message = sanitizeText(result.message);
+    if (args.includes("--json")) {
+      writeEnvelope(
+        output.stdout,
+        buildEnvelope({
+          command: "disktop",
+          generatedAt: now,
+          status: "error",
+          exitCode: EXIT.operationalError,
+          warnings: [],
+          failure: { code: "invalid-input", message },
+        }),
+      );
+    } else {
+      output.stderr(`${message}\n`);
+    }
+    return EXIT.operationalError;
+  }
+  return undefined;
+}
+
+/** Resolve one argument list to an exit status. Nothing here touches a device. */
+export async function runCli(args: readonly string[], context: CliContext): Promise<number> {
+  const answered = answerFromCommandTable(args, context.output, context.version, context.now());
+  if (answered !== undefined) {
+    return answered;
+  }
+  const result = parseArguments(args);
+  if (result.kind !== "command") {
     return EXIT.operationalError;
   }
 
