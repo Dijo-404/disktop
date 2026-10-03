@@ -1,5 +1,5 @@
 # JavaScript and TypeScript dependencies and generated output
-/node_modules/
+/node_modules
 /dist/
 /coverage/
 /*.tsbuildinfo
@@ -46,3 +46,7 @@ pnpm-debug.log*
 
 # Superpowers execution scratch
 /.superpowers/
+
+# Release helper and tarball artifacts that CI downloads into the workspace
+/.release-helpers/
+/.release/
