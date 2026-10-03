@@ -1,6 +1,7 @@
 import { StartupRefused } from "../domain/errors.js";
 import { sanitizeText } from "../domain/paths.js";
 import type { CliContext } from "./context.js";
+import { CommandInterrupted } from "./interrupt.js";
 import { EXIT, buildEnvelope, writeEnvelope } from "./output.js";
 import type { CliOutput } from "./parser.js";
 import { answerFromCommandTable, runCli } from "./run.js";
@@ -72,11 +73,12 @@ export async function bootstrapCli(
  */
 export function reportUnexpected(args: readonly string[], output: CliOutput, error: unknown): number {
   const message = sanitizeText(error instanceof Error ? error.message : "The command failed for an unknown reason.");
+  const interrupted = error instanceof CommandInterrupted;
   const failure =
     error instanceof StartupRefused
       ? { ...error.failure, message: sanitizeText(error.failure.message) }
-      : { code: "internal-error" as const, message };
-  const exitCode = EXIT.operationalError;
+      : { code: interrupted ? ("cancelled" as const) : ("internal-error" as const), message };
+  const exitCode = interrupted ? EXIT.interrupted : EXIT.operationalError;
   if (args.includes("--json")) {
     writeEnvelope(
       output.stdout,
@@ -91,7 +93,7 @@ export function reportUnexpected(args: readonly string[], output: CliOutput, err
     );
   } else {
     output.stderr(
-      error instanceof StartupRefused
+      error instanceof StartupRefused || interrupted
         ? `${failure.message}\n`
         : `Disktop could not complete that command: ${message}\n`,
     );

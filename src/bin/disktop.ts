@@ -4,7 +4,7 @@ import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { bootstrapCli, reportUnexpected } from "../cli/bootstrap.js";
 import type { CliContext } from "../cli/context.js";
-import { guardStreams } from "../cli/process-io.js";
+import { createInterruptSource, guardStreams } from "../cli/process-io.js";
 import { createServices } from "../composition/root.js";
 import { runTui } from "../tui/app.js";
 import { createTerminalRenderer } from "../tui/render.js";
@@ -64,16 +64,7 @@ async function buildContext(): Promise<CliContext> {
     startupWarnings: services.startupWarnings,
     notifications: services.alertNotifications,
     timer: services.timer,
-    signals: {
-      listen: (handler) => {
-        process.on("SIGINT", handler);
-        process.on("SIGTERM", handler);
-      },
-      stop: (handler) => {
-        process.off("SIGINT", handler);
-        process.off("SIGTERM", handler);
-      },
-    },
+    signals: createInterruptSource(process, output.stderr),
     resolvePath: (path) => resolve(process.cwd(), path),
     now: () => new Date(),
     interactive,

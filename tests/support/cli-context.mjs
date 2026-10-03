@@ -148,6 +148,25 @@ function fakeStorage(overrides = {}, recorded = {}) {
   };
 }
 
+/**
+ * Ctrl+C as a test drives it: `interrupt()` calls whatever a command is
+ * listening with, and `listening()` says how many listeners are still
+ * registered, which must be none once the command has returned.
+ */
+export function interruptSource() {
+  const handlers = new Set();
+  return {
+    listen: (handler) => handlers.add(handler),
+    stop: (handler) => handlers.delete(handler),
+    interrupt: () => {
+      for (const handler of [...handlers]) {
+        handler();
+      }
+    },
+    listening: () => handlers.size,
+  };
+}
+
 export function fakeContext(overrides = {}) {
   const view = overrides.view ?? FIXTURE_VIEW;
   const captured = { stdout: "", stderr: "" };
@@ -191,7 +210,7 @@ export function fakeContext(overrides = {}) {
     },
     recorded,
     startupWarnings: overrides.startupWarnings ?? [],
-    signals: { listen() {}, stop() {} },
+    signals: interruptSource(),
     resolvePath: (path) => (path === "." ? "/home/example/projects" : path),
     now: () => new Date("2026-09-29T08:15:04.117Z"),
     interactive: overrides.interactive ?? false,

@@ -1,6 +1,7 @@
 import type { FootprintRequest } from "../../application/footprint.js";
 import { FINDING_CATEGORIES, type FindingCategory } from "../../domain/findings.js";
 import type { CliContext } from "../context.js";
+import { exitAfter, interruptible } from "../interrupt.js";
 import {
   EXIT,
   buildEnvelope,
@@ -45,15 +46,9 @@ export async function runClean(context: CliContext, options: CleanOptions): Prom
     ...(categories === undefined ? {} : { categories }),
   };
 
-  const controller = new AbortController();
-  const interrupt = (): void => controller.abort();
-  context.signals.listen(interrupt);
-  let summary;
-  try {
-    summary = await context.footprint.discover(request, controller.signal);
-  } finally {
-    context.signals.stop(interrupt);
-  }
+  const { value: summary, interrupted } = await interruptible(context, (signal) =>
+    context.footprint.discover(request, signal),
+  );
 
   const limit = options.limit === undefined ? summary.findings.length : Number(options.limit);
   const listed = summary.findings.slice(0, limit);
@@ -75,7 +70,7 @@ export async function runClean(context: CliContext, options: CleanOptions): Prom
   ];
 
   const complete = summary.complete && !truncated && context.startupWarnings.length === 0;
-  const exitCode = complete ? EXIT.complete : EXIT.incomplete;
+  const exitCode = exitAfter(interrupted, complete ? EXIT.complete : EXIT.incomplete);
 
   if (options.asJson) {
     writeEnvelope(

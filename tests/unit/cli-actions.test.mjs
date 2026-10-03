@@ -417,3 +417,104 @@ test("a manager finding is planned as a manager action without naming --operatio
   assert.equal(context.recordedActions.plan.operation, "manager");
   assert.equal(context.recordedActions.plan.findingId, "managers:apt.clean");
 });
+
+test("Ctrl+C during an apply still reports what was done, exits 130, and removes its listener", async () => {
+  const context = actionContext();
+  context.actions.apply = async (_request, signal) => {
+    context.signals.interrupt();
+    assert.equal(signal.aborted, true, "the interrupt reaches the pipeline as an abort");
+    return {
+      kind: "applied",
+      plan: PLAN,
+      result: { ...RESULT, completed: 0n, skipped: 1n, state: "partial", bytesMovedToTrash: 0n },
+      observedFreeSpaceChange: 0n,
+      notes: [],
+    };
+  };
+  const status = await runCli(["clean", "apply", PLAN.id, "--yes", "--json"], context);
+  const envelope = envelopeOf(context, "apply");
+
+  assert.equal(status, 130);
+  assert.equal(envelope.exitCode, 130);
+  assert.equal(envelope.status, "incomplete");
+  assert.equal(envelope.data.result.journalId, RESULT.journalId, "what was journalled is still reported");
+  assert.equal(context.signals.listening(), 0);
+});
+
+test("an apply that finished everything before noticing Ctrl+C reports complete", async () => {
+  const context = actionContext();
+  const original = context.actions.apply;
+  context.actions.apply = async (request, signal) => {
+    context.signals.interrupt();
+    return original(request, signal);
+  };
+  const status = await runCli(["clean", "apply", PLAN.id, "--yes", "--json"], context);
+  assert.equal(status, 0, "nothing was left undone, so nothing is reported as interrupted");
+  assert.equal(context.signals.listening(), 0);
+});
+
+test("Ctrl+C during undo and find exits 130 with the partial answer", async () => {
+  const undo = actionContext();
+  undo.actions.restore = async () => {
+    undo.signals.interrupt();
+    return {
+      kind: "restored",
+      record: RECORD,
+      result: { ...RESULT, journalId: "act-restore", state: "partial", completed: 0n, skipped: 1n, undoAvailable: false, bytesMovedToTrash: 0n },
+      notes: [],
+    };
+  };
+  assert.equal(await runCli(["undo", RECORD.id, "--yes", "--json"], undo), 130);
+  assert.equal(envelopeOf(undo, "undo").exitCode, 130);
+  assert.equal(undo.signals.listening(), 0);
+
+  const find = actionContext();
+  find.actions.find = async () => {
+    find.signals.interrupt();
+    return {
+      kind: "duplicates",
+      result: {
+        kind: "found",
+        groups: [],
+        complete: false,
+        warnings: [{ code: "incomplete-search", message: "The search was cancelled before every group was read." }],
+        reclaimableBytes: 0n,
+        candidatesRead: 0n,
+        filesHashed: 0n,
+      },
+    };
+  };
+  assert.equal(await runCli(["find", "duplicates", "--json"], find), 130);
+  assert.equal(envelopeOf(find, "find").exitCode, 130);
+  assert.equal(find.signals.listening(), 0);
+});
+
+test("a plan refused because Ctrl+C cut it short exits 130 as cancelled", async () => {
+  const context = actionContext();
+  context.actions.plan = async () => {
+    context.signals.interrupt();
+    return { kind: "refused", failure: { code: "invalid-input", message: "No finding with that ID was discovered." } };
+  };
+  const status = await runCli(["clean", "plan", "cache.language:cargo-registry", "--json"], context);
+  const envelope = envelopeOf(context, "error");
+
+  assert.equal(status, 130);
+  assert.equal(envelope.exitCode, 130);
+  assert.equal(envelope.error.code, "cancelled");
+  assert.match(envelope.error.message, /No finding with that ID/);
+  assert.equal(context.signals.listening(), 0);
+});
+
+test("a command that throws after Ctrl+C is reported as interrupted, not as a crash", async () => {
+  const { bootstrapCli } = await import("../../dist/cli/bootstrap.js");
+  const context = actionContext();
+  context.actions.apply = async () => {
+    context.signals.interrupt();
+    throw new Error("The helper was terminated by SIGINT.");
+  };
+  const status = await bootstrapCli(["clean", "apply", PLAN.id, "--yes", "--json"], "26.10.0", context.output, async () => context, "1.2.3");
+  const envelope = envelopeOf(context, "error");
+  assert.equal(status, 130);
+  assert.equal(envelope.error.code, "cancelled");
+  assert.equal(context.signals.listening(), 0);
+});

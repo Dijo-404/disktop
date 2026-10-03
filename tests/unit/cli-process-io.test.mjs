@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { EventEmitter } from "node:events";
 import { test } from "node:test";
-import { guardStreams } from "../../dist/cli/process-io.js";
+import { INTERRUPT_SIGNALS, createInterruptSource, guardStreams } from "../../dist/cli/process-io.js";
 
 /** A stream whose write fails the way a closed pipe or a full disk does. */
 function failingStream(code) {
@@ -50,4 +50,30 @@ test("a stderr that went away does not stop the command", async () => {
   await Promise.resolve();
   output.stderr("warning two\n");
   assert.deepEqual(stderr.written, ["warning one\n"]);
+});
+
+test("Ctrl+C reaches a command once, a second one only says so, and stopping removes every listener", () => {
+  const emitter = new EventEmitter();
+  const notes = [];
+  const source = createInterruptSource(emitter, (message) => notes.push(message));
+  let stops = 0;
+  const handler = () => {
+    stops += 1;
+  };
+
+  source.listen(handler);
+  for (const signal of INTERRUPT_SIGNALS) {
+    assert.equal(emitter.listenerCount(signal), 1, `${signal} is listened to while the command runs`);
+  }
+  emitter.emit("SIGINT");
+  emitter.emit("SIGINT");
+  emitter.emit("SIGTERM");
+  assert.equal(stops, 1, "the command is asked to stop once");
+  assert.equal(notes.length, 1);
+  assert.match(notes[0], /Still stopping/);
+
+  source.stop(handler);
+  for (const signal of INTERRUPT_SIGNALS) {
+    assert.equal(emitter.listenerCount(signal), 0, `${signal} has no listener left behind`);
+  }
 });
