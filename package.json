@@ -1,8 +1,8 @@
 {
   "name": "disktop",
-  "version": "0.0.0",
-  "private": true,
-  "description": "Development scaffold for a Linux terminal storage manager and analyzer",
+  "version": "1.0.0",
+  "private": false,
+  "description": "See what fills your Linux disks and reclaim space safely: a terminal dashboard and scriptable CLI whose cleanup is reviewed, journaled, Trash-first, and undoable",
   "keywords": [
     "linux",
     "disk-usage",
@@ -21,18 +21,20 @@
   "bin": {
     "disktop": "./dist/bin/disktop.js"
   },
+  "exports": {
+    "./package.json": "./package.json",
+    "./schemas/cli/v1/*.json": "./schemas/cli/v1/*.json"
+  },
   "files": [
-    "dist/",
-    "vendor/bin/",
-    "schemas/",
-    "docs/",
-    "PLAN.md",
-    "AGENTS.md",
-    "CHANGELOG.md",
-    "CONTRIBUTING.md",
-    "SECURITY.md",
+    "dist/**/*.js",
+    "vendor/bin/disktop-fs-linux-*",
+    "vendor/bin/SHA256SUMS",
+    "!vendor/bin/README.md",
+    "schemas/cli/v1/*.json",
+    "schemas/cli/v1/README.md",
     "README.md",
-    "LICENSE"
+    "LICENSE",
+    "CHANGELOG.md"
   ],
   "engines": {
     "node": ">=24.21.0 <25 || >=26.10.0 <27"
@@ -40,20 +42,29 @@
   "os": [
     "linux"
   ],
+  "publishConfig": {
+    "access": "public",
+    "provenance": true,
+    "registry": "https://registry.npmjs.org/"
+  },
   "scripts": {
-    "build": "tsc -p tsconfig.json && node scripts/set-executable.mjs",
+    "clean": "node scripts/clean-dist.mjs",
+    "build": "node scripts/clean-dist.mjs && tsc -p tsconfig.json && node scripts/set-executable.mjs",
     "build:native": "cargo build --locked --manifest-path native/disktop-fs/Cargo.toml",
+    "build:release-native": "node scripts/build-release.mjs",
     "typecheck": "tsc --noEmit -p tsconfig.json",
     "lint": "eslint src",
     "test": "npm run build && node --test tests/unit/*.test.mjs tests/contract/*.test.mjs",
     "test:integration": "npm run build && npm run build:native && node --test tests/integration/*.test.mjs",
     "test:pty": "npm run build && node --test tests/pty/*.test.mjs",
-    "fixtures": "node scripts/generate-fixtures.mjs",
     "test:recovery": "npm run build && npm run build:native && node --test tests/recovery/*.test.mjs",
+    "test:performance": "npm run build && npm run build:native && node --test tests/performance/*.test.mjs",
+    "test:package": "npm run build && node --test tests/package/*.test.mjs",
+    "fixtures": "node scripts/generate-fixtures.mjs",
     "check": "npm run typecheck && npm run lint && npm test && npm run test:integration && npm run test:recovery && npm run test:pty",
+    "bench": "npm run build && cargo build --release --locked --manifest-path native/disktop-fs/Cargo.toml && DISKTOP_BENCH_ENTRIES=1000000 node --test tests/performance/*.test.mjs",
     "prepack": "npm run build",
-    "test:performance": "npm run build && node --test tests/performance/*.test.mjs",
-    "bench": "npm run build && cargo build --release --locked --manifest-path native/disktop-fs/Cargo.toml && DISKTOP_BENCH_ENTRIES=1000000 node --test tests/performance/*.test.mjs"
+    "prepublishOnly": "node scripts/prepublish-guard.mjs"
   },
   "devDependencies": {
     "@types/node": "24.19.0",
