@@ -4,36 +4,25 @@
  * that one adapter touches rather than the library's whole surface.
  */
 declare module "terminal-kit" {
-  interface TerminalStyle {
-    (text: string): void;
-    readonly cyan: TerminalStyle;
-    readonly red: TerminalStyle;
-    readonly yellow: TerminalStyle;
-    readonly bold: TerminalStyle;
-    readonly dim: TerminalStyle;
-    readonly inverse: TerminalStyle;
+  interface MouseData {
+    readonly x: number;
+    readonly y: number;
   }
 
   interface Terminal {
     (text: string): void;
     readonly width: number;
     readonly height: number;
+    /** Write text exactly as given: no `%` format or `^` markup interpretation. */
+    noFormat(text: string): void;
     fullscreen(enabled: boolean): void;
     grabInput(options: false | { mouse?: string }): void;
     hideCursor(enabled?: boolean): void;
-    moveTo(x: number, y: number): void;
-    eraseDisplay(): void;
-    eraseLine(): void;
     styleReset(): void;
     on(event: "key", handler: (name: string) => void): void;
+    on(event: "mouse", handler: (name: string, data: MouseData) => void): void;
     on(event: "resize", handler: (width: number, height: number) => void): void;
-    removeAllListeners(event?: string): void;
-    readonly bold: TerminalStyle;
-    readonly dim: TerminalStyle;
-    readonly inverse: TerminalStyle;
-    readonly red: TerminalStyle;
-    readonly yellow: TerminalStyle;
-    readonly cyan: TerminalStyle;
+    off(event: string, handler: (...args: never[]) => void): void;
   }
 
   const terminalKit: { readonly terminal: Terminal };
