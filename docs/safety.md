@@ -25,7 +25,7 @@ The helper requires the Linux path-resolution primitives chosen for the action. 
 2. **Preview:** Build an immutable, expiring plan. An exact-entry plan fixes paths and expected device, inode, mount, type, size, and modification time for each item. A manager-scope plan fixes an adapter command and bounded selection. Show exact counts or mark counts as estimated or unknown.
 3. **Confirm:** Show the operation, scope, totals or estimates, warnings, permission requirement, reversibility, and likely regeneration cost. Non-interactive mutation requires a stored `PLAN_ID` and `--yes`. An irreversible plan also requires its explicit acknowledgement. An apply flag cannot silently change a Trash plan into permanent removal.
 4. **Revalidate:** Before each item, resolve from a verified parent directory descriptor without following symlinks or crossing mounts; compare the reviewed fingerprint. Skip or refuse anything changed. Recheck a selected directory subtree before a directory action. A manager adapter performs a live preflight and refuses unbounded scope.
-5. **Journal and apply:** Persist intent before a side effect, then persist per-item outcomes. The helper writes the sole durable action journal; manager adapters report their operations through journal messages. Cancellation stops before the next item and records a partial outcome.
+5. **Journal and apply:** Persist intent before a side effect, then persist per-item outcomes. The helper writes the sole durable action journal; manager adapters report their operations through journal messages. Cancellation stops before the next item and records a partial outcome. Inside an item it is heard wherever stopping changes nothing: while a directory is being reviewed again, and while a copy or an archive is being written or read back before it is published, in which case the staged output is taken back, the source is untouched, and the item is skipped as `cancelled`. Once an output is published the item runs to its end, because stopping between a publish and the source's disposal is the one place a stop would leave something half done.
 6. **Verify and report:** Compare the result to the reviewed plan and read filesystem capacity again where possible. Show selected bytes, bytes moved to Trash, and observed free-space change as separate values. Concurrent processes can affect the observed change.
 
 At startup, reconcile unfinished journal records before offering undo or claiming an action complete. An undo restores only if it can identify its recorded item and the original destination is free; it never overwrites an unrelated new file.
@@ -45,7 +45,18 @@ target's parent one segment at a time from `/` with `openat2` and no symlink
 resolution, compares the live entry against the reviewed fingerprint, writes the
 item's intent to the journal, performs one constrained syscall, and writes the
 outcome. A Trash move reserves its `.trashinfo` with an exclusive create and renames
-with `RENAME_NOREPLACE`, so the kernel refuses rather than overwriting.
+with `RENAME_NOREPLACE`, so the kernel refuses rather than overwriting. The
+name a file gets in Trash, and the name anything is staged under before it is
+published, start with the file's own name and are shortened — never through
+the middle of a character — when that name is near the 255-byte limit, so a
+long name can still be trashed, moved, and compressed; the original path is in
+the `.trashinfo` and the journal either way. An archive whose name would not fit
+is refused before anything is written. The
+rename takes whatever is under the name at that instant, so the helper then
+checks that what arrived in Trash is the inode it revalidated: a file saved
+over the reviewed one in between is renamed straight back and the item skipped
+as `changed-target`, rather than recorded under an identity an undo would not
+recognise.
 
 An item whose outcome could not be written to the journal is reported `uncertain`, not
 completed: the record is the authority an undo and a restart read, so an outcome nobody
@@ -79,6 +90,14 @@ filesystem mounted anywhere inside it, or one Disktop cannot read all the way do
 is refused at planning time. The window between that last digest and the syscall
 remains, as the race below describes.
 
+No action goes more than 512 directories below a reviewed one — the same ceiling
+as the scan's walk. Reviewing, copying, archiving, and removing a tree each keep
+their directories on an explicit stack with one descriptor open per level, so no
+tree is deep enough to overflow the helper's stack partway through an item; a
+deeper one is refused when it is planned, and refused again before anything in
+it is touched, rather than half-processed. The helper raises its own descriptor
+soft limit to the hard limit at startup so a tree at the ceiling fits.
+
 The identity comparison is the device, inode, type, size, and modification time. The
 kernel's mount id travels with them as context and is not compared, because the Node
 side cannot read it and would be sending a number it invented.
@@ -94,7 +113,7 @@ The default user-file action follows the [freedesktop Trash specification](https
 
 Permanent erase, hardlink replacement after release of the old inode, permanent-source move or compression, and some manager actions cannot be undone. Each is fixed in its plan and receives a separate warning. A move or a compress is exactly as reversible as what it does to the source, so `sourceDisposition` is fixed at review time beside the operation itself: `trash` leaves the original recoverable from the journal, and `permanent` makes the whole plan irreversible, because publishing a copy somewhere and then releasing the original's bytes is a permanent removal with an extra step. `src/domain/actions.ts` derives that and the stored plan's own claim is never believed.
 
-Where a move or compress publishes is judged by `classifyDestination`, which is deliberately a different question from `classifyGenericTarget`. A target is something Disktop removes, so it has to be inside a root the user said Disktop may clean. A destination is somewhere Disktop writes, and a cross-disk move means writing outside those roots by definition — `/mnt/archive` is a correct destination and an incorrect target. The allowlist and the mount-root rule therefore do not apply to a destination; the protected system roots, the shared container roots themselves, and Trash and Disktop's own state still do. Cross-disk move and compression stage and verify an output before removing or trashing the source. For a move, the verification is a digest taken over the bytes as they are read compared against a digest of the same bytes read back after an `fsync`. For a compression it is a decompression: the archive is read back the way anybody recovering from it would read it, and the tar stream that comes out is digested and compared against the one that went in — content, not an entry count, because a member rewritten to the same length keeps a count identical. The source is then revalidated once more immediately before it is disposed of, so anything written to it during a copy that ran for a long time stops the disposal rather than being released unreviewed. Either way, "it arrived whole" is a statement rather than a hope. On failure, they preserve the source and remove what they staged. A source that cannot be disposed of after a successful publish is recorded as uncertain, not failed: the action half happened, and calling it a failure would invite a second run into a destination the first one has already filled. Hardlink replacement requires same-mount identical content and compatible ownership and metadata; it warns that later writes are shared. The plan names the copy it keeps rather than leaving it to entry order, because the operation is irreversible and "the first one" is the kind of implicit rule that puts the wrong file's inode on the releasing end of it. The helper proves the content identical by reading both files in full immediately before it links; a digest groups candidates and never authorises the replacement. See [adr/0006](adr/0006-content-identity-and-archive-dependencies.md).
+Where a move or compress publishes is judged by `classifyDestination`, which is deliberately a different question from `classifyGenericTarget`. A target is something Disktop removes, so it has to be inside a root the user said Disktop may clean. A destination is somewhere Disktop writes, and a cross-disk move means writing outside those roots by definition — `/mnt/archive` is a correct destination and an incorrect target. The allowlist and the mount-root rule therefore do not apply to a destination; the protected system roots, the shared container roots themselves, and Trash and Disktop's own state still do. Cross-disk move and compression stage and verify an output before removing or trashing the source. For a move, the verification is a digest taken over the bytes as they are read compared against a digest of the same bytes read back after an `fsync`. For a compression it is a decompression: the archive is read back the way anybody recovering from it would read it, and the tar stream that comes out is digested and compared against the one that went in — content, not an entry count, because a member rewritten to the same length keeps a count identical. A digest over what was read cannot notice a source written to while it was read — the read and the write agree on the same torn mixture — so the source itself is revalidated, identity and subtree, once the output is staged and before it is published: a source that moved underneath its copy has the output discarded and the item skipped as `changed-target`, and a torn copy is never put where somebody would take it for the real thing. An archive member is also held to exactly the length its tar header promised, so a file that grows or shrinks mid-archive fails the item rather than misaligning every header after it. The source is then revalidated once more immediately before it is disposed of, so anything written to it after the publish stops the disposal rather than being released unreviewed. Before that, the published name itself is made durable: the staged bytes, their modification time, and every directory of a staged tree are `fsync`ed before the publish, and the destination directory is `fsync`ed after it. A move publishes on one filesystem and removes from another, and nothing orders a crash's effect on one against the other, so without that last step a power cut could keep the source's removal and lose the name of its only copy. A destination that cannot be made durable keeps the source. Either way, "it arrived whole" is a statement rather than a hope. On failure, they preserve the source and remove what they staged. A source that cannot be disposed of after a successful publish is recorded as uncertain, not failed: the action half happened, and calling it a failure would invite a second run into a destination the first one has already filled. Hardlink replacement requires same-mount identical content and compatible ownership and metadata; it warns that later writes are shared. The plan names the copy it keeps rather than leaving it to entry order, because the operation is irreversible and "the first one" is the kind of implicit rule that puts the wrong file's inode on the releasing end of it. The helper proves the content identical by reading both files in full immediately before it links; a digest groups candidates and never authorises the replacement. The bytes compared are read through a descriptor checked to be the reviewed inode, and that descriptor stays open across the exchange: the exchange takes whatever is under the name at that instant, so before the swapped-out inode is released the helper checks it is the one that was compared, with the size and modification time it was reviewed with. An editor that saved over the file, or a program that wrote into it, after the compare has its version exchanged straight back and the item skipped as `changed-target`; nothing it wrote is released. See [adr/0006](adr/0006-content-identity-and-archive-dependencies.md).
 
 Manager-owned state is changed only through scoped, fixed-argument manager adapters with probe, preview where supported, live preflight, apply, verification, permission mapping, and journal records. A manager may not provide exact item counts or byte savings; the UI must say so. An adapter never substitutes `rm -rf` for a missing manager.
 
@@ -153,9 +172,26 @@ staged name only if it still holds exactly that inode, the same thing a failed c
 to its own output at runtime; anything else at that name is left in place and named in
 the item's record.
 
+A staging name has to be free when it is created — a file is created exclusively and a
+directory with a `mkdir` that fails on `EEXIST` — so a name somebody took between the
+check and the create is skipped for the next one rather than written into, published as
+the copy, or removed when the item gives up. Directories in a copy are written with the
+owner's permissions and take their own mode once everything inside them has arrived, so
+a read-only directory such as a Go module cache's copies like any other. Taking back a
+staged copy makes its directories writable first, because Disktop made them; a user's
+own read-only directory is never made writable to get a removal through.
+
 Every recursive removal — erasing a tree, emptying Trash, discarding a staged copy —
 opens each directory it descends into without crossing a mount, so a filesystem mounted
 inside a reviewed tree after review is refused rather than deleted through.
+
+Before an irreversible removal starts — an erase, emptying Trash, or a move or compress
+that removes its source permanently — the helper checks that this user may remove
+entries from every directory in the tree and from the one holding it. Disktop never
+changes permissions on a user's files to force a removal, so a tree with a read-only
+directory inside it (a Go module cache is full of them) is refused whole, naming the
+directory, instead of being removed up to that directory and no further. A move or
+compress checks this before it copies anything.
 
 ## What an action checked afterwards
 
@@ -181,3 +217,13 @@ Normal UI, scans, and user cleanup run unprivileged. A privileged manager action
 The helper records completed, skipped, failed, and remaining items after Ctrl+C or a process crash. `tests/recovery/journal.test.mjs` kills the real helper partway through a list of targets and asserts that the record never reads as complete, that no item is left claiming to be running once reconciliation has looked at it, and that nothing left its original path without the journal accounting for it. Tests for file deletion, Trash, undo, move, and compression run only in temporary sandboxes; mount tests use a namespace or VM.
 
 There is a remaining Linux race when another actor with write access to the same parent directory swaps the final component between verification and operation. The implementation must minimize and test this window, and must refuse unsafe shared-writable parents. Do not claim perfect race elimination.
+
+How small the window is depends on the operation. A Trash move and a hardlink replacement check what their rename or exchange actually took and put anything else straight back, so a swap costs nothing but a skipped item. A permanent erase has no way back: `unlinkat` removes whatever holds the name at that instant, and a file renamed over the reviewed one in the microseconds after its last check is removed with it. That is the same exposure `rm` has, it needs an actor already able to write in the target's parent, and closing it would need a removal primitive the kernel does not offer.
+
+### Known limits of a copy
+
+These do not lose data; they are recorded so nobody is surprised by them.
+
+- A copy writes every byte, so a sparse file arrives fully allocated. The free-space check before a move asks for the size the plan measured, which is the source's allocated size, so a sparse source can still fill its destination partway. When that happens the copy stops with `no-space`, what was staged is removed, and the source is untouched.
+- Hardlinks inside a moved or compressed tree are copied as separate files, so the copy can need more room than the measured tree. The same `no-space` unwinding applies.
+- The rename into Trash and an undo's rename out of it are not followed by a directory `fsync`. A power cut just after one can leave the journal saying an item moved while the file is still where it was; nothing is lost, and an undo then reports that Trash no longer holds it. The `.trashinfo` written before the move is durable either way.

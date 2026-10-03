@@ -344,6 +344,7 @@ function toJournalRecord(record: NativeJournalRecord): JournalRecord {
     ...(record.freeBytesBefore === undefined ? {} : { freeBytesBefore: record.freeBytesBefore }),
     ...(record.freeBytesAfter === undefined ? {} : { freeBytesAfter: record.freeBytesAfter }),
     items: record.items.map(toJournalItem),
+    ...(record.itemsOmitted === undefined ? {} : { itemsOmitted: record.itemsOmitted }),
     ...(record.manager === undefined
       ? {}
       : {
