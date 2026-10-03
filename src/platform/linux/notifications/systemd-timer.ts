@@ -1,12 +1,15 @@
 import { execFile } from "node:child_process";
-import { randomBytes } from "node:crypto";
-import { chmod, mkdir, open, readFile, rename, unlink } from "node:fs/promises";
+import { mkdir, unlink } from "node:fs/promises";
 import { join } from "node:path";
 import type { Capability } from "../../../domain/models.js";
 import { rawPathFromUtf8, sanitizeText } from "../../../domain/paths.js";
 import { SERVICE_UNIT, TIMER_MARKER, TIMER_UNIT } from "../../../domain/timer.js";
 import type { TimerOutcome, UnitState, UserTimerPort } from "../../../ports/timer.js";
+import { readOwnFile, writeFileAtomically } from "../../../storage/files.js";
 import { resolveTrustedExecutable } from "../process.js";
+
+/** A unit file Disktop wrote is a few hundred bytes; anything far larger is not one. */
+const MAX_UNIT_BYTES = 64 * 1024;
 
 export type Systemctl = (commandArguments: readonly string[]) => Promise<{ readonly exitCode: number | null; readonly stderr: string }>;
 
@@ -34,7 +37,9 @@ export function createSystemdUserTimer(options: SystemdTimerOptions): UserTimerP
 
   async function ownership(name: string): Promise<"absent" | "ours" | "foreign"> {
     try {
-      const text = await readFile(pathOf(name), "utf8");
+      // A pipe or a device in a unit's place is not Disktop's, and is not
+      // waited on to find that out.
+      const text = await readOwnFile(pathOf(name), MAX_UNIT_BYTES, { followSymlinks: true });
       return text.startsWith(TIMER_MARKER) ? "ours" : "foreign";
     } catch (error) {
       return (error as NodeJS.ErrnoException).code === "ENOENT" ? "absent" : "foreign";
@@ -64,8 +69,8 @@ export function createSystemdUserTimer(options: SystemdTimerOptions): UserTimerP
         );
       }
       await mkdir(options.unitDirectory, { recursive: true, mode: 0o755 });
-      await writeAtomically(pathOf(SERVICE_UNIT), units.service);
-      await writeAtomically(pathOf(TIMER_UNIT), units.timer);
+      await writeFileAtomically(pathOf(SERVICE_UNIT), units.service, UNIT_MODE);
+      await writeFileAtomically(pathOf(TIMER_UNIT), units.timer, UNIT_MODE);
       await systemctl(["--user", "daemon-reload"]);
       const enabled = await systemctl(["--user", "enable", "--now", TIMER_UNIT]);
       return outcome(capability, ["written", "written"], enabled.exitCode === 0);
@@ -101,19 +106,6 @@ export function createSystemdUserTimer(options: SystemdTimerOptions): UserTimerP
       return outcome(capability, states, false);
     },
   };
-}
-
-async function writeAtomically(path: string, text: string): Promise<void> {
-  const staging = `${path}.${randomBytes(6).toString("hex")}.partial`;
-  const handle = await open(staging, "wx", UNIT_MODE);
-  try {
-    await handle.writeFile(text, "utf8");
-    await handle.sync();
-  } finally {
-    await handle.close();
-  }
-  await chmod(staging, UNIT_MODE);
-  await rename(staging, path);
 }
 
 const runSystemctl: Systemctl = async (commandArguments) => {

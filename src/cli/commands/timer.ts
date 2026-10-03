@@ -1,3 +1,4 @@
+import { sanitizeText } from "../../domain/paths.js";
 import type { OperationFailure } from "../../domain/errors.js";
 import type { CliContext } from "../context.js";
 import { EXIT, buildEnvelope, encodeCapability, encodeRawPath, writeEnvelope } from "../output.js";
@@ -70,7 +71,7 @@ function refuse(context: CliContext, asJson: boolean, failure: OperationFailure)
       buildEnvelope({ command: "timer", generatedAt: context.now(), status: "error", exitCode: EXIT.operationalError, warnings: [], failure }),
     );
   } else {
-    context.output.stderr(`${failure.message}\n`);
+    context.output.stderr(`${sanitizeText(failure.message)}\n`);
   }
   return EXIT.operationalError;
 }

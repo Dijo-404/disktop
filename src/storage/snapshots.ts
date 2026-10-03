@@ -1,4 +1,4 @@
-import { mkdir, open, readdir, readFile, rename, rm, stat } from "node:fs/promises";
+import { mkdir, readdir, rm, stat } from "node:fs/promises";
 import { randomBytes } from "node:crypto";
 import { join } from "node:path";
 import type { RawPath, ScanCompleteness, Warning } from "../domain/models.js";
@@ -10,10 +10,16 @@ import {
   type SnapshotStore,
   type SnapshotSummary,
 } from "../ports/snapshots.js";
+import { readOwnFile, writeFileAtomically } from "./files.js";
 import { PRIVATE_DIRECTORY_MODE } from "./xdg.js";
 
 const PRIVATE_FILE_MODE = 0o600;
 const SNAPSHOT_SUFFIX = ".json";
+/**
+ * Far above what a snapshot holds — a few hundred directory rows and the
+ * scan's bounded warnings — and far below what would hurt to read.
+ */
+const MAX_SNAPSHOT_BYTES = 64 * 1024 * 1024;
 
 /**
  * Versioned compact snapshots on disk, one JSON file each.
@@ -31,25 +37,18 @@ export function createSnapshotStore(dataDirectory: string): SnapshotStore {
 
   return {
     async save(snapshot) {
-      await mkdir(directory, { recursive: true, mode: PRIVATE_DIRECTORY_MODE });
-      const target = join(directory, `${snapshot.id}${SNAPSHOT_SUFFIX}`);
-      const staging = `${target}.${randomBytes(6).toString("hex")}.partial`;
-
-      const handle = await open(staging, "wx", PRIVATE_FILE_MODE);
-      try {
-        await handle.writeFile(`${JSON.stringify(encodeSnapshot(snapshot), null, 2)}\n`, "utf8");
-        // The bytes have to be on disk before the rename publishes them.
-        await handle.sync();
-      } finally {
-        await handle.close();
+      if (!isSafeId(snapshot.id)) {
+        throw new RangeError("A snapshot ID names one file in the store and nothing else");
       }
-      await rename(staging, target);
+      await mkdir(directory, { recursive: true, mode: PRIVATE_DIRECTORY_MODE });
+      const encoded = `${JSON.stringify(encodeSnapshot(snapshot), null, 2)}\n`;
+      await writeFileAtomically(join(directory, `${snapshot.id}${SNAPSHOT_SUFFIX}`), encoded, PRIVATE_FILE_MODE);
     },
 
     async list() {
       const snapshots: SnapshotSummary[] = [];
       for (const name of await snapshotFiles(directory)) {
-        const snapshot = await readSnapshot(join(directory, name));
+        const snapshot = await readSnapshot(directory, name.slice(0, -SNAPSHOT_SUFFIX.length));
         if (snapshot !== undefined) {
           snapshots.push(snapshot);
         }
@@ -62,7 +61,7 @@ export function createSnapshotStore(dataDirectory: string): SnapshotStore {
       if (!isSafeId(id)) {
         return undefined;
       }
-      return readSnapshot(join(directory, `${id}${SNAPSHOT_SUFFIX}`));
+      return readSnapshot(directory, id);
     },
 
     async prune(limits) {
@@ -122,15 +121,24 @@ async function fileBytes(path: string): Promise<bigint> {
   }
 }
 
-async function readSnapshot(path: string): Promise<SnapshotSummary | undefined> {
+/**
+ * One snapshot, read from the file its ID names.
+ *
+ * The file must be a regular file, not a link, and small; and the ID inside it
+ * must be the one its name gives. Prune removes a snapshot by that ID, so a
+ * file claiming another one — `../anything` — would otherwise direct a removal
+ * outside the store.
+ */
+async function readSnapshot(directory: string, id: string): Promise<SnapshotSummary | undefined> {
   let text: string;
   try {
-    text = await readFile(path, "utf8");
+    text = await readOwnFile(join(directory, `${id}${SNAPSHOT_SUFFIX}`), MAX_SNAPSHOT_BYTES, { followSymlinks: false });
   } catch {
     return undefined;
   }
   try {
-    return decodeSnapshot(JSON.parse(text));
+    const snapshot = decodeSnapshot(JSON.parse(text));
+    return snapshot.id === id ? snapshot : undefined;
   } catch {
     // A snapshot this build cannot read is skipped, not repaired: a guessed
     // reading would be compared against a real one.

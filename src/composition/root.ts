@@ -21,7 +21,7 @@ import type { NotificationOutcome } from "../ports/notifications.js";
 import { rawPathFromUtf8 } from "../domain/paths.js";
 import { createLinuxInventory } from "../platform/linux/inventory/index.js";
 import { createAccountNames } from "../platform/linux/accounts.js";
-import { inInitialUserNamespace, verifyRootOwnedInstall } from "../platform/linux/install-ownership.js";
+import { inInitialUserNamespace, verifyRootOwnedExecutable, verifyRootOwnedInstall } from "../platform/linux/install-ownership.js";
 import { StartupRefused } from "../domain/errors.js";
 import { createIndexFootprint } from "../platform/linux/footprint.js";
 import { createPathProbe } from "../platform/linux/probe.js";
@@ -103,6 +103,13 @@ export async function createServices(options: CompositionOptions = {}): Promise<
       throw new StartupRefused({
         code: "permission-denied",
         message: `Disktop runs as root only from a root-owned install, never 'sudo npx': ${install.reason}`,
+      });
+    }
+    const runtime = await verifyRootOwnedExecutable(realpathSync(process.execPath));
+    if (!runtime.ok) {
+      throw new StartupRefused({
+        code: "permission-denied",
+        message: `Disktop runs as root only on a Node.js that root alone can change: ${runtime.reason}`,
       });
     }
   }

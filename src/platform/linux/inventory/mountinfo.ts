@@ -1,5 +1,5 @@
 import type { RawPath, Warning } from "../../../domain/models.js";
-import { rawPathFromBytes } from "../../../domain/paths.js";
+import { rawPathFromBytes, sanitizeText } from "../../../domain/paths.js";
 
 /** One line of `/proc/self/mountinfo`, kept as bytes because a mount point is bytes. */
 export interface MountEntry {
@@ -98,7 +98,10 @@ function parseFields(fields: readonly Uint8Array[], separator: number): MountEnt
     mountPoint: rawPathFromBytes(unescapeOctal(mountPoint)),
     options: commaList(options),
     optionalFields: fields.slice(6, separator).map((field) => decodeField(field)),
-    filesystemType: decodeField(unescapeOctal(filesystemType)),
+    // Any user who can mount FUSE chooses the subtype in `fuse.<subtype>`, and
+    // the kernel escapes only whitespace and backslashes in it. The type is
+    // printed in every user's dashboard, so it is made safe to print here.
+    filesystemType: sanitizeText(decodeField(unescapeOctal(filesystemType))),
     source: rawPathFromBytes(unescapeOctal(source)),
     superOptions: commaList(superOptions),
   };

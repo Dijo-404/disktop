@@ -74,7 +74,7 @@ disktop timer install|uninstall
 disktop completion bash|zsh|fish
 ```
 
-The parser in `src/cli/parser.ts` defines commands and options once, and drives help plus completions. The CLI and TUI invoke the same application use cases. Any command that scans shows progress on stderr, can be cancelled, and reports an incomplete result when it could not inspect the full selected scope. Disktop does not use an interactive prompt when `--json` is requested or stdout is not a TTY.
+The parser in `src/cli/parser.ts` defines commands and options once, and drives help plus completions. The CLI and TUI invoke the same application use cases. Any command that scans shows progress on stderr, and only when stderr is a terminal: redirected into a log or a pipe, a carriage-return progress line is noise, and `--json` never draws one. It can be cancelled, and reports an incomplete result when it could not inspect the full selected scope. Disktop does not use an interactive prompt when `--json` is requested or stdout is not a TTY.
 
 ## Listing what was found
 
@@ -461,11 +461,19 @@ fish loads it the next time `disktop` is completed.
 | `1` | `alerts check` reached its capacity or inode threshold. |
 | `2` | Invalid input, unavailable capability, permission failure, an unimplemented command, or another operational error. |
 | `3` | Scan or action ended incomplete, including partial results. |
-| `130` | Interrupted before a completed or partial result could be reported. |
+| `130` | Interrupted: Ctrl+C, SIGTERM, or a hangup stopped the command before it finished. |
+
+Ctrl+C asks `scan`, `clean`, `clean plan`, `clean apply`, `undo`, and `find` to stop at their next safe boundary — a directory, a detector, an item. Each still reports and journals what it did, marked incomplete with a warning, and exits `130`; with `--json` that partial result is the envelope, with `exitCode: 130`. A command interrupted before it had any result is an error envelope whose failure code is `cancelled`, also exit `130`. A command that had already finished everything when the interrupt landed reports `complete` and exits `0`, because nothing was left undone. A second Ctrl+C does not abandon the item in progress, which is the one moment a record could stop matching the disk; it says the command is already stopping. SIGTERM and SIGHUP are handled the same way.
+
+`--help`, `--version`, and a command line that does not parse are answered from the command table before anything else runs: no configuration is read and, as root, the install is not inspected, so help is available even where every real command would refuse to start. An empty value or operand (`--path=`, or `--path "$UNSET"`) is refused rather than resolved to the working directory, a value option given twice is refused rather than letting one silently win, and an argument holding bytes that are not UTF-8 is refused because Node has already replaced them and the path it would name is not the one typed. A refused command line exits `2` with its reason on stderr and nothing on stdout; with `--json` the reason is instead one `invalid-input` error envelope on stdout. Anything a command did not expect is reported as one sanitized line (or one `internal-error` envelope) and exit `2`, never as a stack trace.
+
+A reader that stops early — `disktop devices | head -1` — is not an error: the rest of the output is dropped, the command finishes, and it exits with its own status. Any other failure to write stdout, such as a full disk behind a redirect, is reported on stderr and exits `2`, because nobody received the answer.
 
 An alert threshold is an expected monitoring outcome, so `1` is reserved for that command: `disktop --json` reports the same alerts and still exits `0`. Incomplete reporting takes precedence over both, so an `alerts check` that reached a threshold on readings it could not complete exits `3` rather than `1`; an alert drawn from partial readings is not the whole picture. Contract tests must check stdout, stderr, status, and schema together.
 
 An inventory is incomplete whenever anything could not be read: a mount whose `statfs` was denied, a missing `lsblk`, an unparsable `mountinfo` line, or a configuration file that could not be applied. Each one adds a warning naming what was missed, and no missing reading is ever reported as a zero.
+
+A `statfs` that does not answer within five seconds — a hard NFS mount whose server has gone does this — is a `statfs-timeout` warning and that filesystem is left out. The kernel call cannot be cancelled and keeps one Node worker thread until it returns, so a mount still stuck is not asked again by the same process, and a finished command exits even while the call is pending. Device models, transports, and filesystem types are sanitized where they are read: a USB device chooses its own model string and any user who can mount FUSE chooses a filesystem subtype that every other user's dashboard prints.
 
 ## Manager actions
 
