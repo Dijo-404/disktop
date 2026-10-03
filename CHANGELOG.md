@@ -79,6 +79,37 @@ phases that were never published; this is the first version anybody can install.
   - Under root, every file of the install, every symlink in it, and the Node binary
     itself must be root-owned.
   - Empty, repeated, and undecodable arguments are refused instead of guessed at.
+- Helper (every mutation re-audited; each fix has a test that failed first):
+  - A cross-filesystem move with permanent disposal could lose the only copy on a power
+    cut: the destination directory is now fsynced after publishing and before the
+    source is touched.
+  - A source that changed while it was being copied could be published torn; it is
+    revalidated before publishing and skipped as changed. Archive members are held to
+    their header size.
+  - A save landing between a hardlink replacement's byte compare and its exchange could
+    be swapped out and lost; the compared descriptor is held across the exchange and
+    anything else is exchanged back.
+  - A file saved over a Trash target just before the rename went to Trash under the
+    wrong identity; what arrives is checked and put back if it is not what was
+    reviewed.
+  - Very deep trees (beyond the stack) crashed the helper mid-item; every walk uses an
+    explicit stack with one 512-level limit, refused at plan time and again before
+    anything is touched.
+  - Archive verification closed a descriptor twice, which could close an unrelated file.
+  - Staging is created exclusively and only Disktop's own staged output is ever
+    removed; read-only directories (Go's module cache) move correctly; an
+    irreversible removal of a tree that contains one is refused before it starts
+    rather than stopping halfway.
+  - An item whose source could not be disposed of after publishing is settled as
+    uncertain instead of staying "in progress" forever.
+  - Cancel is honoured inside a large copy, archive, or verification, up to the
+    publish; the staged output is removed and the item is skipped.
+  - Names near `NAME_MAX` can be trashed, moved, and compressed; undo restores the full
+    name.
+  - `statx` is a raw syscall, so the static musl helper needs no libc version cfg.
+  - A history page is bounded: a record lists at most 1000 items and counts the rest in
+    `itemsOmitted`; undo still reads the whole record.
+  - Reconciliation no longer treats the helper's own in-flight actions as abandoned.
 
 ### Phase 6: manager cleanup, alerts, and the gaps earlier phases left
 
