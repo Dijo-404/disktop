@@ -165,13 +165,9 @@ function buildEnvironment(checksum, target) {
   delete env.CARGO_BUILD_TARGET;
   const cargoHome = process.env.CARGO_HOME ?? join(homedir(), ".cargo");
   const flags = [`--remap-path-prefix=${ROOT}=/disktop`, `--remap-path-prefix=${cargoHome}=/cargo`];
-  if (target.libc === "musl") {
-    // The helper calls statx(2). The libc crate declares it for musl only
-    // under this cfg, because musl gained the wrapper in 1.2.5; the musl that
-    // Rust 1.93 and zig link is 1.2.5, and a musl without it fails to link
-    // here rather than at run time.
-    flags.push("--cfg", "libc_unstable_musl_v1_2_3");
-  }
+  // No libc cfg is needed for musl: the helper calls statx(2) as a raw
+  // syscall with its own struct, so it does not depend on which musl
+  // version the libc crate assumes.
   env.CARGO_ENCODED_RUSTFLAGS = flags.join("\x1f");
   return env;
 }
