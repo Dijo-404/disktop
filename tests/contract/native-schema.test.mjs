@@ -66,3 +66,13 @@ test("an index page returns byte paths and a cursor, never display text", () => 
   assert.ok(page.result.entries.every((entry) => typeof entry.path === "string" && !entry.path.includes("/")));
   assert.equal(typeof page.result.nextCursor, "string");
 });
+
+test("a query for the row at one path names that path by its bytes", () => {
+  const validate = validators.get("request");
+  const byBytes = readJson(`${directory}/examples/valid/request.query-index-at-path.json`);
+  assert.ok(validate(byBytes), JSON.stringify(validate.errors));
+  assert.equal(typeof byBytes.arguments.filter.atPath, "string");
+
+  const byDisplay = readJson(`${directory}/examples/invalid/request.query-index-at-display-path.json`);
+  assert.equal(validate(byDisplay), false, "a display path was accepted where bytes belong");
+});

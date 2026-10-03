@@ -54,6 +54,15 @@ import { createSnapshotStore } from "../storage/snapshots.js";
 import { resolveLocations } from "../storage/xdg.js";
 
 /**
+ * How many measuring scans their own index keeps. One is read back the moment
+ * it is written and never again; the second keeps a concurrent `disktop
+ * clean` from pruning a measurement another one is still reading.
+ */
+const MEASUREMENT_SCANS = 2;
+/** The measurement index gets this fraction of `max_index_bytes`. */
+const MEASUREMENT_BUDGET_SHARE = 4n;
+
+/**
  * The composition root: the one place adapters are chosen and built.
  *
  * Every other layer receives what it needs as an argument, which is why the
@@ -150,8 +159,17 @@ export async function createServices(options: CompositionOptions = {}): Promise<
   const snapshots = createSnapshotService(snapshotStore, scanner);
 
   const home = rawPathFromUtf8(options.homeDirectory ?? homedir());
+  // Measuring a finding's size is a scan too, and it is kept in an index of
+  // its own. Written into the one above, it would count against `keep_scans`
+  // and push out the scan somebody is exploring.
+  const measurementScanner = createNativeScanner({
+    indexDirectory: join(locations.cacheDirectory, "measurements"),
+    maxIndexBytes: BigInt(config.scan.maxIndexBytes) / MEASUREMENT_BUDGET_SHARE,
+    keepScans: MEASUREMENT_SCANS,
+    start: () => NativeHelperClient.start(),
+  });
   const footprints = createIndexFootprint({
-    scanner,
+    measurement: measurementScanner,
     index: scanner,
     snapshots: snapshotStore,
     home,

@@ -12,7 +12,16 @@ import type {
 import type { SnapshotStore } from "../../ports/snapshots.js";
 
 export interface IndexFootprintOptions {
-  readonly scanner: ScanPort;
+  /**
+   * Where measuring scans are written and read back.
+   *
+   * It must not be the index a person's own scans live in. That index keeps a
+   * few scans and prunes the oldest, so every measurement written there would
+   * push out a scan somebody is still exploring, and two runs of
+   * `disktop clean` would be enough to lose it.
+   */
+  readonly measurement: ScanPort & FileIndexPort;
+  /** The index a person's own scans live in, which `snapshots` describe. Only read. */
   readonly index: FileIndexPort;
   readonly snapshots: Pick<SnapshotStore, "list">;
   /** The root a name search is answered from. */
@@ -45,7 +54,7 @@ export function createIndexFootprint(options: IndexFootprintOptions): FootprintP
       const warnings: Warning[] = [];
 
       try {
-        for await (const event of options.scanner.run(
+        for await (const event of options.measurement.run(
           {
             roots: [...paths],
             crossFilesystems: options.crossFilesystems,
@@ -90,15 +99,7 @@ export function createIndexFootprint(options: IndexFootprintOptions): FootprintP
 
       const measurements: FootprintMeasurement[] = [];
       for (const path of paths) {
-        const measurement = await readRow(options.index, scanId, accounting, path);
-        measurements.push(measurement.measurement);
-        if (measurement.crowdedOut) {
-          warnings.push({
-            code: "measurement-crowded-out",
-            message: `${path.display} has more entries of its own size than one page holds, so its footprint was not read.`,
-            path,
-          });
-        }
+        measurements.push(await readRow(options.measurement, scanId, accounting, path));
       }
       return { measurements, warnings };
     },
@@ -195,71 +196,57 @@ export function createIndexFootprint(options: IndexFootprintOptions): FootprintP
   };
 }
 
-/**
- * One path's own row in the index.
- *
- * The subtree filter includes the path itself, and a directory's row carries
- * its whole subtree, so the path's own row is at or near the top of a listing
- * ranked by size. It is not reliably *first*: a directory holding one large
- * file ties with that file, and a chain of single-child directories ties all
- * the way down. So a bounded page is read and the row whose bytes are the ones
- * asked about is picked out of it. A row for some other path is never accepted
- * as this path's size, and a path the page does not reach is reported unknown
- * rather than guessed at.
- */
-const ROW_PAGE = 256;
-
 /** What the helper's own owner-totals aggregate is bounded to. */
 const OWNER_TOTALS_CAP = 64;
 
+/**
+ * One path's own row in the index, asked for by the path itself.
+ *
+ * A directory's row carries its whole subtree, so it is at or near the top of
+ * a listing ranked by size, but not reliably first: a directory whose own
+ * inode holds no blocks ties with the files below it, and a few hundred empty
+ * files under one Btrfs directory would push its row off any page. `atPath`
+ * returns exactly the one row. A row for some other path is still never
+ * accepted as this path's size, and a path the index does not hold is
+ * reported unknown rather than guessed at.
+ */
 async function readRow(
   index: FileIndexPort,
   scanId: string,
   accounting: Accounting,
   path: RawPath,
-): Promise<{ readonly measurement: FootprintMeasurement; readonly crowdedOut: boolean }> {
+): Promise<FootprintMeasurement> {
   let page;
   try {
     page = await index.query({
       scanId,
-      filter: { underPath: path },
+      filter: { atPath: path },
       sort: accounting === "apparent" ? "apparent" : "allocated",
       order: "descending",
-      limit: ROW_PAGE,
+      limit: 1,
     });
   } catch (error) {
+    // The helper refuses a path the scan never saw rather than answering with
+    // an empty page; either way there is no row for it.
     const detail =
-      error instanceof CapabilityUnavailable ? error.capability.explanation : "The index could not answer the query.";
-    return { measurement: unmeasured(path, detail), crowdedOut: false };
+      error instanceof CapabilityUnavailable
+        ? error.capability.explanation
+        : "The scan index holds no row for this path.";
+    return unmeasured(path, detail);
   }
 
   const row = page.entries.find((entry) => entry.path.bytesBase64 === path.bytesBase64);
   if (row === undefined) {
-    // A full page means the row may exist and be ranked below the page: a tree
-    // of hardlinks to one file ties with the directory holding them. That is a
-    // different fact from a path the scan never reached, and it is reported.
-    const crowdedOut = page.nextCursor !== undefined;
-    return {
-      measurement: unmeasured(
-        path,
-        crowdedOut
-          ? "The scan index holds more entries of this size than one page holds, so this path's own row was not reached."
-          : "The scan index holds no row for this path.",
-      ),
-      crowdedOut,
-    };
+    return unmeasured(path, "The scan index holds no row for this path.");
   }
   return {
-    measurement: {
-      path,
-      bytes: accounting === "apparent" ? row.apparentBytes : row.allocatedBytes,
-      basis: accounting === "apparent" ? "measured-apparent" : "measured-allocated",
-      explanation:
-        accounting === "apparent"
-          ? "The size the files claim, measured by the scan that covered this path."
-          : "Blocks on disk, measured by the scan that covered this path.",
-    },
-    crowdedOut: false,
+    path,
+    bytes: accounting === "apparent" ? row.apparentBytes : row.allocatedBytes,
+    basis: accounting === "apparent" ? "measured-apparent" : "measured-allocated",
+    explanation:
+      accounting === "apparent"
+        ? "The size the files claim, measured by the scan that covered this path."
+        : "Blocks on disk, measured by the scan that covered this path.",
   };
 }
 

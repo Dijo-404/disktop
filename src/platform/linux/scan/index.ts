@@ -124,7 +124,9 @@ export function createNativeScanner(
           ...(query.includeTypeTotals === undefined ? {} : { includeTypeTotals: query.includeTypeTotals }),
           ...(query.includeOwnerTotals === undefined ? {} : { includeOwnerTotals: query.includeOwnerTotals }),
         });
-        refuseError(event, client);
+        // The scan ID is what turns the helper's "not in the index" into a
+        // stale index a surface can explain, rather than a failure.
+        refuseError(event, client, query.scanId);
         const page = parseIndexPage(event.result);
         return {
           entries: page.entries.map(toIndexedEntry),
@@ -229,6 +231,7 @@ function encodeFilter(query: EntryQuery): Record<string, unknown> {
   const filter = query.filter;
   return {
     ...(filter.underPath === undefined ? {} : { underPath: filter.underPath.bytesBase64 }),
+    ...(filter.atPath === undefined ? {} : { atPath: filter.atPath.bytesBase64 }),
     ...(filter.parentId === undefined ? {} : { parentId: filter.parentId }),
     ...(filter.nameContains === undefined ? {} : { nameContains: filter.nameContains }),
     ...(filter.extension === undefined ? {} : { extension: filter.extension }),

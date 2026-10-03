@@ -51,7 +51,7 @@ function scanner({ accounting = "allocated", rows = new Map(), unavailable, warn
     },
     async query(query) {
       recorded.queries.push(query);
-      const row = rows.get(query.filter.underPath?.bytesBase64);
+      const row = rows.get((query.filter.atPath ?? query.filter.underPath)?.bytesBase64);
       return { entries: row === undefined ? [] : [row] };
     },
   };
@@ -62,7 +62,7 @@ const NO_SNAPSHOTS = { async list() { return []; } };
 
 function footprintOf(scan, snapshots = NO_SNAPSHOTS) {
   return createIndexFootprint({
-    scanner: scan.port,
+    measurement: scan.port,
     index: scan.port,
     snapshots,
     accounting: "allocated",
@@ -94,6 +94,36 @@ test("measuring three directories issues one scan with three roots", async () =>
       [ABSENT.display, 16n, "measured-allocated"],
     ],
   );
+});
+
+test("a measurement is written to and read from its own index, never the one a person's scans live in", async () => {
+  const measurement = scanner({ rows: new Map([[PIP.bytesBase64, directoryRow(PIP, 4096n)]]) });
+  const touched = [];
+  const personal = {
+    // eslint-disable-next-line require-yield
+    async *run(request) {
+      touched.push(["run", request]);
+      throw new Error("a measuring scan was written into the personal index");
+    },
+    async query(query) {
+      touched.push(["query", query]);
+      throw new Error("a measurement was read from the personal index");
+    },
+  };
+
+  const reading = await createIndexFootprint({
+    measurement: measurement.port,
+    index: personal,
+    snapshots: NO_SNAPSHOTS,
+    accounting: "allocated",
+    crossFilesystems: false,
+    excludes: [],
+  }).measure([PIP], new AbortController().signal);
+
+  assert.equal(reading.measurements[0].bytes, 4096n);
+  assert.equal(measurement.recorded.requests.length, 1);
+  assert.equal(measurement.recorded.queries.length, 1);
+  assert.deepEqual(touched, [], "the personal index was not touched");
 });
 
 test("a path the index does not hold is unknown with a reason, not zero", async () => {
@@ -211,7 +241,7 @@ test("a search uses the newest snapshot that covers the home directory", async (
   };
 
   const search = await createIndexFootprint({
-    scanner: scan.port,
+    measurement: scan.port,
     index: scan.port,
     snapshots,
     home,
@@ -249,7 +279,7 @@ test("each searched name gets its own budget, so one common name cannot crowd ou
   };
 
   const search = await createIndexFootprint({
-    scanner: scan.port,
+    measurement: scan.port,
     index: scan.port,
     snapshots,
     home,
@@ -269,23 +299,29 @@ test("each searched name gets its own budget, so one common name cannot crowd ou
   assert.equal(search.truncated, true, "more node_modules directories exist than were listed");
 });
 
-test("a path that falls out of the ranked page is named rather than dropped quietly", async () => {
-  // 300 hardlinks to one file all tie with the directory's own total, so the
-  // directory's row can sit beyond the page.
+test("a path's own row is asked for by the path, so rows tied with it below cannot crowd it out", async () => {
+  // 300 hardlinks to one file all tie with the directory's own total, so a
+  // listing of the subtree ranked by size could put the directory's row past
+  // any page. Asked for by its path, it is the one row that comes back.
   const tied = rawPathFromUtf8("/home/example/backups");
   const scan = scanner({});
-  scan.port.query = async () => ({
-    entries: Array.from({ length: 256 }, (_, index) =>
-      directoryRow(rawPathFromUtf8(`/home/example/backups/link-${index}`), 10_485_760n),
-    ),
-    nextCursor: "more",
-  });
+  const asked = [];
+  scan.port.query = async (query) => {
+    asked.push(query);
+    if (query.filter.atPath?.bytesBase64 === tied.bytesBase64) {
+      return { entries: [directoryRow(tied, 10_485_760n)] };
+    }
+    return {
+      entries: Array.from({ length: 256 }, (_, index) =>
+        directoryRow(rawPathFromUtf8(`/home/example/backups/link-${index}`), 10_485_760n),
+      ),
+      nextCursor: "more",
+    };
+  };
 
   const reading = await footprintOf(scan).measure([tied], new AbortController().signal);
 
-  assert.equal(reading.measurements[0].basis, "unknown");
-  assert.ok(
-    reading.warnings.some((warning) => warning.code === "measurement-crowded-out"),
-    JSON.stringify(reading.warnings),
-  );
+  assert.equal(reading.measurements[0].bytes, 10_485_760n);
+  assert.equal(reading.measurements[0].basis, "measured-allocated");
+  assert.deepEqual(asked.map((query) => [query.filter.atPath?.display, query.limit]), [[tied.display, 1]]);
 });
