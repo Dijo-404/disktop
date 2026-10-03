@@ -1,6 +1,6 @@
 # Architecture
 
-Status: design contract for the implementation scaffold. [PLAN.md](../PLAN.md) is the product scope and acceptance checklist. This document explains where code belongs as the tree is filled in.
+Status: the architecture of the `1.0.0` release candidate, enforced by the lint rules below. [PLAN.md](../PLAN.md) is the product scope and acceptance checklist; this document explains where code belongs and why.
 
 ## Dependency direction
 
@@ -16,7 +16,7 @@ bin  ──builds──>  composition  ──constructs──>  Linux adapters, 
                                           native client ──> Rust disktop-fs helper
 ```
 
-`src/domain` contains data types, sizes, path representation, action policy, and errors without I/O. `src/ports` defines the interfaces an application use case needs. `src/application` coordinates inventory, scan, findings, snapshots, action planning, application, undo, and alerts. `src/cli` and `src/tui` call those use cases. They must not import a Linux command adapter or the native client to perform a feature directly.
+`src/domain` contains data types, sizes, path representation, action policy, and errors without I/O. `src/ports` defines the interfaces an application use case needs. `src/application` coordinates inventory, scan, findings, snapshots, action planning, application, undo, and alerts. `src/cli` and `src/tui` call those use cases, and `src/reports` renders what they return. None of them may import a Linux command adapter or the native client to perform a feature directly. The TUI receives its services as one `TuiServices` value (`src/tui/services.ts`), the same services the CLI handlers receive, and its views are pure functions from state to a frame; only `src/tui/render.ts` talks to the terminal.
 
 `src/composition` is the composition root and the only layer permitted to construct an adapter. It imports no surface, and `src/bin` imports it rather than reaching a platform module itself. Every other layer receives what it needs as an argument, which is what makes the prohibitions below enforceable rather than aspirational: if no surface can build an adapter, no surface can quietly use one.
 
