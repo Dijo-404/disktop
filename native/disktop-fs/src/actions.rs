@@ -1437,6 +1437,20 @@ fn dispose_of_source(
         format!("{PUBLISHED} the original could not be dealt with, so it is still there: {reason}")
     };
 
+    // The published name has to be on the device before the source is
+    // touched. A move publishes on one filesystem and removes from another,
+    // and nothing orders a crash's effect on one against the other: without
+    // this, a power cut can keep the removal and lose the name — and with it
+    // the staged file's own entry, which is the only copy left. The staged
+    // bytes and every directory inside a staged tree were made durable before
+    // the rename; this makes the rename itself durable.
+    if let Err(error) = sys::fsync(context.destination) {
+        return kept(format!(
+            "{PUBLISHED} its name could not be made durable on the destination, so the original \
+             was kept: {error}"
+        ));
+    }
+
     checkpoint(Checkpoint::BeforeDisposal);
     let parent = match guard::resolve_parent(&target.path) {
         Ok(parent) => parent,
@@ -3356,6 +3370,111 @@ mod tests {
                 .len(),
             4096
         );
+    }
+
+    /// Whether the destination directory was `fsync`ed after the output was
+    /// published under `name` and before anything happened to the source.
+    fn published_durably_before_the_source_was_touched(
+        events: &[sys::trace::Event],
+        destination: &std::path::Path,
+        name: &[u8],
+    ) -> bool {
+        use std::os::unix::fs::MetadataExt;
+        use sys::trace::Event;
+        let directory = std::fs::metadata(destination).unwrap().ino();
+        let Some(published) = events
+            .iter()
+            .position(|event| *event == Event::Rename { to: name.to_vec() })
+        else {
+            panic!("nothing was published as {name:?}: {events:?}");
+        };
+        let after = &events[published + 1..];
+        let synced = after
+            .iter()
+            .position(|event| *event == Event::Fsync { inode: directory });
+        // The source is touched by the first removal, or by the rename that
+        // takes it into Trash, whichever comes first.
+        let touched = after
+            .iter()
+            .position(|event| matches!(event, Event::Unlink { .. } | Event::Rename { .. }));
+        matches!((synced, touched), (Some(synced), Some(touched)) if synced < touched)
+    }
+
+    /// A move publishes on one filesystem and removes from another, and
+    /// nothing orders a crash's effect on one against the other. If the
+    /// published name is not on the device before the source goes, a power
+    /// cut can keep the removal and lose the name, and with it the only copy.
+    #[test]
+    fn a_published_output_is_durable_before_its_source_is_touched() {
+        for (disposition, label) in [
+            (SourceDisposition::Permanent, "permanent"),
+            (SourceDisposition::Trash, "trash"),
+        ] {
+            let sandbox = Sandbox::new(&format!("durable-move-{label}"));
+            sandbox.directory(b"state");
+            sandbox.directory(b"elsewhere");
+            sandbox.directory(b"work/tree/inner");
+            sandbox.file(b"work/data.bin", 4096);
+            sandbox.file(b"work/tree/inner/file", 512);
+            let mut request = moving(&sandbox, b"work/data.bin", disposition);
+            request
+                .targets
+                .push(reviewed(&joined(&sandbox, b"work/tree"), 0));
+
+            sys::trace::start();
+            let (summary, items) =
+                collect(|report| run_copy_move(&request, report, &AtomicBool::new(false)));
+            let events = sys::trace::take();
+            assert_eq!(
+                summary.ok().expect("the move ran").completed,
+                2,
+                "{:?}",
+                items.iter().map(|item| &item.message).collect::<Vec<_>>()
+            );
+
+            let destination = sandbox.path().join("elsewhere");
+            for name in [&b"data.bin"[..], b"tree"] {
+                assert!(
+                    published_durably_before_the_source_was_touched(&events, &destination, name),
+                    "{label}: {:?} was published and its source touched with no fsync of the \
+                     destination in between: {events:?}",
+                    String::from_utf8_lossy(name),
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn a_published_archive_is_durable_before_its_source_is_touched() {
+        let sandbox = Sandbox::new("durable-compress");
+        sandbox.directory(b"state");
+        sandbox.directory(b"elsewhere");
+        sandbox.directory(b"work");
+        sandbox.file(b"work/data.bin", 4096);
+        let request = CompressRequest {
+            plan_id: "plan-0123456789abcd".to_owned(),
+            journal_directory: sandbox.path().join("state"),
+            home_trash_directory: joined(&sandbox, b"trash-home"),
+            destination_directory: joined(&sandbox, b"elsewhere"),
+            source_disposition: SourceDisposition::Permanent,
+            targets: vec![reviewed(&joined(&sandbox, b"work/data.bin"), 0)],
+        };
+
+        sys::trace::start();
+        let (summary, items) =
+            collect(|report| run_compress(&request, report, &AtomicBool::new(false)));
+        let events = sys::trace::take();
+        assert_eq!(
+            summary.ok().expect("the compress ran").completed,
+            1,
+            "{:?}",
+            items[0].message
+        );
+        assert!(published_durably_before_the_source_was_touched(
+            &events,
+            &sandbox.path().join("elsewhere"),
+            b"data.bin.zst",
+        ));
     }
 
     /// An item whose output was published and whose source could not then be

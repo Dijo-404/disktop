@@ -232,6 +232,10 @@ pub fn unlinkat(parent: RawFd, name: &[u8], directory: bool) -> io::Result<()> {
     if result < 0 {
         return Err(io::Error::last_os_error());
     }
+    #[cfg(test)]
+    trace::record(trace::Event::Unlink {
+        name: name.to_vec(),
+    });
     Ok(())
 }
 
@@ -263,6 +267,10 @@ pub fn renameat_no_replace(
     if result < 0 {
         return Err(io::Error::last_os_error());
     }
+    #[cfg(test)]
+    trace::record(trace::Event::Rename {
+        to: new_name.to_vec(),
+    });
     Ok(())
 }
 
@@ -473,11 +481,57 @@ pub fn raise_descriptor_limit() {
 }
 
 /// Make a file's bytes durable before anything else depends on them existing.
+///
+/// For a directory, what becomes durable is its entries: a name created or
+/// renamed into it is only certain to survive a crash once this returns.
 pub fn fsync(descriptor: RawFd) -> io::Result<()> {
     if unsafe { libc::fsync(descriptor) } < 0 {
         return Err(io::Error::last_os_error());
     }
+    #[cfg(test)]
+    trace::record(trace::Event::Fsync {
+        inode: metadata_of(descriptor).map_or(0, |metadata| metadata.inode),
+    });
     Ok(())
+}
+
+/// The order in which this thread made the calls a crash is judged by.
+///
+/// Durability cannot be observed from inside a running test — nothing is
+/// lost until the power goes — but its precondition can: a name has to be
+/// `fsync`ed into its directory before anything that depends on it surviving
+/// happens. A test starts a trace, runs an action on the same thread, and
+/// reads back the sequence.
+#[cfg(test)]
+pub mod trace {
+    use std::cell::RefCell;
+
+    #[derive(Clone, Debug, PartialEq, Eq)]
+    pub enum Event {
+        Fsync { inode: u64 },
+        Rename { to: Vec<u8> },
+        Unlink { name: Vec<u8> },
+    }
+
+    thread_local! {
+        static EVENTS: RefCell<Option<Vec<Event>>> = const { RefCell::new(None) };
+    }
+
+    pub fn start() {
+        EVENTS.with(|events| *events.borrow_mut() = Some(Vec::new()));
+    }
+
+    pub fn take() -> Vec<Event> {
+        EVENTS.with(|events| events.borrow_mut().take().unwrap_or_default())
+    }
+
+    pub(super) fn record(event: Event) {
+        EVENTS.with(|events| {
+            if let Some(events) = events.borrow_mut().as_mut() {
+                events.push(event);
+            }
+        });
+    }
 }
 
 fn openat2_raw(parent: RawFd, name: &CString, flags: u64, resolve: u64) -> io::Result<RawFd> {
