@@ -23,6 +23,15 @@ pub const JOURNAL_FILE: &str = "journal-v1.sqlite";
 /// The most records one page may return, whatever the request asks for.
 pub const MAX_LIMIT: u32 = 200;
 
+/// The most items one record carries in a history page. The rest are counted
+/// in `items_omitted`; `get` always returns every one.
+pub const PAGE_ITEMS_PER_RECORD: u64 = 1_000;
+
+/// The most items one history page carries across all its records, so a page
+/// stays a line a client can read whatever the actions in it did. A page always
+/// holds at least one record.
+pub const PAGE_ITEMS: u64 = 5_000;
+
 /// How long a write waits for another Disktop to finish with the journal.
 const BUSY_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
 
@@ -153,6 +162,9 @@ pub struct ActionRecord {
     pub free_bytes_before: Option<u64>,
     pub free_bytes_after: Option<u64>,
     pub items: Vec<ItemRecord>,
+    /// Items a history page left out of `items`. Always zero from `get`,
+    /// which is what anything that acts on a record reads.
+    pub items_omitted: u64,
     pub manager: Option<ManagerRecord>,
 }
 
@@ -528,12 +540,31 @@ impl Journal {
             .query_map(params![started, id, i64::from(limit) + 1], read_action)?
             .collect::<rusqlite::Result<Vec<ActionRecord>>>()?;
 
-        let overflow = records.len() > limit as usize;
+        let mut overflow = records.len() > limit as usize;
         records.truncate(limit as usize);
+
+        // A page is one line on the wire, and one action can hold hundreds of
+        // thousands of items. Each record carries at most a bounded number of
+        // them and says how many it left out, and a page stops taking records
+        // once it holds a bounded number in all; the cursor continues from
+        // there. Nothing that acts on a record reads it from here: `restore`
+        // and a manager's finish read the whole record with `get`.
+        let mut shown = 0u64;
+        let mut kept = 0;
         for record in &mut records {
-            record.items = self.items(&record.id)?;
+            let total = self.item_count(&record.id)?;
+            let carried = total.min(PAGE_ITEMS_PER_RECORD);
+            if kept > 0 && shown + carried > PAGE_ITEMS {
+                overflow = true;
+                break;
+            }
+            record.items = self.items_up_to(&record.id, carried)?;
+            record.items_omitted = total - record.items.len() as u64;
             record.manager = self.manager(&record.id)?;
+            shown += carried;
+            kept += 1;
         }
+        records.truncate(kept);
 
         let next_cursor = match (overflow, records.last()) {
             (true, Some(last)) => {
@@ -705,12 +736,27 @@ impl Journal {
     }
 
     fn items(&self, action_id: &str) -> rusqlite::Result<Vec<ItemRecord>> {
+        self.items_up_to(action_id, u64::MAX)
+    }
+
+    fn item_count(&self, action_id: &str) -> rusqlite::Result<u64> {
+        self.connection
+            .query_row(
+                "SELECT count(*) FROM action_item WHERE action_id = ?1",
+                params![action_id],
+                |row| row.get::<_, i64>(0),
+            )
+            .map(unclamp)
+    }
+
+    /// The first `limit` items in position order.
+    fn items_up_to(&self, action_id: &str, limit: u64) -> rusqlite::Result<Vec<ItemRecord>> {
         let mut statement = self.connection.prepare(
             "SELECT position, path, destination, outcome, reason, bytes, moved_device, moved_inode
-               FROM action_item WHERE action_id = ?1 ORDER BY position",
+               FROM action_item WHERE action_id = ?1 ORDER BY position LIMIT ?2",
         )?;
         statement
-            .query_map(params![action_id], |row| {
+            .query_map(params![action_id, clamp(limit)], |row| {
                 let outcome: String = row.get(3)?;
                 let device: Option<i64> = row.get(6)?;
                 let inode: Option<i64> = row.get(7)?;
@@ -754,6 +800,7 @@ fn read_action(row: &rusqlite::Row<'_>) -> rusqlite::Result<ActionRecord> {
         free_bytes_before: before.map(unclamp),
         free_bytes_after: after.map(unclamp),
         items: Vec::new(),
+        items_omitted: 0,
         manager: None,
     })
 }
@@ -1209,6 +1256,82 @@ CREATE TABLE action_item (action_id TEXT NOT NULL REFERENCES action(id) ON DELET
             vec![512, 512, 0],
             "a source put in Trash counts; one removed permanently does not",
         );
+    }
+
+    fn action_with_items(journal: &Journal, items: u64) -> String {
+        let id = journal.begin("plan-0123456789ab", "trash", None).unwrap();
+        journal.connection.execute_batch("BEGIN").unwrap();
+        for position in 0..items {
+            journal
+                .record_intent(
+                    &id,
+                    position,
+                    format!("/home/example/{position}").as_bytes(),
+                    Some(b"/trash/files/x"),
+                )
+                .unwrap();
+        }
+        journal.connection.execute_batch("COMMIT").unwrap();
+        journal
+            .finish(&id, State::Complete, &Counts::default(), None)
+            .unwrap();
+        id
+    }
+
+    /// One action can hold hundreds of thousands of items, and a history page
+    /// is one line on the wire. A page carries a bounded number of each
+    /// record's items and says how many it left out; the record itself, which
+    /// is what an undo reads, still holds every one.
+    #[test]
+    fn a_history_page_bounds_the_items_it_carries_and_says_what_it_left_out() {
+        let sandbox = Sandbox::new("journal-page-items");
+        let journal = Journal::open(sandbox.path()).unwrap();
+        let id = action_with_items(&journal, PAGE_ITEMS_PER_RECORD + 1_500);
+
+        let page = journal.page(None, 10).unwrap();
+        let record = &page.records[0];
+        assert_eq!(record.items.len() as u64, PAGE_ITEMS_PER_RECORD);
+        assert_eq!(record.items_omitted, 1_500);
+        assert_eq!(record.items[0].position, 0, "the first items, in order");
+
+        let whole = journal.get(&id).unwrap().unwrap();
+        assert_eq!(whole.items.len() as u64, PAGE_ITEMS_PER_RECORD + 1_500);
+        assert_eq!(whole.items_omitted, 0);
+    }
+
+    #[test]
+    fn a_history_page_stops_taking_records_once_it_holds_enough_items() {
+        let sandbox = Sandbox::new("journal-page-budget");
+        let journal = Journal::open(sandbox.path()).unwrap();
+        let records = PAGE_ITEMS / PAGE_ITEMS_PER_RECORD + 2;
+        for _ in 0..records {
+            action_with_items(&journal, PAGE_ITEMS_PER_RECORD);
+        }
+
+        let first = journal.page(None, MAX_LIMIT).unwrap();
+        let carried: u64 = first
+            .records
+            .iter()
+            .map(|record| record.items.len() as u64)
+            .sum();
+        assert!(carried <= PAGE_ITEMS, "{carried} items on one page");
+        assert!(first.next_cursor.is_some(), "the rest is a page away");
+
+        let mut seen: Vec<String> = first
+            .records
+            .iter()
+            .map(|record| record.id.clone())
+            .collect();
+        let mut cursor = first.next_cursor;
+        while let Some(next) = cursor {
+            let page = journal.page(Some(&next), MAX_LIMIT).unwrap();
+            assert!(!page.records.is_empty(), "a page always holds a record");
+            seen.extend(page.records.iter().map(|record| record.id.clone()));
+            cursor = page.next_cursor;
+        }
+        assert_eq!(seen.len() as u64, records, "every record, once");
+        seen.dedup();
+        assert_eq!(seen.len() as u64, records);
     }
 
     #[test]

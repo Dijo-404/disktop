@@ -2043,6 +2043,14 @@ pub fn journal_record(record: &journal::ActionRecord) -> Value {
                 .collect(),
         ),
     );
+    // Present only when a page left items out, so a reader can never take a
+    // shortened list for the whole action.
+    if record.items_omitted > 0 {
+        object.insert(
+            "itemsOmitted".to_owned(),
+            record.items_omitted.to_string().into(),
+        );
+    }
     Value::Object(object)
 }
 
