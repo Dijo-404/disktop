@@ -163,7 +163,7 @@ jobs:
           retention-days: 30
 
   verify:
-    name: Smoke test the artifact on ${{ matrix.platform }}
+    name: Smoke test the artifact
     needs: build
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 30

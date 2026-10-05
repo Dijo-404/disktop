@@ -16,7 +16,7 @@ concurrency:
 
 jobs:
   quality:
-    name: TypeScript, Rust, and Linux integration (Node ${{ matrix.node }})
+    name: TypeScript, Rust, and Linux integration
     runs-on: ubuntu-24.04
     timeout-minutes: 40
     strategy:
@@ -100,7 +100,7 @@ jobs:
           retention-days: 7
 
   helper-handshake:
-    name: Helper handshake on ${{ matrix.arch }} (glibc floor, musl, runner)
+    name: Helper handshake
     needs: release-binaries
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 15
@@ -151,7 +151,7 @@ jobs:
           "vendor/bin/disktop-fs-linux-${{ matrix.arch }}-musl"
 
   package:
-    name: Packed package on Node ${{ matrix.node }} (${{ matrix.runner }})
+    name: Packed package
     needs: release-binaries
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 20
@@ -185,7 +185,7 @@ jobs:
         run: npm run test:package
 
   package-musl:
-    name: Packed package on musl (Alpine, ${{ matrix.runner }})
+    name: Packed package on musl
     needs: release-binaries
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 20
@@ -220,7 +220,7 @@ jobs:
           node:24-alpine3.24 npm run test:package
 
   distro-smoke:
-    name: ${{ matrix.distro }} container smoke
+    name: Container smoke test
     needs: release-binaries
     runs-on: ubuntu-24.04
     timeout-minutes: 25
