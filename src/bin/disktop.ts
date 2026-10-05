@@ -1,5 +1,16 @@
 #!/usr/bin/env node
 
+/**
+ * Entry point for the `disktop` binary.
+ *
+ * This module decides which surface runs — the full-screen TUI or a CLI
+ * command — and hands each one a context built from the composition root.
+ * It also owns the two process-level concerns no other layer may handle:
+ * uncaught-error reporting and the final exit status.
+ *
+ * @module bin/disktop
+ */
+
 import { readFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { resolve } from "node:path";
@@ -25,6 +36,8 @@ const output = guardStreams(process.stdout, process.stderr);
  * The process state after an uncaught error is not something to keep running
  * on, so this reports and exits. A command that already wrote its envelope
  * gets the reason on stderr instead of a second one on stdout.
+ *
+ * @param error - The value thrown or rejected; need not be an `Error`.
  */
 function fatal(error: unknown): void {
   const channel = output.wroteStdout() ? args.filter((argument) => argument !== "--json") : args;
@@ -36,6 +49,8 @@ process.on("unhandledRejection", fatal);
 /**
  * Assemble the surfaces. Adapters come from the composition root; this file
  * only decides which surface runs and hands each one what it needs.
+ *
+ * @returns The context every CLI command and the TUI share for this process.
  */
 async function buildContext(): Promise<CliContext> {
   const services = await createServices();
