@@ -33,6 +33,18 @@ observed free-space change as three separate numbers.
 Protected roots are policy in `src/domain/protected-paths.ts` and are re-enforced
 independently inside the helper. No flag overrides them.
 
+Undo records the moved object's device, inode, kind, size, modification time, and
+available birth time. Recovery records the same fields when staging is created;
+because writes change size and modification time, staging cleanup identifies the
+object by device, inode, kind, and birth time. Without birth time it requires the
+original full fingerprint and leaves changed partial output for review. An inode
+number alone is insufficient: Linux can recycle it immediately after unlinking.
+Runtime copy and archive staging retain an open descriptor to prevent that reuse
+until publication or cleanup, including on filesystems without birth time.
+Internal SQLite columns migrate additively; older rows without a full fingerprint
+remain visible but authorise neither undo nor staging cleanup. These fields are
+private to the journal and do not change the v1 JSON protocol.
+
 ## Consequences
 
 Adding an action means extending the pipeline, not adding a code path, which is more work
@@ -78,3 +90,7 @@ closed it.
 
 Phases 5 and 6 extend the same pipeline to move, compression, hardlink replacement,
 and the manager adapters. None of them may add a code path around it.
+
+Phase 8's CI exposed immediate inode reuse on ext4. The helper's protocol tests
+cover a replaced staging directory, a staged file with a recycled inode, absent
+birth-time evidence, replaced and rewritten Trash files, and old journal migration.

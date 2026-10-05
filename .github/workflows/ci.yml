@@ -292,13 +292,18 @@ jobs:
         shell: sh
         run: |
           set -eu
+          # setup-node's shared tool cache can belong to the host runner's
+          # account. Disktop also checks Node's ownership under EUID 0, so
+          # give this container its own root-owned executable for this check.
+          install --mode=0755 "$(command -v node)" /usr/local/bin/node
+          export PATH="/usr/local/bin:$PATH"
           runuser -u disktop -- env "PATH=$PATH" HOME=/home/disktop npm pack --ignore-scripts --pack-destination /tmp
           npm install --global --prefix /usr/local --ignore-scripts /tmp/disktop-*.tgz
           as_root() {
-            /usr/local/bin/disktop "$@" > /dev/null && status=0 || status=$?
+            /usr/local/bin/disktop "$@" > /tmp/disktop-root-result.json && status=0 || status=$?
             case "$status" in
               0|1|3) echo "root: disktop $* exited $status" ;;
-              *) echo "root: disktop $* exited $status"; exit 1 ;;
+              *) echo "root: disktop $* exited $status"; cat /tmp/disktop-root-result.json; exit 1 ;;
             esac
           }
           as_root devices --json

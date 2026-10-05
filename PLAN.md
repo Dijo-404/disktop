@@ -429,7 +429,7 @@ This matrix is the release checklist. “Available” means the feature is imple
 | Steam, Wine/Proton, VMs, Timeshift, swap, profiles | 3 | Read-only footprint fixtures rank entries and flag active/special data. |
 | Installed package and app counts/sizes | 3 | Every manager adapter labels reported size versus real disk use. |
 | Duplicate, stale, empty-folder, broken-link finders | 4, 5 | Hardlinks excluded; hash pipeline and timestamp confidence tested; eligible empty/broken items clean safely. |
-| Trash default, protected paths, confirmation, journal, undo | 4 | Collision, cross-mount, Ctrl+C, crash, refusal, restore, and no-overwrite tests pass. |
+| Trash default, protected paths, confirmation, journal, undo | 4 | Collision, cross-mount, Ctrl+C, crash, refusal, restore, no-overwrite, recycled-inode, rewritten-Trash, and old-journal refusal tests pass. |
 | Temporary, language, package, journal, Snap, Flatpak cleanup | 4, 6 | Provider-specific preview/apply/verify tests and privilege states pass. |
 | Docker/Podman images, stopped containers, build cache, volumes | 6 | Manager test fixtures prove selection and no unintended volume deletion. |
 | Old kernels, crash/core files, oversized-log cause | 3, 6 | Running kernel preserved; policy-backed cleanup only; active logs never truncated. |
