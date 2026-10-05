@@ -72,10 +72,12 @@ locations the specification defines, and it is irreversible, so applying it need
 outcome was not reads as `uncertain`, and the action holding it is uncertain too.
 `undo` refuses a permanent removal, refuses an unreconciled action, and restores with
 `RENAME_NOREPLACE`, so a name something else has taken is skipped and the newer file
-is left alone. It also compares what is in Trash against the device and inode recorded
-when the move happened: a name is free again the moment somebody takes the original out
+is left alone. It also compares what is in Trash against the device, inode, kind, size,
+modification time, and available birth time recorded when the move happened: an inode
+can be recycled immediately after unlinking, and a name is free again the moment somebody takes the original out
 by hand, and an undo that trusted the name alone would move a stranger's file to a path
-it never came from.
+it never came from. A file edited in Trash is skipped too. Older internal journals
+without the complete fingerprint remain readable, but their items cannot be undone.
 
 ### Limits this phase does not remove
 
@@ -165,12 +167,19 @@ still runs.
 
 ## What a crash leaves staged
 
-The helper journals the device and inode of everything it stages — a partial copy, an
+The helper journals the device, inode, kind, size, modification time, and available
+birth time of everything it stages — a partial copy, an
 archive being written, the link a hardlink replacement exchanges — the moment the name
 is created. When reconciliation finds an item a crash left uncertain, it removes that
-staged name only if it still holds exactly that inode, the same thing a failed copy does
-to its own output at runtime; anything else at that name is left in place and named in
-the item's record.
+staged name only if it still holds the same device, inode, kind, and birth time;
+anything else at that name is left in place and named in
+the item's record. Birth time stays fixed while a copy is written and distinguishes
+a recycled inode. If the filesystem does not report birth time, cleanup requires the
+original size and modification time to match as well; a changed partial output is
+left for review rather than removed on insufficient evidence. Old staging records
+without a full fingerprint are also left in place.
+At runtime the helper keeps a descriptor open to the staged inode until publication
+or cleanup, preventing inode reuse even when birth time is unavailable.
 
 A staging name has to be free when it is created — a file is created exclusively and a
 directory with a `mkdir` that fails on `EEXIST` — so a name somebody took between the

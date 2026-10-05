@@ -11,7 +11,14 @@
 
 use std::ffi::{CString, c_void};
 use std::io;
+use std::os::fd::{BorrowedFd, OwnedFd};
 use std::os::unix::io::RawFd;
+
+/// Pin an inode after the copying function closes its own descriptor.
+pub fn duplicate(descriptor: RawFd) -> io::Result<OwnedFd> {
+    // The caller owns the descriptor for the duration of this duplication.
+    unsafe { BorrowedFd::borrow_raw(descriptor) }.try_clone_to_owned()
+}
 
 /// `stx_mnt_id` needs Linux 5.8; below that the device number is the only
 /// mount identity available, and a bind mount of one filesystem is
@@ -30,6 +37,8 @@ pub struct Metadata {
     /// Permission bits only, without the file-type bits `kind` already carries.
     pub permissions: u32,
     pub modified_nanoseconds: u64,
+    /// Birth time distinguishes a recycled inode without changing during writes.
+    pub created_nanoseconds: Option<u64>,
     /// Group- or world-writable with no sticky bit. Any user can then create,
     /// rename, and unlink entries inside it, whoever owns it, so a reviewed
     /// target in such a directory can be swapped under a check nobody can win.
@@ -639,6 +648,7 @@ const _: () = assert!(size_of::<RawStatx>() == 0x100);
 const AT_STATX_DONT_SYNC: libc::c_int = 0x4000;
 const STATX_TYPE: u32 = 0x0001;
 const STATX_BASIC_STATS: u32 = 0x07ff;
+const STATX_BTIME: u32 = 0x0800;
 const STATX_MNT_ID: u32 = 0x1000;
 
 /// `statx(2)` into a zeroed buffer; the kernel fills in what `mask` asks for
@@ -670,7 +680,12 @@ pub fn metadata_at(parent: RawFd, name: &[u8]) -> io::Result<Metadata> {
 
 fn metadata_at_flags(parent: RawFd, name: &[u8], flags: libc::c_int) -> io::Result<Metadata> {
     let child = cstring(name)?;
-    let stat = raw_statx(parent, &child, flags, STATX_BASIC_STATS | STATX_MNT_ID)?;
+    let stat = raw_statx(
+        parent,
+        &child,
+        flags,
+        STATX_BASIC_STATS | STATX_MNT_ID | STATX_BTIME,
+    )?;
 
     let mode = u32::from(stat.stx_mode);
     let kind = match mode & libc::S_IFMT {
@@ -704,6 +719,8 @@ fn metadata_at_flags(parent: RawFd, name: &[u8], flags: libc::c_int) -> io::Resu
         group_id: stat.stx_gid,
         permissions: mode & 0o7777,
         modified_nanoseconds: nanoseconds(stat.stx_mtime.tv_sec, stat.stx_mtime.tv_nsec),
+        created_nanoseconds: (stat.stx_mask & STATX_BTIME != 0)
+            .then(|| nanoseconds(stat.stx_btime.tv_sec, stat.stx_btime.tv_nsec)),
         writable_by_anyone_without_sticky: shared_write && !sticky,
     })
 }

@@ -112,6 +112,45 @@ pub struct Counts {
 pub struct Identity {
     pub device: u64,
     pub inode: u64,
+    pub kind: crate::sys::EntryKind,
+    pub apparent_bytes: u64,
+    pub modified_nanoseconds: u64,
+    pub created_nanoseconds: Option<u64>,
+}
+
+impl Identity {
+    pub fn from_metadata(metadata: &crate::sys::Metadata) -> Self {
+        Self {
+            device: metadata.device,
+            inode: metadata.inode,
+            kind: metadata.kind,
+            apparent_bytes: metadata.apparent_bytes,
+            modified_nanoseconds: metadata.modified_nanoseconds,
+            created_nanoseconds: metadata.created_nanoseconds,
+        }
+    }
+
+    /// Staged contents change while written; birth time and kind do not.
+    /// Without birth time, require the entire original fingerprint instead.
+    pub fn same_object(&self, metadata: &crate::sys::Metadata) -> bool {
+        self.device == metadata.device
+            && self.inode == metadata.inode
+            && self.kind == metadata.kind
+            && match (self.created_nanoseconds, metadata.created_nanoseconds) {
+                (Some(recorded), Some(live)) => recorded == live,
+                (None, None) => {
+                    self.apparent_bytes == metadata.apparent_bytes
+                        && self.modified_nanoseconds == metadata.modified_nanoseconds
+                }
+                _ => false,
+            }
+    }
+
+    pub fn unchanged(&self, metadata: &crate::sys::Metadata) -> bool {
+        self.same_object(metadata)
+            && self.apparent_bytes == metadata.apparent_bytes
+            && self.modified_nanoseconds == metadata.modified_nanoseconds
+    }
 }
 
 pub struct ItemRecord {
@@ -311,7 +350,8 @@ impl Journal {
         self.connection.execute(
             "UPDATE action_item
                 SET outcome = 'completed', reason = NULL, bytes = ?3,
-                    moved_device = ?4, moved_inode = ?5
+                    moved_device = ?4, moved_inode = ?5, moved_kind = ?6,
+                    moved_size = ?7, moved_mtime = ?8, moved_btime = ?9
               WHERE action_id = ?1 AND position = ?2",
             params![
                 action_id,
@@ -319,6 +359,12 @@ impl Journal {
                 clamp(bytes),
                 identity.map(|identity| clamp(identity.device)),
                 identity.map(|identity| clamp(identity.inode)),
+                identity.map(|identity| identity.kind.code()),
+                identity.map(|identity| clamp(identity.apparent_bytes)),
+                identity.map(|identity| clamp(identity.modified_nanoseconds)),
+                identity
+                    .and_then(|identity| identity.created_nanoseconds)
+                    .map(clamp),
             ],
         )?;
         Ok(())
@@ -333,14 +379,19 @@ impl Journal {
         identity: &Identity,
     ) -> rusqlite::Result<()> {
         self.connection.execute(
-            "UPDATE action_item SET staging = ?3, staging_device = ?4, staging_inode = ?5
+            "UPDATE action_item SET staging = ?3, staging_device = ?4, staging_inode = ?5,
+                    staging_kind = ?6, staging_size = ?7, staging_mtime = ?8, staging_btime = ?9
               WHERE action_id = ?1 AND position = ?2",
             params![
                 action_id,
                 clamp(position),
                 path,
                 clamp(identity.device),
-                clamp(identity.inode)
+                clamp(identity.inode),
+                identity.kind.code(),
+                clamp(identity.apparent_bytes),
+                clamp(identity.modified_nanoseconds),
+                identity.created_nanoseconds.map(clamp),
             ],
         )?;
         Ok(())
@@ -348,7 +399,8 @@ impl Journal {
 
     pub fn clear_staging(&self, action_id: &str, position: u64) -> rusqlite::Result<()> {
         self.connection.execute(
-            "UPDATE action_item SET staging = NULL, staging_device = NULL, staging_inode = NULL
+            "UPDATE action_item SET staging = NULL, staging_device = NULL, staging_inode = NULL,
+                    staging_kind = NULL, staging_size = NULL, staging_mtime = NULL, staging_btime = NULL
               WHERE action_id = ?1 AND position = ?2",
             params![action_id, clamp(position)],
         )?;
@@ -358,21 +410,17 @@ impl Journal {
     /// Staged outputs whose item reconciliation could not settle.
     pub fn abandoned_staging(&self) -> rusqlite::Result<Vec<AbandonedStaging>> {
         let mut statement = self.connection.prepare(
-            "SELECT action_id, position, staging, staging_device, staging_inode FROM action_item
+            "SELECT action_id, position, staging, staging_device, staging_inode,
+                    staging_kind, staging_size, staging_mtime, staging_btime FROM action_item
               WHERE staging IS NOT NULL AND outcome = 'uncertain' ORDER BY action_id, position",
         )?;
         statement
             .query_map([], |row| {
-                let device: Option<i64> = row.get(3)?;
-                let inode: Option<i64> = row.get(4)?;
                 Ok(AbandonedStaging {
                     action_id: row.get(0)?,
                     position: unclamp(row.get(1)?),
                     path: row.get(2)?,
-                    identity: device.zip(inode).map(|(device, inode)| Identity {
-                        device: unclamp(device),
-                        inode: unclamp(inode),
-                    }),
+                    identity: read_identity(row, 3)?,
                 })
             })?
             .collect()
@@ -387,6 +435,7 @@ impl Journal {
         self.connection.execute(
             "UPDATE action_item
                 SET staging = NULL, staging_device = NULL, staging_inode = NULL,
+                    staging_kind = NULL, staging_size = NULL, staging_mtime = NULL, staging_btime = NULL,
                     reason = CASE WHEN reason IS NULL THEN ?3 ELSE reason || ' ' || ?3 END
               WHERE action_id = ?1 AND position = ?2",
             params![action_id, clamp(position), note],
@@ -802,22 +851,18 @@ impl Journal {
     /// The first `limit` items in position order.
     fn items_up_to(&self, action_id: &str, limit: u64) -> rusqlite::Result<Vec<ItemRecord>> {
         let mut statement = self.connection.prepare(
-            "SELECT position, path, destination, outcome, reason, bytes, moved_device, moved_inode
+            "SELECT position, path, destination, outcome, reason, bytes, moved_device, moved_inode,
+                    moved_kind, moved_size, moved_mtime, moved_btime
                FROM action_item WHERE action_id = ?1 ORDER BY position LIMIT ?2",
         )?;
         statement
             .query_map(params![action_id, clamp(limit)], |row| {
                 let outcome: String = row.get(3)?;
-                let device: Option<i64> = row.get(6)?;
-                let inode: Option<i64> = row.get(7)?;
                 Ok(ItemRecord {
                     position: unclamp(row.get(0)?),
                     path: row.get(1)?,
                     destination: row.get(2)?,
-                    identity: device.zip(inode).map(|(device, inode)| Identity {
-                        device: unclamp(device),
-                        inode: unclamp(inode),
-                    }),
+                    identity: read_identity(row, 6)?,
                     outcome: Outcome::parse(&outcome),
                     reason: row.get(4)?,
                     bytes: unclamp(row.get(5)?),
@@ -829,6 +874,29 @@ impl Journal {
 
 const ACTION_COLUMNS: &str = "id, plan_id, operation, started_at, finished_at, state, completed,
      skipped, failed, selected_bytes, trashed_bytes, free_before, free_after";
+
+/// Old records lacking a full fingerprint remain readable but cannot mutate.
+fn read_identity(row: &rusqlite::Row<'_>, start: usize) -> rusqlite::Result<Option<Identity>> {
+    let device: Option<i64> = row.get(start)?;
+    let inode: Option<i64> = row.get(start + 1)?;
+    let kind: Option<i64> = row.get(start + 2)?;
+    let size: Option<i64> = row.get(start + 3)?;
+    let modified: Option<i64> = row.get(start + 4)?;
+    let created: Option<i64> = row.get(start + 5)?;
+    Ok(match (device, inode, kind, size, modified) {
+        (Some(device), Some(inode), Some(kind @ 0..=3), Some(size), Some(modified)) => {
+            Some(Identity {
+                device: unclamp(device),
+                inode: unclamp(inode),
+                kind: crate::sys::EntryKind::from_code(kind),
+                apparent_bytes: unclamp(size),
+                modified_nanoseconds: unclamp(modified),
+                created_nanoseconds: created.map(unclamp),
+            })
+        }
+        _ => None,
+    })
+}
 
 fn read_action(row: &rusqlite::Row<'_>) -> rusqlite::Result<ActionRecord> {
     let state: String = row.get(5)?;
@@ -883,9 +951,17 @@ CREATE TABLE IF NOT EXISTS action_item (
   bytes INTEGER NOT NULL DEFAULT 0,
   moved_device INTEGER,
   moved_inode INTEGER,
+  moved_kind INTEGER,
+  moved_size INTEGER,
+  moved_mtime INTEGER,
+  moved_btime INTEGER,
   staging BLOB,
   staging_device INTEGER,
   staging_inode INTEGER,
+  staging_kind INTEGER,
+  staging_size INTEGER,
+  staging_mtime INTEGER,
+  staging_btime INTEGER,
   PRIMARY KEY (action_id, position)
 );
 
@@ -921,6 +997,14 @@ fn migrate(connection: &Connection) -> rusqlite::Result<()> {
         ("staging", "BLOB"),
         ("staging_device", "INTEGER"),
         ("staging_inode", "INTEGER"),
+        ("staging_kind", "INTEGER"),
+        ("staging_size", "INTEGER"),
+        ("staging_mtime", "INTEGER"),
+        ("staging_btime", "INTEGER"),
+        ("moved_kind", "INTEGER"),
+        ("moved_size", "INTEGER"),
+        ("moved_mtime", "INTEGER"),
+        ("moved_btime", "INTEGER"),
     ] {
         if !columns.iter().any(|column| column == name) {
             connection
@@ -1077,9 +1161,34 @@ CREATE TABLE action_item (action_id TEXT NOT NULL REFERENCES action(id) ON DELET
                 &Identity {
                     device: 1,
                     inode: 2,
+                    kind: crate::sys::EntryKind::File,
+                    apparent_bytes: 4096,
+                    modified_nanoseconds: 123456,
+                    created_nanoseconds: Some(123),
                 },
             )
             .unwrap();
+    }
+
+    #[test]
+    fn old_moved_items_remain_readable_but_have_no_authoritative_identity() {
+        let sandbox = Sandbox::new("journal-old-identity");
+        let connection = Connection::open(journal_path(sandbox.path())).unwrap();
+        connection.execute_batch(OLD_SCHEMA).unwrap();
+        connection.execute_batch(
+            "INSERT INTO action (id, plan_id, operation, started_at, state) VALUES
+             ('old', 'plan-0123456789ab', 'trash', 1, 'complete');
+             INSERT INTO action_item (action_id, position, path, destination, outcome, moved_device, moved_inode)
+             VALUES ('old', 0, X'2F737263', X'2F7472617368', 'completed', 1, 2);"
+        ).unwrap();
+        drop(connection);
+        let journal = Journal::open(sandbox.path()).unwrap();
+        let record = journal.get("old").unwrap().unwrap();
+        assert_eq!(record.items[0].destination.as_deref(), Some(&b"/trash"[..]));
+        assert_eq!(
+            record.items[0].identity, None,
+            "device/inode alone cannot authorise undo"
+        );
     }
 
     #[test]
@@ -1100,6 +1209,10 @@ CREATE TABLE action_item (action_id TEXT NOT NULL REFERENCES action(id) ON DELET
                 &Identity {
                     device: 1,
                     inode: 2,
+                    kind: crate::sys::EntryKind::File,
+                    apparent_bytes: 4096,
+                    modified_nanoseconds: 123456,
+                    created_nanoseconds: Some(123),
                 },
             )
             .unwrap();
@@ -1114,6 +1227,10 @@ CREATE TABLE action_item (action_id TEXT NOT NULL REFERENCES action(id) ON DELET
                 &Identity {
                     device: 1,
                     inode: 3,
+                    kind: crate::sys::EntryKind::File,
+                    apparent_bytes: 4096,
+                    modified_nanoseconds: 123456,
+                    created_nanoseconds: Some(123),
                 },
             )
             .unwrap();
@@ -1132,7 +1249,11 @@ CREATE TABLE action_item (action_id TEXT NOT NULL REFERENCES action(id) ON DELET
             abandoned[0].identity,
             Some(Identity {
                 device: 1,
-                inode: 2
+                inode: 2,
+                kind: crate::sys::EntryKind::File,
+                apparent_bytes: 4096,
+                modified_nanoseconds: 123456,
+                created_nanoseconds: Some(123),
             })
         );
 
@@ -1347,6 +1468,10 @@ CREATE TABLE action_item (action_id TEXT NOT NULL REFERENCES action(id) ON DELET
                     Some(&Identity {
                         device: 1,
                         inode: 2,
+                        kind: crate::sys::EntryKind::File,
+                        apparent_bytes: 4096,
+                        modified_nanoseconds: 123456,
+                        created_nanoseconds: Some(123),
                     }),
                 )
                 .unwrap();
@@ -1459,6 +1584,10 @@ CREATE TABLE action_item (action_id TEXT NOT NULL REFERENCES action(id) ON DELET
                 Some(&Identity {
                     device: 66306,
                     inode: 12345,
+                    kind: crate::sys::EntryKind::File,
+                    apparent_bytes: 4096,
+                    modified_nanoseconds: 123456,
+                    created_nanoseconds: Some(123),
                 }),
             )
             .unwrap();

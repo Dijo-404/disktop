@@ -59,6 +59,9 @@ to keep the real helper running until Ctrl+C arrives, including release builds i
 minimal containers where `/usr` can be scanned before the key is sent.
 Live inventory tests allow documented warnings about unreadable mounts while still
 rejecting broken-pipe errors and stack traces when an output reader exits early.
+The distro jobs copy Node from setup-node's shared tool cache into a root-owned
+container path before the administrator inventory check. Disktop requires both its
+package and its Node executable to be root-owned when running under EUID 0.
 
 ## Pull requests
 

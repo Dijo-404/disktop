@@ -72,7 +72,10 @@ refused on a Trash plan rather than read as an upgrade. The helper repeats every
 its own side — its `PROTECTED_ROOTS` and `SHARED_CONTAINER_ROOTS` in `native/disktop-fs/src/guard.rs`
 are deliberate duplicates of `src/domain/protected-paths.ts` and change in the same commit.
 Identity is device, inode, kind, size, and modification time; `mountId` is context and is not
-compared, because Node cannot read it. Every item is journalled twice, intent before the
+compared, because Node cannot read it. The private journal records that full fingerprint
+for undo and available birth time to distinguish recycled staging inodes; old records
+without enough identity remain readable but authorise no mutation. Runtime staging pins
+its inode with an open descriptor until publication or cleanup. Every item is journalled twice, intent before the
 syscall and outcome after, which is what makes a crash legible: an item holding only an intent
 is `uncertain`, and so is the action holding it. A result keeps selected bytes, bytes moved to
 Trash, and the two free-space readings apart, and never folds them into one number. A new

@@ -21,7 +21,7 @@ use crate::guard::{self, Fingerprint, Guard, GuardContext};
 use crate::journal::{Counts, Identity, Journal, Outcome, State};
 use crate::sys::{self, EntryKind};
 use crate::transfer;
-use std::os::fd::{AsRawFd, FromRawFd};
+use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 
@@ -507,13 +507,7 @@ fn hardlink_one(
         position,
         directory: &directory,
     };
-    if let Err(error) = record.record_identity(
-        &staging,
-        &Identity {
-            device: keep.metadata.device,
-            inode: keep.metadata.inode,
-        },
-    ) {
+    if let Err(error) = record.record_identity(&staging, &Identity::from_metadata(&keep.metadata)) {
         let _ = sys::unlinkat(parent.descriptor(), &staging, false);
         return settle(
             journal,
@@ -1199,6 +1193,13 @@ struct Staged {
     name: Vec<u8>,
     identity: Identity,
     kind: EntryKind,
+    /// An unlinked inode cannot be recycled while this descriptor holds it.
+    _pin: OwnedFd,
+}
+
+struct Created {
+    identity: Identity,
+    pin: OwnedFd,
 }
 
 enum Settled {
@@ -1214,13 +1215,14 @@ fn settle_staging(
     destination: libc::c_int,
     name: &[u8],
     kind: EntryKind,
-    created: Option<Identity>,
+    created: Option<Created>,
     outcome: std::io::Result<()>,
 ) -> Settled {
-    let staged = created.map(|identity| Staged {
+    let staged = created.map(|created| Staged {
         name: name.to_vec(),
-        identity,
+        identity: created.identity,
         kind,
+        _pin: created.pin,
     });
     match (outcome, staged) {
         (Ok(()), Some(staged)) => Settled::Ready(staged),
@@ -1516,14 +1518,14 @@ impl StagingRecord<'_> {
         &self,
         name: &[u8],
         descriptor: libc::c_int,
-        created: &mut Option<Identity>,
+        created: &mut Option<Created>,
     ) -> std::io::Result<()> {
         let metadata = sys::metadata_of(descriptor)?;
-        let identity = Identity {
-            device: metadata.device,
-            inode: metadata.inode,
-        };
-        *created = Some(identity);
+        let identity = Identity::from_metadata(&metadata);
+        *created = Some(Created {
+            identity,
+            pin: sys::duplicate(descriptor)?,
+        });
         self.record_identity(name, &identity)
     }
 
@@ -1638,8 +1640,12 @@ fn describe_copy(error: std::io::Error) -> (&'static str, String) {
 /// so a failed copy can never take somebody else's file down with it.
 fn discard_staged(destination: libc::c_int, staged: &Staged) {
     match sys::metadata_at(destination, &staged.name) {
+        // The open pin prevents inode reuse here, even on a filesystem that
+        // does not report birth time. Crash recovery has no such descriptor.
         Ok(live)
-            if live.device == staged.identity.device && live.inode == staged.identity.inode =>
+            if live.device == staged.identity.device
+                && live.inode == staged.identity.inode
+                && live.kind == staged.identity.kind =>
         {
             let _ = remove_staged(destination, &staged.name, staged.kind);
         }
@@ -1768,10 +1774,7 @@ fn dispose_of_source(
             position,
             target,
             target.reviewed_bytes,
-            Some(Identity {
-                device: live.device,
-                inode: live.inode,
-            }),
+            Some(Identity::from_metadata(live)),
         ),
         Err(message) => kept(message),
     }
@@ -2017,10 +2020,7 @@ fn trash_one(
                 position,
                 target,
                 target.reviewed_bytes,
-                Some(Identity {
-                    device: live.device,
-                    inode: live.inode,
-                }),
+                Some(Identity::from_metadata(&live)),
             );
         }
         IntoTrash::Refused(code, message, outcome) => refuse(code, message, outcome),
@@ -2389,7 +2389,7 @@ fn restore_one(
         );
     };
     match identity {
-        Some(recorded) if recorded.device == held.device && recorded.inode == held.inode => {}
+        Some(recorded) if recorded.unchanged(&held) => {}
         Some(_) => {
             return refuse(
                 "changed-target",
@@ -2400,7 +2400,7 @@ fn restore_one(
         None => {
             return refuse(
                 "changed-target",
-                "This action predates Disktop recording what it moved, so what is in Trash \
+                "This action predates Disktop recording a complete fingerprint, so what is in Trash \
                  cannot be identified and was left alone."
                     .to_owned(),
                 Outcome::Skipped,
@@ -2790,7 +2790,7 @@ fn release_one(left: &crate::journal::AbandonedStaging) -> Released {
     match sys::metadata_at(parent.descriptor(), &parent.name) {
         Err(error) if error.raw_os_error() == Some(libc::ENOENT) => Released::Gone,
         Err(_) => Released::Kept,
-        Ok(live) if live.device == identity.device && live.inode == identity.inode => {
+        Ok(live) if identity.same_object(&live) => {
             if remove_staged(parent.descriptor(), &parent.name, live.kind).is_ok() {
                 Released::Removed
             } else {
@@ -4785,7 +4785,7 @@ mod tests {
         sandbox.chmod(b"elsewhere/staged/ro", 0o555);
         sandbox.chmod(b"elsewhere/staged", 0o555);
         let staged = joined(&sandbox, b"elsewhere/staged");
-        let live = std::fs::symlink_metadata(sandbox.path().join("elsewhere/staged")).unwrap();
+        let live = sys::metadata_at(libc::AT_FDCWD, &staged).unwrap();
 
         let journal = Journal::open(&sandbox.path().join("state")).unwrap();
         let id = journal
@@ -4794,17 +4794,8 @@ mod tests {
         journal
             .record_intent(&id, 0, b"/work/tree", Some(b"/elsewhere/tree"))
             .unwrap();
-        use std::os::unix::fs::MetadataExt;
         journal
-            .record_staging(
-                &id,
-                0,
-                &staged,
-                &Identity {
-                    device: live.dev(),
-                    inode: live.ino(),
-                },
-            )
+            .record_staging(&id, 0, &staged, &Identity::from_metadata(&live))
             .unwrap();
         crate::journal::tests_support::abandon(&journal, &id);
         journal.reconcile().unwrap();

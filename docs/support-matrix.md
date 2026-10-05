@@ -95,3 +95,9 @@ against the real helper journal with a fake command runner.
 | `sudo` or `pkexec` | Reviewed privileged manager action | Refuse that action when scoped elevation cannot run. Never elevate the whole npm process. |
 
 Network and removable mounts are shown in inventory but scanned only on explicit selection. Scans stay on one filesystem by default, which includes that filesystem's other subvolume mounts below the root (Btrfs `/home` under `/`); unmounted data partitions and locked encrypted containers are listed with their size and no usage. Permission-denied paths and optional-tool gaps must remain visible in TUI and JSON. A successful read-only inventory does not imply that cleanup is supported on the same host.
+
+Crash cleanup uses filesystem birth time to distinguish recycled staging inodes.
+On a filesystem that does not report it through `statx`, a partial output whose
+size or modification time changed since staging was recorded is kept and named in
+history for review. Undo requires the journal's complete moved-file fingerprint;
+older internal records lacking it remain readable but their undo is refused.
