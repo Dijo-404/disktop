@@ -196,12 +196,17 @@ test("a reader that leaves early gets no stack trace and no alert-reached status
   }
 });
 
-test("a real `| head -1` pipeline ends quietly", () => {
+test("a real `| head -1` pipeline reports no broken-pipe error", () => {
   const result = spawnSync("sh", ["-c", "node dist/bin/disktop.js devices | head -1 >/dev/null; node dist/bin/disktop.js --help | head -1 >/dev/null"], {
     encoding: "utf8",
     env: { ...process.env, NO_COLOR: "1" },
   });
-  assert.equal(result.stderr, "", "nothing reaches stderr when a reader stops early");
+  assert.equal(result.error, undefined);
+  assert.equal(result.status, 0);
+  // Inventory can legitimately warn about an unreadable mount on this host.
+  // Closing stdout must not add a broken-pipe error or a stack trace to it.
+  assert.doesNotMatch(result.stderr, /EPIPE|\n\s+at |node:internal/);
+  assert.equal(result.stderr.replace(/^warning: [a-z0-9-]+: .*\n/gm, ""), "", "only inventory warnings may reach stderr");
 });
 
 test("help and version answer without building any service", () => {

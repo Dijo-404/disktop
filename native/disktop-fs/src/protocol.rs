@@ -3298,7 +3298,6 @@ mod tests {
         sandbox: &Sandbox,
         name: &[u8],
     ) -> (crate::journal::Journal, String, Vec<u8>) {
-        use std::os::unix::fs::MetadataExt;
         let mut state = sandbox.path().to_path_buf();
         state.push("state");
         let journal = crate::journal::Journal::open(&state).unwrap();
@@ -3311,16 +3310,13 @@ mod tests {
         journal
             .record_intent(&id, 0, b"/somewhere/else", Some(&staged))
             .unwrap();
-        let metadata = std::fs::symlink_metadata(std::ffi::OsStr::from_bytes(&staged)).unwrap();
+        let metadata = crate::sys::metadata_at(libc::AT_FDCWD, &staged).unwrap();
         journal
             .record_staging(
                 &id,
                 0,
                 &staged,
-                &crate::journal::Identity {
-                    device: metadata.dev(),
-                    inode: metadata.ino(),
-                },
+                &crate::journal::Identity::from_metadata(&metadata),
             )
             .unwrap();
         crate::journal::tests_support::abandon(&journal, &id);
@@ -3396,6 +3392,62 @@ mod tests {
                 .as_deref()
                 .unwrap()
                 .contains("left in place")
+        );
+    }
+
+    #[test]
+    fn a_staged_file_with_a_recycled_inode_is_left_alone() {
+        let sandbox = Sandbox::new("staging-recycled-inode");
+        sandbox.file(b"file.disktop-partial-999999-0", 16);
+        let (journal, id, staged) = staged_leftover(&sandbox, b"file.disktop-partial-999999-0");
+        // Simulate a different file receiving exactly the same device/inode,
+        // kind, size, and mtime. Its birth time identifies the new incarnation.
+        journal
+            .connection_for_tests()
+            .execute(
+                "UPDATE action_item SET staging_btime = ?2 WHERE action_id = ?1",
+                rusqlite::params![id, 1_i64],
+            )
+            .unwrap();
+        assert_eq!(
+            crate::actions::release_abandoned_staging(&journal, 1000).unwrap(),
+            0
+        );
+        assert_eq!(
+            std::fs::read(std::ffi::OsStr::from_bytes(&staged))
+                .unwrap()
+                .len(),
+            16
+        );
+        assert!(
+            journal.get(&id).unwrap().unwrap().items[0]
+                .reason
+                .as_deref()
+                .unwrap()
+                .contains("left in place")
+        );
+    }
+
+    #[test]
+    fn staging_without_birth_time_is_kept_when_its_contents_changed() {
+        let sandbox = Sandbox::new("staging-no-birth-time");
+        sandbox.file(b"file.disktop-partial-999999-0", 16);
+        let (journal, id, staged) = staged_leftover(&sandbox, b"file.disktop-partial-999999-0");
+        journal
+            .connection_for_tests()
+            .execute(
+                "UPDATE action_item SET staging_btime = NULL WHERE action_id = ?1",
+                rusqlite::params![id],
+            )
+            .unwrap();
+        std::fs::write(std::ffi::OsStr::from_bytes(&staged), b"changed contents").unwrap();
+        assert_eq!(
+            crate::actions::release_abandoned_staging(&journal, 1000).unwrap(),
+            0
+        );
+        assert_eq!(
+            std::fs::read(std::ffi::OsStr::from_bytes(&staged)).unwrap(),
+            b"changed contents"
         );
     }
 
@@ -5068,6 +5120,27 @@ mod tests {
 
         let item = item_results(&events, "restore-10")[0];
         assert_eq!(item["itemResult"]["reason"], "changed-target");
+    }
+
+    #[test]
+    fn an_undo_refuses_a_trashed_file_rewritten_in_place() {
+        let sandbox = Sandbox::new("restore-rewritten");
+        sandbox.directory(b"work");
+        sandbox.file(b"work/notes.txt", 32);
+        let mut file = sandbox.bytes();
+        file.extend_from_slice(b"/work/notes.txt");
+        let trashed = run_trash("trash-rewritten", &sandbox, &[target(&file, 32)]);
+        let journal_id = journal_id_of(&trashed, "trash-rewritten");
+        let trashed_path = sandbox.path().join("trash-home/files/notes.txt");
+        // A write preserves the inode, but the journal's full fingerprint
+        // must still refuse the edited contents.
+        std::fs::write(&trashed_path, b"edited in Trash").unwrap();
+        let events = run_restore("restore-rewritten", &sandbox, &journal_id);
+        let result = &completion(&events, "restore-rewritten")["result"];
+        assert_eq!(result["completed"], "0");
+        assert_eq!(result["skipped"], "1");
+        assert_eq!(std::fs::read(&trashed_path).unwrap(), b"edited in Trash");
+        assert!(!sandbox.path().join("work/notes.txt").exists());
     }
 
     #[test]

@@ -27,6 +27,23 @@ function environmentFor(overrides = {}) {
   return discoveryEnvironment(fixture.home, overrides);
 }
 
+/** The fixture's swap table must not discover the host's hibernation files. */
+function swapEnvironment() {
+  const environment = environmentFor();
+  const paths = environment.paths;
+  const root = Buffer.from(`${fixture.root}/`);
+  return {
+    ...environment,
+    paths: {
+      ...paths,
+      async facts(path) {
+        const bytes = Buffer.from(path.bytesBase64, "base64");
+        return bytes.subarray(0, root.length).equals(root) ? paths.facts(path) : undefined;
+      },
+    },
+  };
+}
+
 function findByPath(findings, path) {
   return findings.find((finding) => finding.paths.some((candidate) => candidate.display === path));
 }
@@ -95,7 +112,7 @@ test("a file beside an image that is not an image is left alone", async () => {
 test("swap is read from /proc/swaps and offers no action at all", async () => {
   const result = await discover(
     createSwapProvider({ swapsPath: rawPathFromUtf8(fixture.paths.swaps) }),
-    environmentFor(),
+    swapEnvironment(),
   );
 
   assert.equal(result.findings.length, 1);
@@ -116,7 +133,7 @@ test("zram swap is memory, not disk, so it is not reported as space on a disk", 
       "/dev/nvme0n1p5                          partition\t8388604\t\t0\t\t-2\n",
   );
   try {
-    const result = await discover(createSwapProvider({ swapsPath: rawPathFromUtf8(swaps) }), environmentFor());
+    const result = await discover(createSwapProvider({ swapsPath: rawPathFromUtf8(swaps) }), swapEnvironment());
     assert.deepEqual(result.findings.map((finding) => finding.title), ["Swap partition /dev/nvme0n1p5"]);
     assert.equal(result.capability.status, "available");
   } finally {
@@ -127,7 +144,7 @@ test("zram swap is memory, not disk, so it is not reported as space on a disk", 
 test("a machine with no swap says so rather than reporting nothing", async () => {
   const result = await discover(
     createSwapProvider({ swapsPath: rawPathFromUtf8("/does/not/exist") }),
-    environmentFor(),
+    swapEnvironment(),
   );
 
   assert.notEqual(result.capability.status, "available");
