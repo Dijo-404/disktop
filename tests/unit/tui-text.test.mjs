@@ -103,3 +103,12 @@ test("flags and keycaps are two cells, as terminals draw them", () => {
   assert.equal(cellWidth("flag-🇯🇵-japan.txt"), 17);
   assert.equal(cellWidth("©"), 1, "a text-presentation symbol stays one cell");
 });
+
+test("a timestamp of exactly the epoch is unknown, not fifty-six years old", async () => {
+  // FAT keeps no time on its root directory and the helper clamps anything
+  // before 1970 to zero, so zero means "no time was recorded".
+  const { relativeAge, localDateTime } = await import("../../dist/tui/text.js");
+  assert.equal(relativeAge(0, Date.parse("2026-10-04T12:00:00Z")), "-");
+  assert.equal(localDateTime(0), "unknown");
+  assert.equal(relativeAge(Date.parse("2026-10-04T11:00:00Z"), Date.parse("2026-10-04T12:00:00Z")), "1h ago");
+});

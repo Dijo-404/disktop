@@ -266,18 +266,45 @@ function rowLine(row: ExploreRow, selected: boolean, columns: ExploreColumns, wh
     return line.build({ selected });
   }
 
+  if (row.kind === "measured") {
+    // Measured as root by another tool and absent from the index: a size and
+    // a name, with no share of a total it was never added to.
+    line.add(padStart(formatBytes(row.bytes, state.units), columns.size - 1), "accent").add(" ");
+    if (columns.bar > 0) line.add(" ".repeat(columns.bar + 1));
+    if (columns.percent > 0) line.add(" ".repeat(columns.percent));
+    line.add("  ").add(truncate(baseName(row.path), columns.name - 1, theme.glyphs.ellipsis), "normal");
+    if (line.remaining > 12) {
+      line.add(" (as root)", "muted");
+    }
+    return line.build({ selected });
+  }
+
   const entry = row.entry;
   const size = entrySize(entry, explore);
-  line.add(padStart(formatBytes(size, state.units), columns.size - 1), entry.shared ? "dim" : "strong").add(" ");
-  const percent = sharePercent(size, whole);
-  if (columns.bar > 0) {
-    line.add(" ");
-    for (const span of barSpans(percent, columns.bar, theme, entry.kind === "directory" ? "barUsed" : "series2")) {
-      line.add(span.text, span.style);
+  const unentered = unenteredReason(entry, explore);
+  const measured = unentered === "unreadable" ? measuredSize(entry.path, explore) : undefined;
+  if (measured !== undefined) {
+    line.add(padStart(formatBytes(measured, state.units), columns.size - 1), "accent").add(" ");
+    if (columns.bar > 0) line.add(" ".repeat(columns.bar + 1));
+    if (columns.percent > 0) line.add(" ".repeat(columns.percent));
+  } else if (unentered !== undefined) {
+    // What is inside was never read, so there is no size to show: a number
+    // here, even the directory's own few bytes, would read as "nearly empty".
+    line.add(padStart("?", columns.size - 1), "warn").add(" ");
+    if (columns.bar > 0) line.add(" ".repeat(columns.bar + 1));
+    if (columns.percent > 0) line.add(" ".repeat(columns.percent));
+  } else {
+    line.add(padStart(formatBytes(size, state.units), columns.size - 1), entry.shared ? "dim" : "strong").add(" ");
+    const percent = sharePercent(size, whole);
+    if (columns.bar > 0) {
+      line.add(" ");
+      for (const span of barSpans(percent, columns.bar, theme, entry.kind === "directory" ? "barUsed" : "series2")) {
+        line.add(span.text, span.style);
+      }
     }
-  }
-  if (columns.percent > 0) {
-    line.add(padStart(whole > 0n ? `${percent.toFixed(1)}%` : "", columns.percent), "dim");
+    if (columns.percent > 0) {
+      line.add(padStart(whole > 0n ? `${percent.toFixed(1)}%` : "", columns.percent), "dim");
+    }
   }
   line.add("  ");
   const name = explore.mode === "browse" ? baseName(entry.path) : relativeDisplay(entry.path, explore.root);
@@ -287,6 +314,10 @@ function rowLine(row: ExploreRow, selected: boolean, columns: ExploreColumns, wh
   line.add(fitted, nameStyle);
   if (entry.shared) {
     line.add(" (hardlink)", "muted");
+  }
+  if (unentered !== undefined && line.remaining > 4) {
+    const label = measured !== undefined ? "unreadable; measured as root" : UNENTERED_LABELS[unentered];
+    line.add(truncate(` (${label})`, line.remaining - (columns.modified + columns.growth), theme.glyphs.ellipsis), measured !== undefined ? "muted" : "warn");
   }
   if (columns.growth > 0) {
     line.padTo(width - columns.modified - columns.growth);
@@ -299,6 +330,46 @@ function rowLine(row: ExploreRow, selected: boolean, columns: ExploreColumns, wh
     line.padTo(width - columns.modified).add(padStart(relativeAge(nanosecondsToMilliseconds(entry.modifiedNanoseconds), context.now), columns.modified), "dim");
   }
   return line.build({ selected });
+}
+
+type Unentered = "mount" | "unreadable";
+
+const UNENTERED_LABELS: Readonly<Record<Unentered, string>> = {
+  mount: "not scanned: another mount",
+  unreadable: "unreadable, size unknown",
+};
+
+const UNENTERED_DETAILS: Readonly<Record<Unentered, string>> = {
+  mount: "another filesystem or a repeated mount; its contents are not in this scan",
+  unreadable: "could not be read, so its contents are not in this scan",
+};
+
+/**
+ * Why a directory row has no subtree behind it, when it has none.
+ *
+ * The index records how many names a directory held only when the walk went
+ * inside, so a directory without that count was never entered: either it is a
+ * mount the scan stayed out of, or it could not be read.
+ */
+/** The size measured as root for one unreadable directory, if it was measured. */
+function measuredSize(path: RawPath, explore: ExploreState): bigint | undefined {
+  return explore.elevated?.measurements.find((measurement) => measurement.path.bytesBase64 === path.bytesBase64)?.bytes;
+}
+
+/** Everything measured as root below `path`, which the scan's totals leave out. */
+function measuredBelow(path: RawPath, explore: ExploreState): bigint {
+  const base = path.display === "/" ? "/" : `${path.display}/`;
+  return (explore.elevated?.measurements ?? [])
+    .filter((measurement) => measurement.path.display === path.display || measurement.path.display.startsWith(base))
+    .reduce((sum, measurement) => sum + measurement.bytes, 0n);
+}
+
+export function unenteredReason(entry: IndexedEntry, explore: ExploreState): Unentered | undefined {
+  if (entry.kind !== "directory" || entry.childEntries !== undefined || explore.snapshot === undefined) {
+    return undefined;
+  }
+  const mounts = explore.snapshot.completeness.excludedMounts;
+  return mounts.some((mount) => mount.bytesBase64 === entry.path.bytesBase64) ? "mount" : "unreadable";
 }
 
 function entryName(name: string, entry: IndexedEntry, theme: Theme): string {
@@ -324,6 +395,10 @@ function contextLine(context: ViewContext, home: string | undefined): ScreenLine
     right.push(formatBytes(entrySize(directory, explore), state.units));
     if (directory.childEntries !== undefined) {
       right.push(`${groupDigits(directory.childEntries)} item${directory.childEntries === 1n ? "" : "s"}`);
+    }
+    const asRoot = explore.directory === undefined ? 0n : measuredBelow(explore.directory.path, explore);
+    if (asRoot > 0n) {
+      right.push(`+${formatBytes(asRoot, state.units)} unreadable, measured as root`);
     }
   } else if (explore.duplicates !== undefined && explore.mode === "duplicates") {
     right.push(`frees ${formatBytes(explore.duplicates.reclaimable, state.units)}`);
@@ -388,6 +463,11 @@ function detailLines(context: ViewContext, home: string | undefined): ScreenLine
     const decision = row.group.decision;
     detail.add(decision.kind === "decided" ? `Keeps ${homeRelative(decision.kept.path.display, home, theme)}` : "Undecided", "strong");
     detail.add(`${theme.glyphs.separator}${decision.kind === "decided" ? decision.basis : decision.reason}`, "dim");
+  } else if (row.kind === "measured") {
+    detail
+      .add(truncate(baseName(row.path), Math.max(8, Math.floor(width / 3)), theme.glyphs.ellipsis), "strong")
+      .add(theme.glyphs.separator, "muted")
+      .add(`${formatBytes(row.bytes, state.units)} measured as root with du; not in the index, so it cannot be opened or cleaned`, "dim");
   } else if (row.kind === "member") {
     detail
       .add(row.keep ? "This copy is kept" : row.undecided ? "The keep rule could not choose" : "A copy the keep rule would release", row.keep ? "ok" : "strong")
@@ -396,10 +476,15 @@ function detailLines(context: ViewContext, home: string | undefined): ScreenLine
       .add(row.keep ? "" : `${theme.glyphs.separator}c plans moving it to Trash`, "muted");
   } else {
     const entry = row.entry;
+    const unentered = unenteredReason(entry, explore);
     const pieces = [
       entry.childEntries === undefined ? entry.kind : `${groupDigits(entry.childEntries)} item${entry.childEntries === 1n ? "" : "s"}`,
-      `${formatBytes(entry.allocatedBytes, state.units)} on disk`,
-      `${formatBytes(entry.apparentBytes, state.units)} apparent`,
+      unentered === undefined
+        ? `${formatBytes(entry.allocatedBytes, state.units)} on disk`
+        : measuredSize(entry.path, explore) !== undefined
+          ? `${formatBytes(measuredSize(entry.path, explore) ?? 0n, state.units)} measured as root; Enter lists what is inside`
+          : UNENTERED_DETAILS[unentered],
+      unentered === undefined ? `${formatBytes(entry.apparentBytes, state.units)} apparent` : undefined,
       `modified ${localDateTime(nanosecondsToMilliseconds(entry.modifiedNanoseconds))}`,
       `uid ${entry.ownerId}`,
       entry.shared ? "hardlink, bytes counted elsewhere" : undefined,
@@ -464,6 +549,13 @@ function footerStatus(context: ViewContext): ScreenLine | undefined {
       `${theme.glyphs.separator}incomplete${inaccessible > 0n ? `: ${groupDigits(inaccessible)} unreadable dirs` : ""}`,
       "warn",
     );
+    const elevated = state.explore.elevated;
+    if (elevated !== undefined) {
+      const total = elevated.measurements.reduce((sum, measurement) => sum + measurement.bytes, 0n);
+      line.add(`${theme.glyphs.separator}${formatBytes(total, state.units)} of them measured as root`, "dim");
+    } else if (inaccessible > 0n) {
+      line.add(`${theme.glyphs.separator}`, "dim").add("A", "key").add(" measure them as root", "dim");
+    }
   }
   if (state.explore.nextCursor !== undefined) {
     line.addRight("more below: n ", "muted");

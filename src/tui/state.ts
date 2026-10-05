@@ -10,6 +10,7 @@ import type { Finding, FindingCategory } from "../domain/findings.js";
 import type { Capability, IndexedEntry, RawPath, Warning } from "../domain/models.js";
 import type { StalenessBasis } from "../domain/staleness.js";
 import type { JournalRecord } from "../ports/actions.js";
+import type { ElevatedRecord } from "../ports/elevated.js";
 import type { EntrySort, TypeTotal } from "../ports/scan.js";
 import type { SnapshotSummary } from "../ports/snapshots.js";
 import type { SearchQuery } from "./search.js";
@@ -76,6 +77,8 @@ export const EXPLORE_MODES: readonly ExploreMode[] = ["browse", "largest", "dupl
 
 export type ExploreRow =
   | { readonly kind: "entry"; readonly entry: IndexedEntry }
+  /** What is directly inside an unreadable directory, measured as root; not in the index. */
+  | { readonly kind: "measured"; readonly path: RawPath; readonly bytes: bigint }
   | { readonly kind: "group"; readonly group: DecidedGroup; readonly index: number }
   | {
       readonly kind: "member";
@@ -125,6 +128,8 @@ export interface ExploreState {
   /** Why there is nothing to show, when there is nothing. */
   readonly empty?: string;
   readonly loading: boolean;
+  /** What this scan's unreadable directories were measured to hold as root, when anybody asked. */
+  readonly elevated?: ElevatedRecord;
 }
 
 export interface FindingsState {
@@ -183,6 +188,7 @@ export type Dialog =
   | { readonly kind: "refused"; readonly title: string; readonly failure: OperationFailure }
   | { readonly kind: "unavailable"; readonly title: string; readonly capability: Capability }
   | { readonly kind: "confirm-scan"; readonly path: RawPath; readonly reason: string }
+  | { readonly kind: "confirm-elevate"; readonly scanId: string; readonly unreadable: bigint }
   | { readonly kind: "finding"; readonly finding: Finding; readonly scroll: number };
 
 export interface DestinationAnswer {
@@ -257,7 +263,7 @@ export function initialState(view: InventoryView, units: "iec" | "si", staleDays
 export function listLength(state: AppState): number {
   switch (state.tab) {
     case "Disks":
-      return state.disks.view.filesystems.length;
+      return state.disks.view.filesystems.length + state.disks.view.unmounted.length;
     case "Explore":
       return state.explore.rows.length;
     case "Clean":

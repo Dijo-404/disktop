@@ -2,7 +2,7 @@ import { boundedLimit, olderThanNanoseconds, parseSize } from "../../application
 import type { EntryFilter, EntrySort, SortOrder } from "../../ports/scan.js";
 import type { SnapshotSummary } from "../../ports/snapshots.js";
 import type { RawPath } from "../../domain/models.js";
-import { isWithin, pathBytes, rawPathFromUtf8, sanitizeText } from "../../domain/paths.js";
+import { rawPathFromUtf8, sanitizeText, scanReaches } from "../../domain/paths.js";
 import type { CliContext } from "../context.js";
 import {
   EXIT,
@@ -159,7 +159,14 @@ export async function runExplore(context: CliContext, options: ExploreOptions): 
   }
 
   const accounting = options.sort === "apparent" ? "apparent" : snapshot.scope.accounting;
-  for (const line of entryLines(outcome.page.entries, context.settings.units, accounting)) {
+  const elevated = await context.storage.elevated.recorded(snapshot.scanId);
+  const unentered = {
+    excludedMounts: snapshot.completeness.excludedMounts,
+    ...(elevated === undefined
+      ? {}
+      : { measuredAsRoot: new Map(elevated.measurements.map((measurement) => [measurement.path.bytesBase64, measurement.bytes])) }),
+  };
+  for (const line of entryLines(outcome.page.entries, context.settings.units, accounting, unentered)) {
     context.output.stdout(`${line}\n`);
   }
   if (outcome.page.typeTotals !== undefined) {
@@ -202,9 +209,10 @@ export async function newestCovering(
   context: CliContext,
   wanted: RawPath,
 ): Promise<SnapshotSummary | undefined> {
-  const target = pathBytes(wanted);
   const snapshots = await context.storage.snapshots.list();
-  return snapshots.find((snapshot) => snapshot.scope.roots.some((root) => isWithin(pathBytes(root), target)));
+  return snapshots.find((snapshot) =>
+    scanReaches(snapshot.scope.roots, [...snapshot.scope.excludes, ...snapshot.completeness.excludedMounts], wanted),
+  );
 }
 
 function buildFilter(options: ExploreOptions, now: Date): EntryFilter | "invalid-size" | "invalid-age" {

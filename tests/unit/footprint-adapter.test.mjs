@@ -257,6 +257,66 @@ test("a search uses the newest snapshot that covers the home directory", async (
   assert.equal(scan.recorded.queries[0].filter.nameContains, "node_modules");
 });
 
+test("a scan that stayed out of the mount holding home does not cover home, so an older one that did is used", async () => {
+  // A scan of / that refused /home as a separate mount names / as its root,
+  // which is an ancestor of home, but holds no row for anything under it.
+  const home = rawPathFromUtf8("/home/example");
+  const scope = (roots, extra = {}) => ({ roots, excludes: [], accounting: "allocated", crossFilesystems: false, filesystems: [], ...extra });
+  const completeness = (excludedMounts) => ({ complete: false, scannedEntries: 10n, inaccessibleDirectories: 0n, excludedMounts, warnings: [] });
+  const snapshots = {
+    async list() {
+      return [
+        { id: "a", scanId: "scan-root", scannedAt: "2026-09-30T09:00:00.000Z", scope: scope([rawPathFromUtf8("/")]), completeness: completeness([rawPathFromUtf8("/home")]) },
+        { id: "b", scanId: "scan-root-excluding", scannedAt: "2026-09-30T08:30:00.000Z", scope: scope([rawPathFromUtf8("/")], { excludes: [rawPathFromUtf8("/home/example")] }) },
+        { id: "c", scanId: "scan-home", scannedAt: "2026-09-29T08:00:00.000Z", scope: scope([home]) },
+      ];
+    },
+  };
+  const scan = scanner({});
+  scan.port.query = async (query) => {
+    scan.recorded.queries.push(query);
+    return { entries: [] };
+  };
+
+  await createIndexFootprint({
+    measurement: scan.port,
+    index: scan.port,
+    snapshots,
+    home,
+    accounting: "allocated",
+    crossFilesystems: false,
+    excludes: [],
+  }).directoriesNamed(["node_modules"], 50);
+
+  assert.deepEqual(scan.recorded.queries.map((query) => query.scanId), ["scan-home"]);
+});
+
+test("a stored scan the index no longer holds is a search that did not happen, not a failed detector", async () => {
+  const home = rawPathFromUtf8("/home/example");
+  const snapshots = {
+    async list() {
+      return [{ id: "s", scanId: "pruned", scannedAt: "2026-09-30T08:00:00.000Z", scope: { roots: [home], excludes: [], accounting: "allocated", crossFilesystems: false, filesystems: [] } }];
+    },
+  };
+  const scan = scanner({});
+  scan.port.query = async () => {
+    throw new CapabilityUnavailable({ status: "unsupported-filesystem", explanation: "That path is not in this scan. Scan it before exploring it." });
+  };
+  const footprint = createIndexFootprint({
+    measurement: scan.port,
+    index: scan.port,
+    snapshots,
+    home,
+    accounting: "allocated",
+    crossFilesystems: false,
+    excludes: [],
+  });
+
+  assert.deepEqual(await footprint.directoriesNamed(["node_modules"], 50), { paths: [], searched: false, truncated: false });
+  assert.deepEqual(await footprint.entriesUnder(home, 10), { entries: [], searched: false, truncated: false });
+  assert.deepEqual(await footprint.ownerTotals(10), { owners: [], searched: false, complete: false, truncated: false });
+});
+
 test("each searched name gets its own budget, so one common name cannot crowd out the rest", async () => {
   const home = rawPathFromUtf8("/home/example");
   const snapshots = {

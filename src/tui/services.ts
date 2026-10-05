@@ -1,5 +1,6 @@
 import type { ApplyService } from "../application/apply-action.js";
 import type { DashboardService } from "../application/dashboard.js";
+import type { ElevatedService } from "../application/elevated.js";
 import type { ExploreService } from "../application/explore.js";
 import type { FindService } from "../application/find.js";
 import type { FootprintService } from "../application/footprint.js";
@@ -22,6 +23,8 @@ export interface TuiServices {
   readonly scan: ScanService;
   readonly explore: ExploreService;
   readonly snapshots: SnapshotService;
+  /** Sizes of what a scan could not read, measured with administrator rights on request. */
+  readonly elevated: ElevatedService;
   readonly find: FindService;
   readonly footprint: FootprintService;
   readonly plan: PlanService["plan"];

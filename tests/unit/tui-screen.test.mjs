@@ -98,6 +98,25 @@ test("the header names the filesystem, its share, and what is free; the tab bar 
   assert.match(active.text, /Disks/, "the current tab is marked by its style, which the renderer draws inverse without colour");
 });
 
+test("Disks lists partitions nothing has mounted, and says how to see what they hold", () => {
+  const lines = text(BASE, { columns: 120, rows: 30 }, UNICODE);
+  const windows = lines.find((line) => line.includes("Windows-SSD"));
+  const locked = lines.find((line) => line.includes("sdc2"));
+  assert.ok(windows, lines.join("\n"));
+  assert.match(windows, /ntfs/);
+  assert.match(windows, /509\.5 GiB/);
+  assert.match(windows, /not mounted/);
+  assert.match(locked, /locked/);
+  assert.match(lines.join("\n"), /2 not mounted/);
+
+  const onWindows = { ...BASE, disks: { ...BASE.disks, selected: 2 } };
+  const screen = text(onWindows, { columns: 120, rows: 30 }, UNICODE);
+  assert.doesNotMatch(screen[0], /no filesystem/, "the header still describes a filesystem");
+  const detail = screen.join("\n");
+  assert.match(detail, /\/dev\/nvme0n1p3/);
+  assert.match(detail, /mount it/i);
+});
+
 test("an alert and an incomplete reading are both stated on screen", () => {
   const alerting = initialState(
     { ...FIXTURE_VIEW, complete: false, warnings: [{ code: "statfs-unreadable", message: "one mount" }], alerts: [{ filesystemId: "fs-259-2", kind: "low-space", usedPercent: 99, thresholdPercent: 90, message: "/ is 99% used." }] },
@@ -119,6 +138,26 @@ test("Explore shows the breadcrumb, shares, growth, the trend, and the file-type
   assert.match(joined, /since Sep 1/, "the trend across comparable scans");
   assert.match(joined, /\.js/, "file types");
   assert.match(joined, /dangling/);
+});
+
+test("a directory the scan never entered shows no size and says why, rather than reading as empty", () => {
+  const mount = entry("/home/example/projects/usb", "directory", 4096n, { childEntries: undefined });
+  const locked = entry("/home/example/projects/private", "directory", 0n, { childEntries: undefined });
+  const snapshot = {
+    ...SNAPSHOT,
+    completeness: { ...SNAPSHOT.completeness, complete: false, excludedMounts: [mount.path], inaccessibleDirectories: 1n },
+  };
+  const state = {
+    ...EXPLORING,
+    explore: { ...EXPLORING.explore, snapshot, rows: [{ kind: "entry", entry: mount }, { kind: "entry", entry: locked }] },
+  };
+  const lines = text(state, { columns: 100, rows: 30 }, UNICODE);
+  const usb = lines.find((line) => line.includes("usb/"));
+  const privateRow = lines.find((line) => line.includes("private/"));
+  assert.match(usb, /not scanned: another mount/);
+  assert.doesNotMatch(usb, /\d(\.\d)? (B|KiB)/, "an unentered mount carries no size");
+  assert.match(privateRow, /unreadable/);
+  assert.doesNotMatch(privateRow, /\b0 B\b/, "an unreadable directory is never shown as empty");
 });
 
 test("Explore without a scan says how to get one instead of showing an empty list", () => {

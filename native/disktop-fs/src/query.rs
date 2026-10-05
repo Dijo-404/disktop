@@ -113,6 +113,9 @@ pub struct EntryFilter {
     pub max_child_entries: Option<u64>,
     /// Only symlinks whose target resolves, or only the ones that do not.
     pub broken: Option<bool>,
+    /// Only directories the walk recorded but never went inside — unreadable
+    /// ones and mounts it stayed out of — or only everything else.
+    pub unentered: Option<bool>,
 }
 
 pub struct QueryRequest {
@@ -233,6 +236,7 @@ fn access(request: &QueryRequest) -> Access {
         && filter.modified_before_nanoseconds.is_none()
         && filter.max_child_entries.is_none()
         && filter.broken.is_none()
+        && filter.unentered.is_none()
         && common_kind;
     let small = filter
         .under
@@ -449,6 +453,7 @@ fn totals_statement(request: &QueryRequest, totals: Totals) -> (String, Vec<Valu
         // are never broken links, so narrowing by either would empty them.
         max_child_entries: None,
         broken: None,
+        unentered: None,
     };
     push_filters(&filter, &mut clauses, &mut arguments);
 
@@ -531,6 +536,17 @@ fn push_filters(filter: &EntryFilter, clauses: &mut Vec<String>, arguments: &mut
     if let Some(broken) = filter.broken {
         clauses.push("broken = ?".to_owned());
         arguments.push(Value::Integer(i64::from(broken)));
+    }
+    if let Some(unentered) = filter.unentered {
+        let never_entered = format!(
+            "(kind = {} AND child_entries IS NULL)",
+            EntryKind::Directory.code()
+        );
+        clauses.push(if unentered {
+            never_entered
+        } else {
+            format!("NOT {never_entered}")
+        });
     }
     if let Some(kinds) = &filter.kinds {
         let placeholders = vec!["?"; kinds.len()].join(", ");
@@ -802,6 +818,47 @@ mod tests {
         assert_eq!(row("/full/a").child_entries, None);
         assert!(row("/dangling").broken, "a link to nothing reads as broken");
         assert!(!row("/live").broken, "a link to a real file is not broken");
+    }
+
+    #[test]
+    fn a_directory_the_walk_could_not_enter_is_found_by_asking_for_unentered_ones() {
+        if unsafe { libc::geteuid() } == 0 {
+            // Root reads a mode-000 directory, so there is nothing to refuse.
+            return;
+        }
+        let sandbox = Sandbox::new("query-unentered");
+        sandbox.directory(b"open");
+        sandbox.file(b"open/a", 16);
+        sandbox.directory(b"locked");
+        sandbox.file(b"locked/secret", 16);
+        sandbox.chmod(b"locked", 0o000);
+
+        let (connection, scan_id) = scanned(&sandbox, "unentered");
+        sandbox.chmod(b"locked", 0o700);
+        let mut unentered = request(&scan_id);
+        unentered.filter.unentered = Some(true);
+        let page = query(&connection, &unentered).unwrap();
+
+        assert_eq!(
+            page.entries.len(),
+            1,
+            "only the directory nobody could open"
+        );
+        assert!(page.entries[0].path.ends_with(b"/locked"));
+
+        let mut entered = request(&scan_id);
+        entered.filter.unentered = Some(false);
+        let rest = query(&connection, &entered).unwrap();
+        assert!(
+            rest.entries
+                .iter()
+                .all(|entry| !entry.path.ends_with(b"/locked"))
+        );
+        assert!(
+            rest.entries
+                .iter()
+                .any(|entry| entry.path.ends_with(b"/open"))
+        );
     }
 }
 

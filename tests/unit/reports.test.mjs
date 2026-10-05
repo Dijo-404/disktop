@@ -1,3 +1,4 @@
+import { rawPathFromUtf8 } from "../../dist/domain/paths.js";
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { CSV_COLUMNS, csvCell, renderCsvReport } from "../../dist/reports/csv.js";
@@ -223,7 +224,7 @@ test("a JSON report with omitted and incomplete sections validates and says whic
     renderJsonReport(
       hostileReport({
         complete: false,
-        scan: { ...hostileReport().scan, complete: false, warnings: [{ code: "index-unavailable", message: "The index could not be read." }], largest: undefined, typeTotals: undefined },
+        scan: { ...hostileReport().scan, complete: false, warnings: [{ code: "index-unavailable", message: "The index could not be read." }], largest: undefined, children: undefined, largestFiles: undefined, typeTotals: undefined },
         findings: { included: false, reason: "Detectors were not run." },
       }),
     ),
@@ -234,4 +235,18 @@ test("a JSON report with omitted and incomplete sections validates and says whic
   assert.deepEqual(document.sections, ["capacity", "scan"]);
   assert.equal("entries" in document.scan, false);
   assert.deepEqual(document.findings, { included: false, reason: "Detectors were not run." });
+});
+
+test("HTML groups many warnings of one kind into one line that opens to their paths", () => {
+  const base = hostileReport();
+  const unreadable = Array.from({ length: 40 }, (_, index) => ({
+    code: "inaccessible-directory",
+    message: "The directory could not be read: Permission denied (os error 13)",
+    path: rawPathFromUtf8(`/var/lib/private-${index}`),
+  }));
+  const report = { ...base, complete: false, scan: { ...base.scan, complete: false, warnings: unreadable } };
+  const html = renderHtmlReport(report, "iec");
+  assert.equal((html.match(/<summary><strong>inaccessible-directory<\/strong> &times; 40/g) ?? []).length, 1);
+  assert.ok(html.includes("/var/lib/private-39"), "every path is still in the page");
+  assert.equal((html.match(/Permission denied \(os error 13\)/g) ?? []).length, 1, "the shared message is written once");
 });

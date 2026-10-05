@@ -244,6 +244,7 @@ function encodeFilter(query: EntryQuery): Record<string, unknown> {
     ...(filter.kinds === undefined ? {} : { kinds: [...filter.kinds] }),
     ...(filter.maxChildEntries === undefined ? {} : { maxChildEntries: filter.maxChildEntries.toString(10) }),
     ...(filter.broken === undefined ? {} : { broken: filter.broken }),
+    ...(filter.unentered === undefined ? {} : { unentered: filter.unentered }),
   };
 }
 

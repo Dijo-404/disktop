@@ -1,5 +1,5 @@
 import { includedSections, reportWarnings, type Report } from "../application/report.js";
-import type { Filesystem, RawPath } from "../domain/models.js";
+import type { Filesystem, IndexedEntry, RawPath, Warning } from "../domain/models.js";
 import { sanitizeText } from "../domain/paths.js";
 import { formatBytes } from "../domain/sizes.js";
 import { filesystemUsage, instantFromNanoseconds } from "./usage.js";
@@ -68,6 +68,8 @@ dl { display: grid; grid-template-columns: max-content 1fr; gap: 4px 16px; margi
 dt { color: var(--muted); }
 dd { margin: 0; overflow-wrap: anywhere; }
 .flag { color: var(--warn); font-weight: 600; }
+details > summary { cursor: pointer; }
+details ul { margin: 4px 0 8px; padding-left: 20px; }
 footer { margin-top: 40px; color: var(--muted); font-size: 0.85rem; }
 `;
 
@@ -114,15 +116,7 @@ export function renderHtmlReport(report: Report, units: Units): string {
   );
 
   if (warnings.length > 0) {
-    parts.push('<ul class="warnings">');
-    for (const warning of warnings) {
-      parts.push(
-        `<li><strong>${escapeHtml(warning.code)}</strong>: ${escapeHtml(warning.message)}${
-          warning.path === undefined ? "" : ` (${pathText(warning.path)})`
-        }</li>`,
-      );
-    }
-    parts.push("</ul>");
+    parts.push(...warningList(warnings));
   }
 
   parts.push(...capacitySection(report, size));
@@ -144,6 +138,53 @@ export function renderHtmlReport(report: Report, units: Units): string {
 }
 
 type Size = (bytes: bigint) => string;
+
+/** Paths listed under one kind of warning before the rest are only counted. */
+const PATHS_PER_WARNING = 200;
+
+/**
+ * Warnings grouped by kind. A scan of `/` as an ordinary user carries
+ * hundreds of unreadable directories, and a flat list of them buried
+ * everything else; each kind is now one line that opens to its paths.
+ */
+function warningList(warnings: readonly Warning[]): string[] {
+  const groups = new Map<string, Warning[]>();
+  for (const warning of warnings) {
+    const group = groups.get(warning.code);
+    if (group === undefined) {
+      groups.set(warning.code, [warning]);
+    } else {
+      group.push(warning);
+    }
+  }
+  const parts = ['<ul class="warnings">'];
+  for (const [code, group] of groups) {
+    const first = group[0] as Warning;
+    if (group.length === 1) {
+      parts.push(
+        `<li><strong>${escapeHtml(code)}</strong>: ${escapeHtml(first.message)}${first.path === undefined ? "" : ` (${pathText(first.path)})`}</li>`,
+      );
+      continue;
+    }
+    const sameMessage = group.every((warning) => warning.message === first.message);
+    parts.push(
+      `<li><details><summary><strong>${escapeHtml(code)}</strong> &times; ${group.length}${
+        sameMessage ? `: ${escapeHtml(first.message)}` : ""
+      }</summary><ul>`,
+    );
+    for (const warning of group.slice(0, PATHS_PER_WARNING)) {
+      const text = sameMessage ? "" : escapeHtml(warning.message);
+      const where = warning.path === undefined ? "" : pathText(warning.path);
+      parts.push(`<li>${[where, text].filter((part) => part !== "").join(": ")}</li>`);
+    }
+    if (group.length > PATHS_PER_WARNING) {
+      parts.push(`<li class="note">and ${group.length - PATHS_PER_WARNING} more, listed in the JSON and CSV exports</li>`);
+    }
+    parts.push("</ul></details></li>");
+  }
+  parts.push("</ul>");
+  return parts;
+}
 
 function capacitySection(report: Report, size: Size): string[] {
   const { capacity } = report;
@@ -190,6 +231,23 @@ function capacitySection(report: Report, size: Size): string[] {
         `<tr><td>${escapeHtml(device.name)}</td><td>${escapeHtml(device.kind)}</td><td class="num">${size(device.sizeBytes)}</td><td>${escapeHtml(
           device.partitions.join(", ") || "none",
         )}</td><td>${escapeHtml(detail)}</td></tr>`,
+      );
+    }
+    parts.push("</tbody></table></div>");
+  }
+  if (capacity.unmounted.length > 0) {
+    parts.push(
+      "<h3>Not mounted</h3>",
+      '<div class="table-wrap"><table>',
+      "<caption>Partitions holding data, and locked encrypted containers, that nothing has mounted. How full they are is unknown until they are mounted.</caption>",
+      '<thead><tr><th>Device</th><th>Type</th><th class="num">Size</th><th>State</th><th>Label</th><th>On disk</th></tr></thead>',
+      "<tbody>",
+    );
+    for (const volume of capacity.unmounted) {
+      parts.push(
+        `<tr><td class="path">${escapeHtml(volume.devicePath)}</td><td>${escapeHtml(volume.filesystemType)}</td><td class="num">${size(volume.sizeBytes)}</td><td>${
+          volume.state === "locked" ? '<span class="flag">encrypted, locked</span>' : "not mounted"
+        }</td><td>${escapeHtml(volume.label ?? "")}</td><td>${escapeHtml(volume.deviceId)}</td></tr>`,
       );
     }
     parts.push("</tbody></table></div>");
@@ -246,7 +304,11 @@ function scanSection(report: Report, size: Size): string[] {
     `<dt>Scanned at</dt><dd>${escapeHtml(snapshot.scannedAt)}</dd>`,
     `<dt>Snapshot</dt><dd>${escapeHtml(snapshot.id)}</dd>`,
     `<dt>Accounting</dt><dd>${escapeHtml(snapshot.scope.accounting)}${
-      snapshot.scope.crossFilesystems ? ", crossing into nested mounts" : ", one filesystem"
+      snapshot.scope.crossFilesystems
+        ? ", crossing into nested mounts"
+        : snapshot.scope.sameFilesystemMounts === true
+          ? ", one filesystem (its other subvolume mounts included)"
+          : ", stopping at every mount"
     }${snapshot.scope.maxDepth === undefined ? "" : `, at most ${escapeHtml(snapshot.scope.maxDepth)} levels deep`}</dd>`,
     `<dt>Entries scanned</dt><dd>${escapeHtml(snapshot.completeness.scannedEntries.toString(10))}</dd>`,
     `<dt>Allocated</dt><dd>${size(snapshot.totals.allocatedBytes)} <span class="note">(blocks on disk, whole scan)</span></dd>`,
@@ -255,35 +317,87 @@ function scanSection(report: Report, size: Size): string[] {
     `<dt>Unreadable directories</dt><dd>${escapeHtml(snapshot.completeness.inaccessibleDirectories.toString(10))}</dd>`,
   );
   if (snapshot.completeness.excludedMounts.length > 0) {
-    parts.push(`<dt>Mounts not entered</dt><dd>${snapshot.completeness.excludedMounts.map(pathText).join("<br>")}</dd>`);
+    parts.push(
+      `<dt>Not entered</dt><dd>${snapshot.completeness.excludedMounts.map(pathText).join("<br>")} <span class="note">(other filesystems and excluded paths; not counted)</span></dd>`,
+    );
   }
   parts.push("</dl>");
 
-  parts.push("<h3>Largest entries</h3>");
-  if (scan.largest === undefined) {
-    parts.push('<p class="note">The index could not answer, so the largest entries are missing; the warnings above say why.</p>');
-  } else if (scan.largest.entries.length === 0) {
-    parts.push('<p class="note">Nothing under the path is in the scan.</p>');
+  const skipped = new Set(snapshot.completeness.excludedMounts.map((path) => path.bytesBase64));
+  const unentered = (entry: IndexedEntry): string | undefined =>
+    entry.kind === "directory" && entry.childEntries === undefined
+      ? skipped.has(entry.path.bytesBase64)
+        ? "another mount, not scanned"
+        : "unreadable, size unknown"
+      : undefined;
+
+  parts.push(`<h3>What is inside ${pathText(scan.subject)}</h3>`);
+  if (scan.children === undefined) {
+    parts.push('<p class="note">The index could not list what is directly inside the path; the warnings above say why.</p>');
+  } else if (scan.children.entries.length === 0) {
+    parts.push('<p class="note">Nothing directly inside the path is in the scan.</p>');
   } else {
+    const whole = scan.children.entries.reduce((sum, entry) => sum + entry.allocatedBytes, 0n);
     parts.push(
       '<div class="table-wrap"><table>',
       `<caption>${
-        scan.largest.more ? `The ${scan.largest.limit} largest entries under the path, by allocated bytes; more exist` : "Every entry under the path, by allocated bytes"
-      }. A directory's size is its whole subtree.</caption>`,
-      '<thead><tr><th class="num">#</th><th class="num">Allocated</th><th class="num">Apparent</th><th>Kind</th><th>Modified</th><th>Path</th></tr></thead>',
+        scan.children.more ? `The ${scan.children.limit} largest of what is directly inside the path` : "Everything directly inside the path"
+      }, by allocated bytes. These do not overlap: a directory's size is its whole subtree.</caption>`,
+      '<thead><tr><th class="num">Allocated</th><th>Share</th><th class="num">Apparent</th><th>Kind</th><th>Modified</th><th>Name</th></tr></thead>',
       "<tbody>",
     );
-    for (const [position, entry] of scan.largest.entries.entries()) {
-      const notes = [entry.shared ? "shared hardlink, counted under another path" : undefined, entry.broken === true ? "broken symlink" : undefined].filter(
-        (note) => note !== undefined,
-      );
+    for (const entry of scan.children.entries) {
+      const unread = unentered(entry);
+      const share = whole === 0n ? 0 : Number((entry.allocatedBytes * 1000n) / whole) / 10;
       parts.push(
-        `<tr><td class="num">${position + 1}</td><td class="num">${size(entry.allocatedBytes)}</td><td class="num">${size(entry.apparentBytes)}</td><td>${escapeHtml(
-          entry.kind,
-        )}</td><td class="nowrap">${escapeHtml(instantFromNanoseconds(entry.modifiedNanoseconds)?.slice(0, 10) ?? "unknown")}</td><td class="path">${pathText(entry.path)}${
-          notes.length === 0 ? "" : ` <span class="note">(${escapeHtml(notes.join("; "))})</span>`
-        }</td></tr>`,
+        `<tr><td class="num">${unread === undefined ? size(entry.allocatedBytes) : '<span class="note">unknown</span>'}</td><td class="nowrap">${
+          unread === undefined ? `${shareBar(share)}${share.toFixed(1)}%` : ""
+        }</td><td class="num">${unread === undefined ? size(entry.apparentBytes) : ""}</td><td>${escapeHtml(entry.kind)}</td><td class="nowrap">${modified(entry)}</td><td class="path">${pathText(
+          entry.path,
+        )}${unread === undefined ? entryNotes(entry) : ` <span class="flag">(${escapeHtml(unread)})</span>`}</td></tr>`,
       );
+    }
+    parts.push("</tbody></table></div>");
+  }
+
+  parts.push("<h3>Largest files</h3>");
+  if (scan.largestFiles === undefined) {
+    parts.push('<p class="note">The index could not list the largest files; the warnings above say why.</p>');
+  } else if (scan.largestFiles.entries.length === 0) {
+    parts.push('<p class="note">No regular file under the path is in the scan.</p>');
+  } else {
+    parts.push(
+      '<div class="table-wrap"><table>',
+      `<caption>${scan.largestFiles.more ? `The ${scan.largestFiles.limit} largest files under the path` : "Every file under the path"}, by allocated bytes</caption>`,
+      '<thead><tr><th class="num">#</th><th class="num">Allocated</th><th class="num">Apparent</th><th>Modified</th><th>Path</th></tr></thead>',
+      "<tbody>",
+    );
+    for (const [position, entry] of scan.largestFiles.entries.entries()) {
+      parts.push(
+        `<tr><td class="num">${position + 1}</td><td class="num">${size(entry.allocatedBytes)}</td><td class="num">${size(entry.apparentBytes)}</td><td class="nowrap">${modified(
+          entry,
+        )}</td><td class="path">${pathText(entry.path)}${entryNotes(entry)}</td></tr>`,
+      );
+    }
+    parts.push("</tbody></table></div>");
+  }
+
+  if (scan.elevated !== undefined) {
+    parts.push(
+      "<h3>Unreadable directories, measured as root</h3>",
+      `<p class="note">Measured ${escapeHtml(scan.elevated.measuredAt)} by the system's du running read-only as root, after the scan. ${size(
+        scan.elevated.totalBytes,
+      )} in ${scan.elevated.measurements.length} director${scan.elevated.measurements.length === 1 ? "y" : "ies"}; not added to the totals above, and not in the index.</p>`,
+      '<div class="table-wrap"><table>',
+      `<thead><tr><th class="num">${scan.elevated.accounting === "apparent" ? "Apparent" : "Allocated"}</th><th>Path</th><th>Largest inside</th></tr></thead>`,
+      "<tbody>",
+    );
+    for (const measurement of scan.elevated.measurements.slice(0, 200)) {
+      const inside = measurement.children
+        .slice(0, 3)
+        .map((child) => `${pathText(child.path)} ${size(child.bytes)}`)
+        .join("<br>");
+      parts.push(`<tr><td class="num">${size(measurement.bytes)}</td><td class="path">${pathText(measurement.path)}</td><td class="path">${inside}</td></tr>`);
     }
     parts.push("</tbody></table></div>");
   }
@@ -394,6 +508,23 @@ function findingsSection(report: Report, size: Size): string[] {
   }
   parts.push("</tbody></table></div>", "</section>");
   return parts;
+}
+
+function modified(entry: IndexedEntry): string {
+  return escapeHtml(instantFromNanoseconds(entry.modifiedNanoseconds)?.slice(0, 10) ?? "unknown");
+}
+
+function entryNotes(entry: IndexedEntry): string {
+  const notes = [entry.shared ? "shared hardlink, counted under another path" : undefined, entry.broken === true ? "broken symlink" : undefined].filter(
+    (note) => note !== undefined,
+  );
+  return notes.length === 0 ? "" : ` <span class="note">(${escapeHtml(notes.join("; "))})</span>`;
+}
+
+/** A share-of-the-whole bar, drawn like the capacity bars. */
+function shareBar(percent: number): string {
+  const width = Math.min(100, Math.max(0, Math.round(percent)));
+  return `<span class="bar" role="img" aria-label="${width}% of the path"><span style="width: ${width}%"></span></span>`;
 }
 
 function sectionState(complete: boolean, explanation?: string): string[] {

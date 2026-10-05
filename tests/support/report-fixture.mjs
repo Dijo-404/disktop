@@ -130,6 +130,9 @@ export function hostileReport(overrides = {}) {
       subject: rawPath("/home/example/projects"),
       snapshot: FIXTURE_SNAPSHOT,
       largest: { limit: 50, entries, more: true },
+      // Every hostile name reaches each table the HTML draws from the index.
+      children: { limit: 50, entries, more: true },
+      largestFiles: { limit: 50, entries, more: true },
       typeTotals: HOSTILE_EXTENSIONS.map((extension, index) => ({
         extension,
         entries: BigInt(index + 1),

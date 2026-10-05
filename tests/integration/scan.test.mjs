@@ -186,6 +186,54 @@ test("a nested mount is not descended into unless it is asked for", async () => 
   }
 });
 
+test("another part of the scanned filesystem mounted below the root is walked; a repeat and another filesystem are not", async () => {
+  // A Btrfs subvolume mounted at /home is one filesystem with / but its own
+  // mount. A tmpfs with a bind mount of a sibling directory has the same
+  // shape and needs no block device: the sibling is more of the filesystem
+  // the scan is on, reached nowhere else in the scan.
+  const home = await disktopHome();
+  const top = await mkdtemp(join(tmpdir(), "disktop-samefs-"));
+  const script = [
+    `mount -t tmpfs tmpfs '${top}'`,
+    `mkdir -p '${top}/root/a' '${top}/root/inner' '${top}/root/again' '${top}/root/other-fs' '${top}/elsewhere'`,
+    `head -c 1048576 /dev/zero > '${top}/elsewhere/payload'`,
+    `head -c 4096 /dev/zero > '${top}/root/a/small'`,
+    `mount --bind '${top}/elsewhere' '${top}/root/inner'`,
+    `mount --bind '${top}/root/a' '${top}/root/again'`,
+    `mount -t tmpfs tmpfs '${top}/root/other-fs'`,
+    `node dist/bin/disktop.js scan '${top}/root' --json`,
+  ].join(" && ");
+  const run = spawnSync("unshare", ["--mount", "--map-root-user", "sh", "-c", script], {
+    encoding: "utf8",
+    env: {
+      ...process.env,
+      NO_COLOR: "1",
+      HOME: home,
+      XDG_CONFIG_HOME: join(home, "config"),
+      XDG_DATA_HOME: join(home, "data"),
+      XDG_CACHE_HOME: join(home, "cache"),
+      XDG_STATE_HOME: join(home, "state"),
+    },
+  });
+  try {
+    if (run.error !== undefined || run.status === null || run.stdout.trim() === "") {
+      process.stderr.write("skipped: this host cannot create a private mount namespace\n");
+      return;
+    }
+    const scan = JSON.parse(run.stdout);
+    const validate = validators.get("scan");
+    assert.ok(validate(scan), JSON.stringify(validate.errors));
+    const skipped = scan.data.completeness.excludedMounts.map((mount) => mount.display.slice(top.length));
+    assert.deepEqual(skipped.sort(), ["/root/again", "/root/other-fs"]);
+    assert.ok(BigInt(scan.data.totals.allocatedBytes) >= 1048576n, `the bytes behind the mount were counted: ${scan.data.totals.allocatedBytes}`);
+    const reasons = scan.warnings.filter((warning) => warning.code === "crossed-filesystem-skipped").map((warning) => warning.message);
+    assert.ok(reasons.some((reason) => /Another filesystem \(tmpfs\)/.test(reason)), JSON.stringify(reasons));
+    assert.ok(reasons.some((reason) => /already counts/.test(reason)), JSON.stringify(reasons));
+  } finally {
+    await rm(top, { recursive: true, force: true });
+  }
+});
+
 test("interrupting a scan leaves a partial result and a queryable index", async () => {
   const home = await disktopHome();
   const fixture = await createLargeFixture({ entries: 60_000, fanOut: 256 });

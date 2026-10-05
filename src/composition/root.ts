@@ -7,6 +7,7 @@ import { createDashboardService, type DashboardService, type DashboardSettings }
 import { createExploreService, type ExploreService } from "../application/explore.js";
 import { createApplyService, type ApplyService } from "../application/apply-action.js";
 import { createDuplicateService } from "../application/duplicates.js";
+import { createElevatedService, type ElevatedService } from "../application/elevated.js";
 import { createFindService, type FindService } from "../application/find.js";
 import { createFootprintService, type FootprintService } from "../application/footprint.js";
 import { createPlanService, type PlanService } from "../application/plan-action.js";
@@ -21,6 +22,7 @@ import type { NotificationOutcome } from "../ports/notifications.js";
 import { rawPathFromUtf8 } from "../domain/paths.js";
 import { createLinuxInventory } from "../platform/linux/inventory/index.js";
 import { createAccountNames } from "../platform/linux/accounts.js";
+import { createElevatedDu } from "../platform/linux/elevated.js";
 import { inInitialUserNamespace, verifyRootOwnedExecutable, verifyRootOwnedInstall } from "../platform/linux/install-ownership.js";
 import { StartupRefused } from "../domain/errors.js";
 import { createIndexFootprint } from "../platform/linux/footprint.js";
@@ -51,6 +53,7 @@ import { createPlanStore } from "../storage/plans.js";
 import { createReportFiles } from "../storage/report-files.js";
 import { ruleHash } from "../storage/rules.js";
 import { createSnapshotStore } from "../storage/snapshots.js";
+import { createElevatedStore } from "../storage/elevated.js";
 import { resolveLocations } from "../storage/xdg.js";
 
 /**
@@ -74,6 +77,7 @@ export interface Services {
   readonly scan: ScanService;
   readonly explore: ExploreService;
   readonly snapshots: SnapshotService;
+  readonly elevated: ElevatedService;
   readonly footprint: FootprintService;
   readonly plan: PlanService;
   readonly apply: ApplyService;
@@ -252,6 +256,12 @@ export async function createServices(options: CompositionOptions = {}): Promise<
   };
 
   const explore = createExploreService(scanner, createAccountNames());
+  const elevated = createElevatedService({
+    index: scanner,
+    port: createElevatedDu({ environment }),
+    store: createElevatedStore(locations.dataDirectory),
+    now: () => new Date(),
+  });
   const notifier = createNotifySend({ environment });
   const footprint = createFootprintService(
     createBuiltInProviders({ packages: createPackageInventory(tools), managers }),
@@ -304,12 +314,14 @@ export async function createServices(options: CompositionOptions = {}): Promise<
     }),
     explore,
     snapshots,
+    elevated,
     footprint,
     report: createReportService({
       dashboard,
       snapshots,
       explore,
       footprint,
+      elevated,
       files: createReportFiles(),
       effectiveUserId: process.geteuid?.() ?? -1,
     }),

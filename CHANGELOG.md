@@ -7,6 +7,33 @@ All notable changes to Disktop are recorded here. Versions follow [Semantic Vers
 The first public release. Everything below the Phase headings was built in internal
 phases that were never published; this is the first version anybody can install.
 
+### Status, 2026-10-05
+
+Not published. Phases 0–7 are complete. Phase 8 (whole-product validation and the sole
+release) is in progress:
+
+- **Done and verified locally:** the package, the four-helper release build and its
+  checksums, the packed-tarball install test, the hardening audit of every mutation, and
+  a first run on real hardware — an Arch laptop with Btrfs on LUKS, subvolume mounts, a
+  Windows partition, and a locked 4 TB LUKS drive. That run found the wrong answers
+  listed first under Phase 8 below, and they are fixed. The local gate (`npm run check`,
+  the Rust format, lint, and test gates, `npm run test:package`) passes: 996 unit and
+  contract tests, 119 integration (2 skipped: the cross-disk move needs a second
+  writable filesystem, `DISKTOP_TEST_DESTINATION_FS`), 13 recovery, 16 PTY, 9 package,
+  and 244 helper tests.
+- **Still required before the one publication:** the CI workflows green on GitHub,
+  including the ARM64 runners (the ARM64 helpers have been built but never run); the
+  host and VM checks the support matrix still lists as not validated (distribution
+  managers, the user timer, privileged manager cleanup, SMART, ZFS, WSL, SSH); and,
+  after publishing, provenance and a registry install verified on clean accounts.
+- **Known limits, stated rather than hidden:** on Btrfs, reflinked and compressed files
+  each report their full size, so a scan's file total can exceed what `df` reports as
+  used (`uv`'s cache reflinks packages into virtualenvs); `du -x`, used for the
+  measurement taken as root, stops at a Btrfs subvolume nested inside an unreadable
+  directory; that measurement lists one level below each directory and is not
+  browsable further; and the TUI's short confirmation dialogs still stretch to the full
+  height of the screen.
+
 ### Phase 7: the complete terminal UI, reports, and completions
 
 - The TUI is the whole product in a terminal, at 80×24 and down to 40×10:
@@ -48,6 +75,45 @@ phases that were never published; this is the first version anybody can install.
 
 ### Phase 8: hardening and release engineering
 
+- Validated on a real dual-boot laptop (Btrfs on LUKS with subvolume mounts, an
+  unmounted Windows partition, a locked 4 TB LUKS drive), which showed the following
+  wrong answers; each fix has a test that failed first.
+  - **A scan of `/` measured 22 GiB of a filesystem `df` says has 326 GiB used.** Every
+    Btrfs subvolume mount (`/home`, `/.snapshots`, `/var/log`, ...) was refused as a
+    nested mount, and `home/` showed `0 B`. The walk now enters a mount of the same
+    filesystem that shows a part of it nothing else in the scan reaches, decided from
+    `/proc/self/mountinfo` (same superblock, non-overlapping mount roots) and checked
+    again on the opened descriptor; another filesystem and a bind mount repeating a
+    reached tree are still refused, and the warning now says which. The same scan now
+    accounts for 291 GiB. Snapshots record the policy (`sameFilesystemMounts`), so a scan
+    from before is never subtracted from one after; the walk also stopped naming the
+    filesystem of a mount point it only stat'ed, which had made the two look comparable
+    and reported all of `/home` as growth.
+  - **A directory the scan never entered read as empty.** Explore, `explore`, and the
+    report show `?`/`unknown` and why (another mount, or unreadable) instead of its own
+    few bytes. Opening a mount the newest scan stayed out of now offers a scan instead of
+    an empty listing, and detectors, `explore`, `report --path`, and the TUI pick the
+    newest scan that actually reached a path; three detectors used to fail with "That
+    path is not in this scan".
+  - **Partitions nothing had mounted were invisible.** `devices`, the Disks tab, and the
+    report list data partitions and locked encrypted containers with their size, type,
+    and label, and say how to mount or unlock them (`unmounted` in `devices --json`).
+  - **Directories an ordinary user cannot read could only be counted.** `scan --sudo` and
+    `A` in Explore measure them as root, read-only: the system's own `du` is raised
+    through `pkexec` (the desktop's password dialog) or `sudo`, never anything Disktop
+    ships. Sizes are kept beside the scan, open one level deep, and are never added to
+    its totals. The index gained an `unentered` filter to list them.
+  - zram swap (compressed RAM) was reported as 15 GiB of disk; it is left out.
+  - Versioned and rotated names were their own file types (`libssl.so.3` as `.3`,
+    `app.log.1` as `.1`); trailing version numbers are now skipped.
+  - A FAT root's missing timestamp read as "56y ago" and 1970-01-01; it is unknown.
+  - The HTML report listed the scan root first and every directory beside its own
+    ancestors; it now shows what is directly inside the path with shares that add up,
+    the largest files, unmounted partitions, and measurements taken as root, and groups
+    hundreds of identical warnings into one line per kind. JSON and CSV carry the same
+    (`children`, `largestFiles`, `elevated`, `unmounted`).
+  - CLI warnings name their path, and the third and later of one kind are counted
+    instead of printed hundreds of times.
 - The package is `disktop@1.0.0`: only compiled JavaScript, the four helpers and their
   `SHA256SUMS`, the public CLI schemas, README, LICENSE, and this changelog. No install
   script; `prepublishOnly` refuses outside the guarded publish workflow.
