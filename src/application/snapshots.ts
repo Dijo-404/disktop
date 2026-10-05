@@ -84,6 +84,7 @@ export function createSnapshotService(store: SnapshotStore, index: FileIndexPort
           crossFilesystems: summary.crossFilesystems,
           ...(summary.maxDepth === undefined ? {} : { maxDepth: summary.maxDepth.toString(10) }),
           filesystems: summary.filesystems,
+          sameFilesystemMounts: true,
         },
         totals: summary.totals,
         completeness: summary.completeness,
@@ -133,6 +134,8 @@ export function incompatibilities(earlier: SnapshotScope, later: SnapshotScope):
   }
   if (earlier.crossFilesystems !== later.crossFilesystems) {
     reasons.push("One scan crossed filesystem boundaries and the other did not.");
+  } else if (!earlier.crossFilesystems && (earlier.sameFilesystemMounts ?? false) !== (later.sameFilesystemMounts ?? false)) {
+    reasons.push("One scan stopped at every mount and the other also walked the filesystem's other mounts, such as Btrfs subvolumes.");
   }
   if (earlier.maxDepth !== later.maxDepth) {
     // A depth-limited scan of an unchanged tree otherwise reads as a large

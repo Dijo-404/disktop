@@ -53,6 +53,10 @@ export const FIXTURE_VIEW = {
   capability: { status: "available", explanation: "lsblk, mountinfo, and statfs all responded." },
   devices: FIXTURE_DEVICES,
   filesystems: [ROOT_FILESYSTEM, REMOVABLE_FILESYSTEM],
+  unmounted: [
+    { id: "nvme0n1p3", devicePath: "/dev/nvme0n1p3", deviceId: "nvme0n1", sizeBytes: 547_094_528_000n, filesystemType: "ntfs", label: "Windows-SSD", state: "unmounted" },
+    { id: "sdc2", devicePath: "/dev/sdc2", deviceId: "sdc", sizeBytes: 4_095_729_467_392n, filesystemType: "crypto_LUKS", state: "locked" },
+  ],
   alerts: [],
   warnings: [],
   complete: true,
@@ -135,6 +139,18 @@ function fakeStorage(overrides = {}, recorded = {}) {
       },
       async prune() {
         return 0;
+      },
+    },
+    elevated: {
+      async recorded() {
+        return overrides.elevatedRecord;
+      },
+      async unreadable() {
+        return { paths: [], more: false };
+      },
+      async measure(snapshot, options) {
+        recorded.elevated = { scanId: snapshot.scanId, interactive: options.interactive };
+        return overrides.elevatedOutcome ?? { kind: "nothing-unreadable" };
       },
     },
     defaults: {

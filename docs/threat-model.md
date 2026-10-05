@@ -124,6 +124,17 @@ process is never run as root for cleanup; under EUID 0 generic mutation is disab
 administrator scans are read-only. A failed authentication is a permission result, never
 a fallback to unprivileged deletion.
 
+**Ride a password prompt into root.** Measuring what a scan could not read (`scan
+--sudo`, `A` in the TUI) raises the system's own `du`, resolved in a root-owned trusted
+directory, never anything Disktop ships: an installation the user can write to, as a
+`npm install -g` into a home directory is, must not have its code run as root, because
+any process running as that user could have replaced it. The argv is fixed flags (`-x -a
+-0 -d 1 -B1|-b --`) followed by absolute, normalised paths read from the scan's own
+index, so no name can be read as an option; a name that is not valid UTF-8 is skipped
+rather than mangled. `du` only reads, its output is parsed as NUL-separated bytes with a
+size bound, and its sizes are kept beside the scan, never folded into its totals. A
+refused or cancelled prompt measures nothing and says so.
+
 **Make the user believe a wrong number.** Estimated selected bytes, bytes moved to Trash,
 and observed free-space change are three separate values, never summed into one claim.
 Manager-reported counts stay labelled estimated or unknown and are never promoted to

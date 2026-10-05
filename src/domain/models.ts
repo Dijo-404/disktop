@@ -55,6 +55,24 @@ export interface Filesystem {
   readonly deviceId?: string;
 }
 
+/**
+ * A partition or drive holding a filesystem, or an encrypted container, that
+ * nothing has mounted. Its bytes belong to no filesystem Disktop can measure,
+ * so it is listed on its own rather than left out of the picture.
+ */
+export interface UnmountedVolume {
+  /** The kernel's name for it, such as `nvme0n1p3`. */
+  readonly id: string;
+  readonly devicePath: string;
+  /** The whole disk it is on. */
+  readonly deviceId: string;
+  readonly sizeBytes: Bytes;
+  readonly filesystemType: string;
+  readonly label?: string;
+  /** `locked` is an encrypted container that has not been opened. */
+  readonly state: "unmounted" | "locked";
+}
+
 export interface ScanCompleteness {
   readonly complete: boolean;
   readonly scannedEntries: bigint;

@@ -52,6 +52,7 @@ async function buildContext(): Promise<CliContext> {
       scan: services.scan,
       explore: services.explore,
       snapshots: services.snapshots,
+      elevated: services.elevated,
       defaults: services.scanDefaults,
       find: services.findDefaults,
     },
@@ -74,6 +75,8 @@ async function buildContext(): Promise<CliContext> {
     now: () => new Date(),
     interactive,
     progress: process.stderr.isTTY === true,
+    promptable:
+      process.stdin.isTTY === true || (process.env.DISPLAY ?? "") !== "" || (process.env.WAYLAND_DISPLAY ?? "") !== "",
     launchTui: (settings) =>
       runTui({
         services: {
@@ -81,6 +84,7 @@ async function buildContext(): Promise<CliContext> {
           scan: services.scan,
           explore: services.explore,
           snapshots: services.snapshots,
+          elevated: services.elevated,
           find: services.find,
           footprint: services.footprint,
           plan: (request, signal) => services.plan.plan(request, signal),

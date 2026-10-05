@@ -397,3 +397,32 @@ test("snapshot files and their directory are private to the user", async () => {
   assert.equal((await stat(join(root, "snapshots"))).mode & 0o777, 0o700);
   assert.equal((await stat(join(root, "snapshots", "snap-a.json"))).mode & 0o777, 0o600);
 });
+
+test("a scan that stopped at every mount is not comparable with one that walked the filesystem's other subvolumes", async () => {
+  // Scans before the walker entered Btrfs subvolume mounts stopped at /home.
+  // Their stored scope has no mount policy, and subtracting one from a later
+  // scan of / would report all of /home as growth.
+  const store = createSnapshotStore(await sandbox());
+  const service = createSnapshotService(store, { async query() { return { entries: [] }; } });
+  const recorded = await service.record(
+    {
+      scanId: "scan-0000aaaa",
+      accounting: "allocated",
+      roots: SCOPE.roots,
+      completeness: { complete: true, scannedEntries: 4n, inaccessibleDirectories: 0n, excludedMounts: [], warnings: [] },
+      totals: { allocatedBytes: 1000n, apparentBytes: 900n, sharedBytes: 0n },
+      filesystems: SCOPE.filesystems,
+      crossFilesystems: false,
+    },
+    { excludes: SCOPE.excludes },
+    new Date("2026-10-04T12:00:00.000Z"),
+  );
+  assert.equal(recorded.scope.sameFilesystemMounts, true);
+  assert.equal((await store.get(recorded.id)).scope.sameFilesystemMounts, true, "the policy survives being stored");
+
+  const reasons = incompatibilities(SCOPE, recorded.scope);
+  assert.equal(reasons.length, 1);
+  assert.match(reasons[0], /subvolume|mount/i);
+  // Crossing every mount meant the same thing before and after.
+  assert.deepEqual(incompatibilities({ ...SCOPE, crossFilesystems: true }, { ...recorded.scope, crossFilesystems: true }), []);
+});

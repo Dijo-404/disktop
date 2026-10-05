@@ -1,6 +1,6 @@
 import { CapabilityUnavailable } from "../../domain/errors.js";
 import type { RawPath, Warning } from "../../domain/models.js";
-import { isWithin, pathBytes } from "../../domain/paths.js";
+import { scanReaches } from "../../domain/paths.js";
 import type { Accounting, FileIndexPort, ScanPort } from "../../ports/scan.js";
 import type {
   FootprintMeasurement,
@@ -120,13 +120,18 @@ export function createIndexFootprint(options: IndexFootprintOptions): FootprintP
         // looked" must not read the same, so the caller is told which it is.
         return { entries: [], searched: false, truncated: false };
       }
-      const page = await options.index.query({
-        scanId: covering,
-        filter: { underPath: root },
-        sort: "allocated",
-        order: "descending",
-        limit: Math.min(Math.max(1, limit), 1000),
-      });
+      const page = await unlessUnheld(() =>
+        options.index.query({
+          scanId: covering,
+          filter: { underPath: root },
+          sort: "allocated",
+          order: "descending",
+          limit: Math.min(Math.max(1, limit), 1000),
+        }),
+      );
+      if (page === undefined) {
+        return { entries: [], searched: false, truncated: false };
+      }
       return {
         entries: page.entries,
         searched: true,
@@ -150,13 +155,18 @@ export function createIndexFootprint(options: IndexFootprintOptions): FootprintP
       const found: RawPath[] = [];
       let truncated = false;
       for (const name of names) {
-        const page = await options.index.query({
-          scanId: covering,
-          filter: { underPath: home, nameContains: name, kinds: ["directory"] },
-          sort: "allocated",
-          order: "descending",
-          limit: Math.min(share, 1000),
-        });
+        const page = await unlessUnheld(() =>
+          options.index.query({
+            scanId: covering,
+            filter: { underPath: home, nameContains: name, kinds: ["directory"] },
+            sort: "allocated",
+            order: "descending",
+            limit: Math.min(share, 1000),
+          }),
+        );
+        if (page === undefined) {
+          return { paths: [], searched: false, truncated: false };
+        }
         const matching = page.entries.filter((entry) => lastSegment(entry.path) === name);
         found.push(...matching.map((entry) => entry.path));
         truncated ||= page.nextCursor !== undefined;
@@ -174,15 +184,20 @@ export function createIndexFootprint(options: IndexFootprintOptions): FootprintP
         return { owners: [], searched: false, complete: false, truncated: false };
       }
 
-      const page = await options.index.query({
-        scanId: covering.scanId,
-        filter: { underPath: home },
-        sort: "allocated",
-        order: "descending",
-        // The page itself is not wanted; the aggregate is.
-        limit: 1,
-        includeOwnerTotals: true,
-      });
+      const page = await unlessUnheld(() =>
+        options.index.query({
+          scanId: covering.scanId,
+          filter: { underPath: home },
+          sort: "allocated",
+          order: "descending",
+          // The page itself is not wanted; the aggregate is.
+          limit: 1,
+          includeOwnerTotals: true,
+        }),
+      );
+      if (page === undefined) {
+        return { owners: [], searched: false, complete: false, truncated: false };
+      }
 
       const owners = page.ownerTotals ?? [];
       return {
@@ -254,7 +269,32 @@ function unmeasured(path: RawPath, reason: string): FootprintMeasurement {
   return { path, basis: "unknown", explanation: reason };
 }
 
-/** The newest snapshot one of whose roots is the path or an ancestor of it. */
+/**
+ * A page, or nothing when the index no longer holds that scan or that path.
+ *
+ * A snapshot outlives its detailed index, which keeps only the newest few
+ * scans, and the helper refuses a path a scan never reached rather than
+ * answering with an empty page. Either way nobody looked, which the caller
+ * reports as a search that did not happen, never as a detector that failed or
+ * as nothing found.
+ */
+async function unlessUnheld<T>(read: () => Promise<T>): Promise<T | undefined> {
+  try {
+    return await read();
+  } catch (error) {
+    if (error instanceof CapabilityUnavailable) {
+      return undefined;
+    }
+    throw error;
+  }
+}
+
+/**
+ * The newest snapshot that really reached the path: one of its roots is the
+ * path or an ancestor, and neither an exclude nor a mount the walk stayed out
+ * of sits between the two. A scan of `/` that refused `/home` as another
+ * filesystem names an ancestor of every home directory and holds none of them.
+ */
 async function newestCovering(
   snapshots: Pick<SnapshotStore, "list">,
   wanted: RawPath,
@@ -266,10 +306,9 @@ async function newestCoveringSnapshot(
   snapshots: Pick<SnapshotStore, "list">,
   wanted: RawPath,
 ): Promise<{ readonly scanId: string; readonly complete: boolean } | undefined> {
-  const target = pathBytes(wanted);
   const stored = await snapshots.list();
   const covering = stored.find((snapshot) =>
-    snapshot.scope.roots.some((root) => isWithin(pathBytes(root), target)),
+    scanReaches(snapshot.scope.roots, [...snapshot.scope.excludes, ...(snapshot.completeness?.excludedMounts ?? [])], wanted),
   );
   if (covering === undefined) {
     return undefined;

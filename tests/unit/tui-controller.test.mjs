@@ -4,8 +4,8 @@ import { TuiController } from "../../dist/tui/controller.js";
 import { renderScreen } from "../../dist/tui/screen.js";
 import { initialState } from "../../dist/tui/state.js";
 import { ASCII_THEME } from "../../dist/tui/themes.js";
-import { FIXTURE_VIEW } from "../support/cli-context.mjs";
-import { CHILDREN, HOME, NOW, PLAN, RECORDS, ROOT_ENTRY, fakeHooks, fakeServices } from "../support/tui-fixtures.mjs";
+import { FIXTURE_VIEW, rawPath } from "../support/cli-context.mjs";
+import { CHILDREN, HOME, NOW, PLAN, RECORDS, ROOT_ENTRY, SNAPSHOT, entry, fakeHooks, fakeServices } from "../support/tui-fixtures.mjs";
 
 async function setup(overrides = {}) {
   const services = fakeServices(overrides);
@@ -29,14 +29,26 @@ function calls(services, name) {
 
 test("vim keys and arrows move the selection, and it never passes either end", async () => {
   const { controller } = await setup();
-  await press(controller, "j", "j", "j", "DOWN", "j");
-  assert.equal(controller.state.disks.selected, FIXTURE_VIEW.filesystems.length - 1);
-  await press(controller, "k", "UP", "k", "k");
+  // Filesystems first, then the partitions nothing has mounted.
+  const last = FIXTURE_VIEW.filesystems.length + FIXTURE_VIEW.unmounted.length - 1;
+  await press(controller, "j", "j", "j", "DOWN", "j", "j");
+  assert.equal(controller.state.disks.selected, last);
+  await press(controller, "k", "UP", "k", "k", "k", "k");
   assert.equal(controller.state.disks.selected, 0);
   await press(controller, "G");
-  assert.equal(controller.state.disks.selected, FIXTURE_VIEW.filesystems.length - 1);
+  assert.equal(controller.state.disks.selected, last);
   await press(controller, "g");
   assert.equal(controller.state.disks.selected, 0);
+});
+
+test("Enter or S on a partition nothing has mounted explains how to mount it and opens nothing", async () => {
+  const { controller } = await setup();
+  await press(controller, "G", "ENTER");
+  assert.equal(controller.state.tab, "Disks");
+  assert.match(controller.state.notice.text, /\/dev\/sdc2 is not mounted/);
+  assert.match(controller.state.notice.text, /Unlock and mount/);
+  await press(controller, "S");
+  assert.equal(controller.state.dialog, undefined, "no scan is offered for something that is not mounted");
 });
 
 test("tabs switch by number, by Tab, and by h and l outside Explore", async () => {
@@ -337,4 +349,61 @@ test("paging a directory asks for the same directory's children from the cursor,
   await press(controller, "n");
   assert.equal(served, pages, "nothing more is fetched past the bound");
   assert.match(controller.state.notice.text, /Press \/ to narrow/);
+});
+
+test("a filesystem the newest scan stayed out of is offered a scan, not shown as an empty directory", async () => {
+  const rootScan = {
+    ...SNAPSHOT,
+    scope: { ...SNAPSHOT.scope, roots: [rawPath("/")] },
+    completeness: { ...SNAPSHOT.completeness, complete: false, excludedMounts: [rawPath("/media/usb")] },
+  };
+  const { controller, services } = await setup({ snapshots: [rootScan] });
+  await press(controller, "j", "ENTER");
+  assert.equal(controller.state.dialog?.kind, "confirm-scan");
+  assert.equal(controller.state.dialog.path.display, "/media/usb");
+  assert.ok(
+    !services.calls.some((call) => call[0] === "page" && call[1].atPath?.display === "/media/usb"),
+    "the scan of / is not asked about a mount it never entered",
+  );
+});
+
+test("A measures the directories a scan could not read as root, after saying so, and shows what it found", async () => {
+  const locked = entry(`${ROOT_ENTRY.path.display}/locked`, "directory", 0n, { childEntries: undefined });
+  const incomplete = { ...SNAPSHOT, completeness: { ...SNAPSHOT.completeness, complete: false, inaccessibleDirectories: 1n } };
+  const record = {
+    scanId: SNAPSHOT.scanId,
+    measuredAt: new Date(NOW).toISOString(),
+    accounting: "allocated",
+    measurements: [{ path: locked.path, bytes: 7n * 1024n ** 3n, children: [{ path: rawPath(`${locked.path.display}/images`), bytes: 6n * 1024n ** 3n }] }],
+    skipped: [],
+  };
+  const { controller, services, hooks } = await setup({
+    snapshots: [incomplete],
+    explorePage: (request) => {
+      if (request.filter.atPath !== undefined) {
+        return { kind: "page", page: { entries: [request.filter.atPath.display === locked.path.display ? locked : ROOT_ENTRY] } };
+      }
+      return { kind: "page", page: { entries: request.filter.parentId === ROOT_ENTRY.id ? [locked, ...CHILDREN] : [], ...(request.includeTypeTotals ? { typeTotals: [] } : {}) } };
+    },
+    elevatedOutcome: { kind: "measured", record, totalBytes: record.measurements[0].bytes, more: false, warnings: [] },
+  });
+  await press(controller, "2");
+  await press(controller, "A");
+  assert.equal(controller.state.dialog?.kind, "confirm-elevate", "nothing is raised before the person agrees");
+  assert.equal(calls(services, "elevated-measure").length, 0);
+
+  await press(controller, "y");
+  assert.deepEqual(calls(services, "elevated-measure"), [["elevated-measure", SNAPSHOT.scanId, true]]);
+  assert.equal(hooks.suspended.length, 1, "the terminal is handed over so sudo can ask on it");
+  assert.equal(hooks.resumed, 1);
+  assert.match(controller.state.notice.text, /7\.0 GiB/);
+
+  const screen = renderScreen(controller.state, { columns: 120, rows: 30 }, { theme: ASCII_THEME, now: NOW, threshold: 90, home: HOME }).lines.map((line) => line.spans.map((span) => span.text).join(""));
+  const row = screen.find((line) => line.includes("locked/"));
+  assert.match(row, /7\.0 GiB/);
+  assert.match(row, /as root/);
+
+  // Opening it lists what was measured one level down.
+  await press(controller, "g", "ENTER");
+  assert.deepEqual(controller.state.explore.rows.map((item) => item.kind), ["measured"]);
 });

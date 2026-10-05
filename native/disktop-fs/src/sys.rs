@@ -4,8 +4,10 @@
 //! `RESOLVE_BENEATH`, `RESOLVE_NO_SYMLINKS`, and `RESOLVE_NO_MAGICLINKS`, so a
 //! symlink, a `..`, or a procfs magic link cannot move the walk out of the
 //! subtree it was given. Without `crossFilesystems`, `RESOLVE_NO_XDEV` also
-//! refuses mount points, including bind mounts. There is no fallback path that
-//! drops those guarantees: a kernel that cannot provide them refuses the scan.
+//! refuses mount points, including bind mounts, and the walk enters only a
+//! mount `mounts::SameFilesystem` has shown to be more of the same filesystem.
+//! There is no fallback path that drops those guarantees: a kernel that cannot
+//! provide them refuses the scan.
 
 use std::ffi::{CString, c_void};
 use std::io;
@@ -101,8 +103,20 @@ pub fn open_root(path: &[u8]) -> io::Result<RawFd> {
     Ok(descriptor)
 }
 
+/// Where an open descriptor really is, as this process's mount namespace names
+/// it, with every symlink in the path that opened it resolved.
+pub fn descriptor_path(descriptor: RawFd) -> io::Result<Vec<u8>> {
+    let link = std::fs::read_link(format!("/proc/self/fd/{descriptor}"))?;
+    let bytes = std::os::unix::ffi::OsStrExt::as_bytes(link.as_os_str()).to_vec();
+    if bytes.first() != Some(&b'/') {
+        return Err(io::Error::from_raw_os_error(libc::ENOENT));
+    }
+    Ok(bytes)
+}
+
 /// Open one child directory of `parent` by name, contained and never through a
-/// symlink. `cross_filesystems` is the only thing that relaxes mount crossing.
+/// symlink. `cross_filesystems` relaxes mount crossing; the walk also passes it
+/// for one mount it has already established belongs to the scanned filesystem.
 pub fn open_child_directory(
     parent: RawFd,
     name: &[u8],

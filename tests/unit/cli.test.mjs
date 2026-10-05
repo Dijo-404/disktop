@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import { COMMANDS, parseArguments, renderHelp } from "../../dist/cli/parser.js";
 import { runCli } from "../../dist/cli/run.js";
-import { fakeContext, FIXTURE_VIEW } from "../support/cli-context.mjs";
+import { fakeContext, FIXTURE_VIEW, rawPath } from "../support/cli-context.mjs";
 
 test("help is generated from the command table, so nothing can drift out of it", () => {
   const help = renderHelp();
@@ -171,6 +171,21 @@ test("--units changes presentation without changing a byte value", async () => {
   const json = fakeContext();
   await runCli(["devices", "--units", "si", "--json"], json);
   assert.equal(JSON.parse(json.captured.stdout).data.filesystems[0].totalBytes, "1000000000000");
+});
+
+test("a warning names its path, and many of one kind are summarised rather than repeated", async () => {
+  const { warningLines } = await import("../../dist/cli/text.js");
+  const unreadable = Array.from({ length: 40 }, (_, index) => ({
+    code: "inaccessible-directory",
+    message: "The directory could not be read: Permission denied (os error 13)",
+    path: rawPath(`/var/lib/private-${index}`),
+  }));
+  const lines = warningLines([{ code: "crossed-filesystem-skipped", message: "Another filesystem (vfat) is mounted here.", path: rawPath("/boot") }, ...unreadable]);
+
+  assert.ok(lines.includes("warning: crossed-filesystem-skipped: /boot: Another filesystem (vfat) is mounted here."), lines.join("\n"));
+  assert.ok(lines.some((line) => line.includes("/var/lib/private-0")), "the first few are listed with their paths");
+  assert.ok(lines.length < 12, `40 warnings of one kind are not 40 lines: ${lines.length}`);
+  assert.ok(lines.some((line) => /inaccessible-directory: \d+ more/.test(line)), lines.join("\n"));
 });
 
 test("text Disktop did not write cannot command the terminal on its way out", async () => {

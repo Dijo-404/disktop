@@ -159,6 +159,7 @@ function encodeSnapshot(snapshot: SnapshotSummary): Record<string, unknown> {
       crossFilesystems: snapshot.scope.crossFilesystems,
       ...(snapshot.scope.maxDepth === undefined ? {} : { maxDepth: snapshot.scope.maxDepth }),
       filesystems: [...snapshot.scope.filesystems],
+      ...(snapshot.scope.sameFilesystemMounts === undefined ? {} : { sameFilesystemMounts: snapshot.scope.sameFilesystemMounts }),
     },
     totals: {
       allocatedBytes: decimalBytes(snapshot.totals.allocatedBytes),
@@ -209,6 +210,9 @@ function decodeSnapshot(value: unknown): SnapshotSummary {
       crossFilesystems: expectBoolean(scope.crossFilesystems, "crossFilesystems"),
       ...(scope.maxDepth === undefined ? {} : { maxDepth: expectString(scope.maxDepth, "maxDepth") }),
       filesystems: expectStrings(scope.filesystems, "filesystems"),
+      ...(scope.sameFilesystemMounts === undefined
+        ? {}
+        : { sameFilesystemMounts: expectBoolean(scope.sameFilesystemMounts, "sameFilesystemMounts") }),
     },
     totals: {
       allocatedBytes: parseDecimalBytes(expectString(totals.allocatedBytes, "allocatedBytes")),

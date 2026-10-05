@@ -1,8 +1,9 @@
 import { describeCommand, type ManagerScope } from "../domain/managers.js";
-import type { Alert, Capability, Filesystem, IndexedEntry, RawPath, ScanCompleteness, StorageDevice, Warning } from "../domain/models.js";
+import type { Alert, Capability, Filesystem, IndexedEntry, RawPath, ScanCompleteness, StorageDevice, UnmountedVolume, Warning } from "../domain/models.js";
 import type { ScanTotals, TypeTotal } from "../ports/scan.js";
 import type { SnapshotSummary } from "../ports/snapshots.js";
 import type { DirectoryChange } from "../application/snapshots.js";
+import type { ElevatedOutcome } from "../application/elevated.js";
 import type { ProviderReport } from "../application/footprint.js";
 import type { CategoryTotal, Finding, FindingSize } from "../domain/findings.js";
 import { decimalBytes } from "../domain/sizes.js";
@@ -123,6 +124,44 @@ export function encodeDevice(device: StorageDevice): Record<string, unknown> {
     ...(device.model === undefined ? {} : { model: device.model }),
     ...(device.transport === undefined ? {} : { transport: device.transport }),
     partitions: [...device.partitions],
+  };
+}
+
+/** What `--sudo` found, in the shape `common.json#/$defs/elevatedMeasurement` describes. */
+export function encodeElevated(outcome: ElevatedOutcome): Record<string, unknown> {
+  switch (outcome.kind) {
+    case "nothing-unreadable":
+      return { status: "nothing-unreadable", explanation: "The scan read every directory it reached." };
+    case "denied":
+      return { status: "denied", explanation: outcome.explanation };
+    case "unavailable":
+      return { status: "unavailable", explanation: outcome.capability.explanation };
+    case "measured": {
+      const record = outcome.record;
+      const largest = [...record.measurements].sort((left, right) => (left.bytes === right.bytes ? 0 : left.bytes > right.bytes ? -1 : 1));
+      return {
+        status: "measured",
+        accounting: record.accounting,
+        measuredAt: record.measuredAt,
+        directories: String(record.measurements.length),
+        bytes: decimalBytes(outcome.totalBytes),
+        skipped: String(record.skipped.length),
+        more: outcome.more,
+        largest: largest.slice(0, 20).map((measurement) => ({ path: encodeRawPath(measurement.path), bytes: decimalBytes(measurement.bytes) })),
+      };
+    }
+  }
+}
+
+export function encodeUnmountedVolume(volume: UnmountedVolume): Record<string, unknown> {
+  return {
+    id: volume.id,
+    devicePath: volume.devicePath,
+    deviceId: volume.deviceId,
+    sizeBytes: decimalBytes(volume.sizeBytes),
+    filesystemType: volume.filesystemType,
+    ...(volume.label === undefined ? {} : { label: volume.label }),
+    state: volume.state,
   };
 }
 

@@ -4,14 +4,17 @@ import { parseSize } from "../../application/explore.js";
 import { orderedWarnings } from "../../application/scan.js";
 import type { CliContext } from "../context.js";
 import { exitAfter, interruptible } from "../interrupt.js";
-import { EXIT, buildEnvelope, encodeCapability, encodeCompleteness, encodeRawPath, encodeScanTotals, writeEnvelope } from "../output.js";
-import { scanLines, warningLines } from "../text.js";
+import { EXIT, buildEnvelope, encodeCapability, encodeCompleteness, encodeElevated, encodeRawPath, encodeScanTotals, writeEnvelope } from "../output.js";
+import { elevatedLines, scanLines, warningLines } from "../text.js";
+import type { ElevatedOutcome } from "../../application/elevated.js";
 
 export interface ScanOptions {
   readonly asJson: boolean;
   readonly path?: string;
   readonly accounting?: "allocated" | "apparent";
   readonly crossFilesystems: boolean;
+  /** Afterwards, measure what the scan could not read with administrator rights. */
+  readonly sudo?: boolean;
   readonly throttle?: string;
   readonly maxDepth?: string;
 }
@@ -97,6 +100,22 @@ export async function runScan(context: CliContext, options: ScanOptions): Promis
   );
   const pruned = await context.storage.snapshots.prune(context.storage.defaults.retention);
 
+  // Measured after the scan is stored, and only when asked: the password
+  // prompt is the person's to answer, and Ctrl+C at it stops just this step.
+  let elevated: ElevatedOutcome | undefined;
+  if (options.sudo === true && !interrupted && summary.completeness.inaccessibleDirectories === 0n) {
+    elevated = { kind: "nothing-unreadable" };
+  } else if (options.sudo === true && !interrupted) {
+    if (!options.asJson) {
+      context.output.stderr("Measuring what the scan could not read, as root and read-only; the system may ask for your password.\n");
+    }
+    const measured = await interruptible(context, (signal) =>
+      context.storage.elevated.measure(snapshot, { interactive: context.promptable, signal }),
+    );
+    elevated = measured.value;
+    interrupted ||= measured.interrupted;
+  }
+
   const cancelled = summary.completeness.warnings.some((warning) => warning.code === "cancelled");
   const status = summary.completeness.complete ? "complete" : "incomplete";
   const exitCode = summary.completeness.complete
@@ -121,6 +140,7 @@ export async function runScan(context: CliContext, options: ScanOptions): Promis
           totals: encodeScanTotals(summary.totals),
           completeness: encodeCompleteness(summary.completeness),
           prunedSnapshots: String(pruned),
+          ...(elevated === undefined ? {} : { elevated: encodeElevated(elevated) }),
         },
       }),
     );
@@ -129,6 +149,11 @@ export async function runScan(context: CliContext, options: ScanOptions): Promis
 
   for (const line of scanLines(summary, snapshot.id, context.settings.units)) {
     context.output.stdout(`${line}\n`);
+  }
+  if (elevated !== undefined) {
+    for (const line of elevatedLines(elevated, context.settings.units)) {
+      context.output.stdout(`${line}\n`);
+    }
   }
   for (const line of warningLines(orderedWarnings(summary.completeness))) {
     context.output.stderr(`${line}\n`);

@@ -68,6 +68,11 @@ export interface EntryFilter {
   readonly maxChildEntries?: bigint;
   /** Only broken symlinks, or only entries that are not one. */
   readonly broken?: boolean;
+  /**
+   * Only directories the walk recorded but never went inside — unreadable
+   * ones and mounts it stayed out of — or only everything else.
+   */
+  readonly unentered?: boolean;
 }
 
 export type EntrySort = "allocated" | "apparent" | "modified" | "name";

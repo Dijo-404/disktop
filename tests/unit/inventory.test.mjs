@@ -260,3 +260,67 @@ test("device and filesystem text from lsblk and mountinfo cannot command a termi
     assert.doesNotMatch(line, /[\u001b\u0007\u009b]/, JSON.stringify(line));
   }
 });
+
+// This machine's own layout: Windows beside an encrypted Linux root on one
+// disk, and a second disk holding one locked encrypted partition.
+const DUAL_BOOT_MOUNTINFO = [
+  "30 1 0:28 /@ / rw,relatime shared:1 - btrfs /dev/mapper/root rw,subvolid=256,subvol=/@",
+  "48 30 0:28 /@home /home rw,relatime shared:113 - btrfs /dev/mapper/root rw,subvolid=257,subvol=/@home",
+  "156 30 259:7 / /boot rw,relatime shared:129 - vfat /dev/nvme0n1p4 rw",
+].join("\n");
+
+const DUAL_BOOT_LSBLK = JSON.stringify({
+  blockdevices: [
+    { name: "zram0", kname: "zram0", path: "/dev/zram0", type: "disk", size: 16520314880, rota: false, rm: false, "maj:min": "253:0", fstype: "swap", mountpoint: "[SWAP]" },
+    {
+      name: "nvme1n1", kname: "nvme1n1", path: "/dev/nvme1n1", type: "disk", size: 4096805658624, rota: false, rm: false, model: "Lexar SSD ARES 4TB", tran: "nvme", "maj:min": "259:8",
+      children: [
+        { name: "nvme1n1p1", kname: "nvme1n1p1", path: "/dev/nvme1n1p1", type: "part", size: 1073741824, rm: false, "maj:min": "259:9", pkname: "nvme1n1", fstype: "vfat", parttype: "c12a7328-f81f-11d2-ba4b-00a0c93ec93b" },
+        { name: "nvme1n1p2", kname: "nvme1n1p2", path: "/dev/nvme1n1p2", type: "part", size: 4095729467392, rm: false, "maj:min": "259:10", pkname: "nvme1n1", fstype: "crypto_LUKS", parttype: "4f68bce3-e8cd-4db1-96e7-fbcaf984b709" },
+      ],
+    },
+    {
+      name: "nvme0n1", kname: "nvme0n1", path: "/dev/nvme0n1", type: "disk", size: 1024209543168, rota: false, rm: false, model: "SAMSUNG MZAL81T0HDLB-00BL2", tran: "nvme", "maj:min": "259:0",
+      children: [
+        { name: "nvme0n1p1", kname: "nvme0n1p1", path: "/dev/nvme0n1p1", type: "part", size: 272629760, rm: false, "maj:min": "259:1", pkname: "nvme0n1", fstype: "vfat", label: "SYSTEM_DRV", parttype: "c12a7328-f81f-11d2-ba4b-00a0c93ec93b" },
+        { name: "nvme0n1p2", kname: "nvme0n1p2", path: "/dev/nvme0n1p2", type: "part", size: 16777216, rm: false, "maj:min": "259:2", pkname: "nvme0n1", parttype: "de94bba4-06d1-4d40-a16a-bfd50179d6ac" },
+        { name: "nvme0n1p3", kname: "nvme0n1p3", path: "/dev/nvme0n1p3", type: "part", size: 547094528000, rm: false, "maj:min": "259:3", pkname: "nvme0n1", fstype: "ntfs", label: "Windows-SSD", parttype: "ebd0a0a2-b9e5-4433-87c0-68b6b72699c7" },
+        { name: "nvme0n1p4", kname: "nvme0n1p4", path: "/dev/nvme0n1p4", type: "part", size: 1073741824, rm: false, "maj:min": "259:7", pkname: "nvme0n1", fstype: "vfat", parttype: "c12a7328-f81f-11d2-ba4b-00a0c93ec93b", mountpoint: "/boot" },
+        { name: "nvme0n1p5", kname: "nvme0n1p5", path: "/dev/nvme0n1p5", type: "part", size: 8589934592, rm: false, "maj:min": "259:5", pkname: "nvme0n1", fstype: "swap", parttype: "0657fd6d-a4ab-43c4-84e5-0933c84b4f4f", mountpoint: "[SWAP]" },
+        {
+          name: "nvme0n1p6", kname: "nvme0n1p6", path: "/dev/nvme0n1p6", type: "part", size: 467160530944, rm: false, "maj:min": "259:6", pkname: "nvme0n1", fstype: "crypto_LUKS", parttype: "4f68bce3-e8cd-4db1-96e7-fbcaf984b709",
+          children: [{ name: "root", kname: "dm-0", path: "/dev/mapper/root", type: "crypt", size: 467143753728, rm: false, "maj:min": "254:0", pkname: "nvme0n1p6", fstype: "btrfs", mountpoint: "/" }],
+        },
+      ],
+    },
+  ],
+});
+
+test("a partition holding data that nothing has mounted is listed, so its space is not invisible", async () => {
+  const result = await createLinuxInventory(
+    sources({
+      mountinfo: DUAL_BOOT_MOUNTINFO,
+      lsblk: { capability: { status: "available", explanation: "ok" }, stdout: DUAL_BOOT_LSBLK, stderr: "", exitCode: 0 },
+      readings: new Map([
+        ["/", READINGS.get("/")],
+        ["/home", READINGS.get("/")],
+        ["/boot", READINGS.get("/boot/efi")],
+      ]),
+    }),
+  ).list();
+
+  assert.deepEqual(
+    result.unmounted.map((volume) => [volume.id, volume.filesystemType, volume.label, volume.state, volume.deviceId, volume.sizeBytes]),
+    [
+      ["nvme1n1p2", "crypto_LUKS", undefined, "locked", "nvme1n1", 4095729467392n],
+      ["nvme0n1p3", "ntfs", "Windows-SSD", "unmounted", "nvme0n1", 547094528000n],
+    ],
+    "EFI, recovery, swap, the opened LUKS container, and every mounted partition are left out",
+  );
+  assert.equal(result.unmounted[1].devicePath, "/dev/nvme0n1p3");
+});
+
+test("without lsblk's filesystem columns no partition is guessed to hold data", async () => {
+  const result = await createLinuxInventory(sources()).list();
+  assert.deepEqual(result.unmounted, []);
+});

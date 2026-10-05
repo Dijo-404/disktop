@@ -212,7 +212,7 @@ something else.
 
 ## Privileges and recovery
 
-Normal UI, scans, and user cleanup run unprivileged. A privileged manager action escalates only the reviewed adapter through a scoped `sudo` or `pkexec` invocation. The npm process is not run as root for cleanup. Explicit administrator scans may be read-only from a root-owned global install; EUID 0 disables generic mutation. Authentication failure is a permission result.
+Normal UI, scans, and user cleanup run unprivileged. A privileged manager action escalates only the reviewed adapter through a scoped `sudo` or `pkexec` invocation. Measuring directories a scan could not read is the one read-only escalation: on request it raises the system's root-owned `du` with fixed flags over the absolute paths from the index, through `pkexec` at a desktop and `sudo` at a terminal, and Disktop's own helper never runs as root from a user-writable install. The npm process is not run as root for cleanup. Explicit administrator scans may be read-only from a root-owned global install; EUID 0 disables generic mutation. Authentication failure is a permission result.
 
 The helper records completed, skipped, failed, and remaining items after Ctrl+C or a process crash. `tests/recovery/journal.test.mjs` kills the real helper partway through a list of targets and asserts that the record never reads as complete, that no item is left claiming to be running once reconciliation has looked at it, and that nothing left its original path without the journal accounting for it. Tests for file deletion, Trash, undo, move, and compression run only in temporary sandboxes; mount tests use a namespace or VM.
 

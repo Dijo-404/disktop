@@ -298,6 +298,13 @@
           "items": {
             "$ref": "common.json#/$defs/alert"
           }
+        },
+        "unmounted": {
+          "description": "Data partitions and locked encrypted containers nothing has mounted; their usage is unknown.",
+          "type": "array",
+          "items": {
+            "$ref": "common.json#/$defs/unmountedVolume"
+          }
         }
       },
       "allOf": [
@@ -368,10 +375,53 @@
             }
           }
         },
+        "children": {
+          "description": "What is directly inside the subject, largest first. These do not overlap, so their sizes add up to the subject's; `entries` ranks a directory beside its own ancestors.",
+          "$ref": "#/$defs/scan/properties/entries"
+        },
+        "largestFiles": {
+          "description": "The largest regular files anywhere under the subject.",
+          "$ref": "#/$defs/scan/properties/entries"
+        },
         "typeTotals": {
           "type": "array",
           "items": {
             "$ref": "common.json#/$defs/typeTotal"
+          }
+        },
+        "elevated": {
+          "description": "Unreadable directories under the subject, measured afterwards by the system's du running read-only as root. Never added into the scan's totals; their contents are not in the index.",
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["measuredAt", "accounting", "bytes", "items"],
+          "properties": {
+            "measuredAt": { "type": "string" },
+            "accounting": { "type": "string", "enum": ["allocated", "apparent"] },
+            "bytes": { "$ref": "common.json#/$defs/decimalInteger" },
+            "items": {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": ["path", "bytes", "children"],
+                "properties": {
+                  "path": { "$ref": "common.json#/$defs/rawPath" },
+                  "bytes": { "$ref": "common.json#/$defs/decimalInteger" },
+                  "children": {
+                    "type": "array",
+                    "items": {
+                      "type": "object",
+                      "additionalProperties": false,
+                      "required": ["path", "bytes"],
+                      "properties": {
+                        "path": { "$ref": "common.json#/$defs/rawPath" },
+                        "bytes": { "$ref": "common.json#/$defs/decimalInteger" }
+                      }
+                    }
+                  }
+                }
+              }
+            }
           }
         }
       },

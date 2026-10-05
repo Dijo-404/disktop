@@ -8,6 +8,7 @@
 //! Nothing here deletes, renames, or writes. A directory it cannot open is
 //! counted and reported, never silently treated as empty.
 
+use crate::mounts::{self, Decision, MountRow, SameFilesystem};
 use crate::sys::{self, Directory, EntryKind, Metadata};
 use std::collections::HashSet;
 use std::io;
@@ -146,6 +147,10 @@ struct Walk<'a> {
     since_progress: u64,
     started: Instant,
     warned_depth: bool,
+    /// Read once per walk, and only when mounts are not all crossed anyway.
+    mount_table: Vec<MountRow>,
+    /// Which mounts below the current root are more of its filesystem.
+    same_filesystem: SameFilesystem,
 }
 
 /// Walk every root. Returns what was actually observed; `complete` is false
@@ -185,6 +190,12 @@ pub fn walk(
         since_progress: 0,
         started: Instant::now(),
         warned_depth: false,
+        mount_table: if options.cross_filesystems {
+            Vec::new()
+        } else {
+            mounts::read()
+        },
+        same_filesystem: SameFilesystem::default(),
     };
 
     for root in &options.roots {
@@ -277,6 +288,21 @@ impl Walk<'_> {
             }
         };
 
+        // Decided before the walk starts, from where the root really is: a
+        // Btrfs subvolume mounted below it is the same filesystem and is
+        // walked, while another filesystem, or a bind mount repeating a tree
+        // already reached, is refused at its mount point.
+        self.same_filesystem = if self.options.cross_filesystems {
+            SameFilesystem::default()
+        } else {
+            match sys::descriptor_path(descriptor) {
+                Ok(resolved) => {
+                    SameFilesystem::plan(&self.mount_table, &resolved, metadata.mount_id)
+                }
+                Err(_) => SameFilesystem::default(),
+            }
+        };
+
         let id = self.sink.entry(&EntryRecord {
             parent: None,
             // A root row stores its whole absolute path; every row below it
@@ -295,6 +321,7 @@ impl Walk<'_> {
                 return Ok(());
             }
         };
+        self.filesystems.insert(metadata.device);
 
         let mut stack = vec![Frame {
             directory,
@@ -427,38 +454,73 @@ impl Walk<'_> {
         }
 
         let parent_descriptor = frame.directory.descriptor();
-        let descriptor = match sys::open_child_directory(
+        let opened = match sys::open_child_directory(
             parent_descriptor,
             &name,
             self.options.cross_filesystems,
         ) {
+            Err(error) if error.raw_os_error() == Some(libc::EXDEV) => {
+                self.enter_same_filesystem(parent_descriptor, &name, &metadata, error)
+            }
+            other => other,
+        };
+        let descriptor = match opened {
             Ok(descriptor) => descriptor,
             Err(error) => {
-                self.note_refusal(&path, &error);
+                self.note_refusal(&path, &metadata, &error);
                 self.attribute_unentered(stack, &metadata);
                 return Ok(());
             }
         };
 
         match Directory::from_descriptor(descriptor) {
-            Ok(directory) => stack.push(Frame {
-                directory,
-                path,
-                id,
-                depth,
-                totals: DirectoryTotals {
-                    entries: 1,
-                    allocated_bytes: metadata.allocated_bytes,
-                    apparent_bytes: metadata.apparent_bytes,
-                    child_entries: 0,
-                },
-            }),
+            Ok(directory) => {
+                self.filesystems.insert(metadata.device);
+                stack.push(Frame {
+                    directory,
+                    path,
+                    id,
+                    depth,
+                    totals: DirectoryTotals {
+                        entries: 1,
+                        allocated_bytes: metadata.allocated_bytes,
+                        apparent_bytes: metadata.apparent_bytes,
+                        child_entries: 0,
+                    },
+                });
+            }
             Err(error) => {
                 self.note_inaccessible(&path, &error);
                 self.attribute_unentered(stack, &metadata);
             }
         }
         Ok(())
+    }
+
+    /// The open `RESOLVE_NO_XDEV` refused, made again across the one mount the
+    /// plan says is more of the scanned filesystem. The mount is checked once
+    /// more on the open descriptor, so a mount swapped in between the
+    /// `statx` and the open is refused rather than walked.
+    fn enter_same_filesystem(
+        &self,
+        parent: std::os::unix::io::RawFd,
+        name: &[u8],
+        metadata: &Metadata,
+        refusal: io::Error,
+    ) -> io::Result<std::os::unix::io::RawFd> {
+        if self.same_filesystem.decision(metadata.mount_id) != Some(&Decision::Enter) {
+            return Err(refusal);
+        }
+        let descriptor = sys::open_child_directory(parent, name, true)?;
+        match sys::metadata_of(descriptor) {
+            Ok(live) if live.mount_id == metadata.mount_id && live.kind == EntryKind::Directory => {
+                Ok(descriptor)
+            }
+            _ => {
+                sys::close(descriptor);
+                Err(refusal)
+            }
+        }
     }
 
     /// A directory the walk recorded but could not enter still contributes its
@@ -519,7 +581,13 @@ impl Walk<'_> {
     fn account(&mut self, metadata: &Metadata, shared: bool) {
         self.totals.scanned_entries += 1;
         self.since_progress += 1;
-        self.filesystems.insert(metadata.device);
+        // A directory's device counts only once the walk is inside it; a mount
+        // point it stayed out of was stat'ed, not read, and naming its
+        // filesystem here would make a scan that skipped `/home` look
+        // comparable with one that walked it.
+        if metadata.kind != EntryKind::Directory {
+            self.filesystems.insert(metadata.device);
+        }
         // Shared bytes are reported in the same unit as the totals they sit
         // beside; two units in one object would make the smaller one read as
         // negligible when it is not.
@@ -592,15 +660,21 @@ impl Walk<'_> {
 
     /// `openat2` reports a refused mount crossing and a refused symlink
     /// differently from a permission failure, and the result says which it was.
-    fn note_refusal(&mut self, path: &[u8], error: &io::Error) {
+    fn note_refusal(&mut self, path: &[u8], metadata: &Metadata, error: &io::Error) {
         match error.raw_os_error() {
             Some(libc::EXDEV) => {
                 self.totals.excluded_mounts.push(path.to_vec());
-                self.warn(
-                    "crossed-filesystem-skipped",
-                    "A mount point was not descended into.".to_owned(),
-                    Some(path.to_vec()),
-                );
+                let message = match self.same_filesystem.decision(metadata.mount_id) {
+                    Some(Decision::OtherFilesystem(kind)) => format!(
+                        "Another filesystem ({}) is mounted here; the scan stays on one filesystem.",
+                        String::from_utf8_lossy(kind)
+                    ),
+                    Some(Decision::Repeats) => "This mount shows a tree the scan already counts \
+                         elsewhere, so it was not counted twice."
+                        .to_owned(),
+                    _ => "A mount point was not descended into.".to_owned(),
+                };
+                self.warn("crossed-filesystem-skipped", message, Some(path.to_vec()));
             }
             Some(libc::ELOOP) => self.warn(
                 "symlink-not-followed",

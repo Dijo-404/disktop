@@ -9,7 +9,7 @@
     "data": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["capability", "devices", "filesystems"],
+      "required": ["capability", "devices", "filesystems", "unmounted"],
       "properties": {
         "capability": { "$ref": "common.json#/$defs/capability" },
         "devices": {
@@ -21,6 +21,11 @@
           "description": "Mounted filesystems from /proc/self/mountinfo joined with statfs. One filesystem can have several mounts.",
           "type": "array",
           "items": { "$ref": "common.json#/$defs/filesystem" }
+        },
+        "unmounted": {
+          "description": "Partitions and drives holding a filesystem, or a locked encrypted container, that nothing has mounted. System partitions (EFI, recovery, reserved, swap) are left out. Their usage is unknown until they are mounted.",
+          "type": "array",
+          "items": { "$ref": "common.json#/$defs/unmountedVolume" }
         }
       }
     }

@@ -18,7 +18,9 @@ export function headerLine(state: AppState, theme: Theme, columns: number, thres
   line.add(` ${glyphs.brand} `, "brand").add("Disktop", "title").add("  ", "band");
 
   const view = state.disks.view;
-  const selected = view.filesystems[state.disks.selected];
+  // With a partition nothing has mounted selected, the header keeps showing
+  // the first filesystem rather than claiming none could be read.
+  const selected = view.filesystems[state.disks.selected] ?? view.filesystems[0];
   const alerts = view.alerts.length;
   const alertText = alerts === 0 ? "" : ` ${glyphs.warn} ${alerts} alert${alerts === 1 ? "" : "s"} `;
   const incomplete = view.complete ? "" : ` ${glyphs.warn} incomplete `;
