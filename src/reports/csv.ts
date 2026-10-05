@@ -137,6 +137,17 @@ export function renderCsvReport(report: Report): string {
       ].join("; "),
     });
   }
+  for (const volume of capacity.unmounted) {
+    add({
+      section: "unmounted",
+      id: volume.id,
+      kind: volume.filesystemType,
+      path_display: volume.devicePath,
+      total_bytes: volume.sizeBytes.toString(10),
+      status: volume.state,
+      detail: [`device ${volume.deviceId}`, ...(volume.label === undefined ? [] : [`label ${volume.label}`]), "usage unknown until mounted"].join("; "),
+    });
+  }
   for (const alert of capacity.alerts) {
     add({
       section: "alert",
@@ -174,6 +185,42 @@ export function renderCsvReport(report: Report): string {
     }
     for (const excluded of snapshot.completeness.excludedMounts) {
       add({ section: "excluded-mount", id: snapshot.scanId, ...pathCells(excluded) });
+    }
+    // What is directly inside the path, which adds up, and the largest
+    // files, which a spreadsheet would otherwise have to dig out of `entry`.
+    for (const [section, ranked] of [
+      ["child", scan.children],
+      ["largest-file", scan.largestFiles],
+    ] as const) {
+      for (const entry of ranked?.entries ?? []) {
+        const modified = instantFromNanoseconds(entry.modifiedNanoseconds);
+        const unentered = entry.kind === "directory" && entry.childEntries === undefined;
+        add({
+          section,
+          id: entry.id,
+          kind: entry.kind,
+          ...pathCells(entry.path),
+          // A directory the scan never went inside has no size to report.
+          ...(unentered
+            ? { status: "not-entered" }
+            : { allocated_bytes: entry.allocatedBytes.toString(10), apparent_bytes: entry.apparentBytes.toString(10) }),
+          ...(entry.childEntries === undefined ? {} : { entries: entry.childEntries.toString(10) }),
+          ...(modified === undefined ? {} : { modified_at: modified }),
+          ...(entry.shared ? { status: "shared-hardlink" } : entry.broken === true ? { status: "broken-symlink" } : {}),
+        });
+      }
+    }
+    for (const measurement of scan.elevated?.measurements ?? []) {
+      add({
+        section: "measured-as-root",
+        id: snapshot.scanId,
+        kind: "directory",
+        ...pathCells(measurement.path),
+        size_bytes: measurement.bytes.toString(10),
+        size_basis: scan.elevated?.accounting === "apparent" ? "measured-apparent" : "measured-allocated",
+        modified_at: scan.elevated?.measuredAt ?? "",
+        detail: "unreadable to the scan; measured afterwards by du running read-only as root; not in the totals",
+      });
     }
     if (scan.largest !== undefined) {
       for (const entry of scan.largest.entries) {

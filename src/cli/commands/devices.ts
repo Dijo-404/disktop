@@ -1,6 +1,6 @@
 import type { CliContext } from "../context.js";
-import { EXIT, buildEnvelope, encodeCapability, encodeDevice, encodeFilesystem, writeEnvelope } from "../output.js";
-import { deviceLines, filesystemLines, warningLines } from "../text.js";
+import { EXIT, buildEnvelope, encodeCapability, encodeDevice, encodeFilesystem, encodeUnmountedVolume, writeEnvelope } from "../output.js";
+import { deviceLines, filesystemLines, unmountedLines, warningLines } from "../text.js";
 
 export async function runDevices(context: CliContext, asJson: boolean): Promise<number> {
   const view = await context.dashboard.inventory();
@@ -20,6 +20,7 @@ export async function runDevices(context: CliContext, asJson: boolean): Promise<
           capability: encodeCapability(view.capability),
           devices: view.devices.map(encodeDevice),
           filesystems: view.filesystems.map(encodeFilesystem),
+          unmounted: view.unmounted.map(encodeUnmountedVolume),
         },
       }),
     );
@@ -32,6 +33,12 @@ export async function runDevices(context: CliContext, asJson: boolean): Promise<
   context.output.stdout("\n");
   for (const line of filesystemLines(view.filesystems, context.settings.units)) {
     context.output.stdout(`${line}\n`);
+  }
+  if (view.unmounted.length > 0) {
+    context.output.stdout("\n");
+    for (const line of unmountedLines(view.unmounted, context.settings.units)) {
+      context.output.stdout(`${line}\n`);
+    }
   }
   for (const line of warningLines(view.warnings)) {
     context.output.stderr(`${line}\n`);

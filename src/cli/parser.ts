@@ -73,6 +73,7 @@ export const COMMANDS: readonly CommandSpec[] = [
       { name: "cross-filesystems", summary: "Descend into nested mounts instead of stopping at them", kind: "flag" },
       { name: "throttle", summary: "Hold the scan to a byte rate, for example 50MiB", kind: "value", placeholder: "RATE" },
       { name: "max-depth", summary: "Stop descending below this depth", kind: "value", placeholder: "DEPTH" },
+      { name: "sudo", summary: "Also measure unreadable dirs as root, read-only", kind: "flag" },
     ],
     implemented: true,
   },

@@ -3,7 +3,7 @@ import { test } from "node:test";
 import { bootstrapCli } from "../../dist/cli/bootstrap.js";
 import { runCli } from "../../dist/cli/run.js";
 import { compileBundle } from "../support/schemas.mjs";
-import { FIXTURE_ENTRY, FIXTURE_SNAPSHOT, fakeContext } from "../support/cli-context.mjs";
+import { FIXTURE_ENTRY, FIXTURE_SNAPSHOT, fakeContext, rawPath } from "../support/cli-context.mjs";
 
 const validators = compileBundle("schemas/cli/v1");
 
@@ -373,4 +373,42 @@ test("explore on a scan the index has since pruned says to scan again, not that 
   const envelope = envelopeOf(context, "explore");
   assert.equal(envelope.error.code, "invalid-input");
   assert.match(envelope.error.message, /disktop scan/);
+});
+
+test("explore shows a directory the scan never entered as unknown, or as measured as root, never as empty", async () => {
+  const usb = { ...FIXTURE_ENTRY, id: "1", path: rawPath("/home/example/projects/usb"), allocatedBytes: 4096n, childEntries: undefined };
+  const locked = { ...FIXTURE_ENTRY, id: "2", path: rawPath("/home/example/projects/locked"), allocatedBytes: 0n, childEntries: undefined };
+  const measured = { ...FIXTURE_ENTRY, id: "3", path: rawPath("/home/example/projects/docker"), allocatedBytes: 0n, childEntries: undefined };
+  const snapshot = {
+    ...FIXTURE_SNAPSHOT,
+    completeness: { ...FIXTURE_SNAPSHOT.completeness, complete: false, inaccessibleDirectories: 2n, excludedMounts: [usb.path], warnings: [{ code: "inaccessible-directory", message: "x" }] },
+  };
+  const context = fakeContext({
+    snapshots: [snapshot],
+    explorePage: { kind: "page", page: { entries: [usb, locked, measured] } },
+    elevatedRecord: { scanId: snapshot.scanId, measuredAt: "2026-10-04T12:00:00.000Z", accounting: "allocated", measurements: [{ path: measured.path, bytes: 9n * 1024n ** 3n, children: [] }], skipped: [] },
+  });
+  await runCli(["explore", "/home/example/projects"], context);
+  const lines = context.captured.stdout.split("\n");
+  assert.match(lines.find((line) => line.endsWith("/usb (another mount, not scanned)")), /^\s*\?\s/);
+  assert.match(lines.find((line) => line.endsWith("/locked (unreadable, size unknown)")), /^\s*\?\s/);
+  assert.match(lines.find((line) => line.includes("/docker")), /9\.0 GiB .*unreadable; measured as root/);
+});
+
+test("scan --sudo measures what the scan could not read, and says so in its JSON", async () => {
+  const incomplete = {
+    ...FIXTURE_SNAPSHOT,
+    completeness: { ...FIXTURE_SNAPSHOT.completeness, complete: false, inaccessibleDirectories: 1n, warnings: [{ code: "inaccessible-directory", message: "x" }] },
+  };
+  const record = { scanId: FIXTURE_SNAPSHOT.scanId, measuredAt: "2026-10-04T12:00:00.000Z", accounting: "allocated", measurements: [{ path: rawPath("/root"), bytes: 1024n, children: [] }], skipped: [] };
+  const context = fakeContext({
+    scanOutcome: { kind: "scanned", summary: { scanId: FIXTURE_SNAPSHOT.scanId, accounting: "allocated", roots: [rawPath("/")], completeness: incomplete.completeness, totals: FIXTURE_SNAPSHOT.totals, filesystems: [], crossFilesystems: false } },
+    elevatedOutcome: { kind: "measured", record, totalBytes: 1024n, more: false, warnings: [] },
+  });
+  const status = await runCli(["scan", "/", "--sudo", "--json"], context);
+  const envelope = envelopeOf(context, "scan");
+  assert.equal(status, 3, "the index still cannot browse what root measured, so the scan stays incomplete");
+  assert.equal(envelope.data.elevated.status, "measured");
+  assert.equal(envelope.data.elevated.bytes, "1024");
+  assert.equal(envelope.data.elevated.largest[0].path.display, "/root");
 });

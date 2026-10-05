@@ -9,6 +9,9 @@ const VERSION = 1;
 const SWAPS = "/proc/swaps";
 const HIBERNATION_CANDIDATES: readonly string[] = ["/swapfile", "/swap.img", "/var/swap"];
 
+/** Swap devices that live in memory, not on a disk. */
+const MEMORY_BACKED = /^\/dev\/(zram|ram)[0-9]+$/;
+
 /** /proc/swaps is a handful of lines. */
 const SWAPS_BYTES = 64 * 1024;
 
@@ -45,7 +48,11 @@ export function createSwapProvider(options: SwapOptions = {}): FindingProvider {
     },
 
     async discover(environment) {
-      const areas = parseSwaps(await environment.paths.readText(swapsPath, SWAPS_BYTES));
+      // zram and RAM disks are memory: a swap area there holds no byte of any
+      // disk, and listing its size beside caches would add memory to disk use.
+      const areas = parseSwaps(await environment.paths.readText(swapsPath, SWAPS_BYTES)).filter(
+        (area) => !MEMORY_BACKED.test(area.filename),
+      );
       const findings: Finding[] = areas.map((area) => {
         const path = absolutePath(area.filename);
         return buildFinding({

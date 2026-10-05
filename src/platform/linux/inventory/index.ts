@@ -1,5 +1,5 @@
 import { readFile, statfs } from "node:fs/promises";
-import type { Capability, Filesystem, RawPath, StorageDevice, Warning } from "../../../domain/models.js";
+import type { Capability, Filesystem, RawPath, StorageDevice, UnmountedVolume, Warning } from "../../../domain/models.js";
 import { isWithin, pathBytes } from "../../../domain/paths.js";
 import type { InventoryPort, InventoryResult } from "../../../ports/inventory.js";
 import { LSBLK_ARGUMENTS, deviceKindOf, isMemoryBackedDevice, parseLsblk, type BlockDevice } from "./lsblk.js";
@@ -173,6 +173,7 @@ async function collect(capacity: CapacityReader): Promise<InventoryResult> {
   return {
     devices,
     filesystems,
+    unmounted: findUnmounted(mounts, blockDevices),
     warnings,
     capability: overallCapability(mounts.length > 0, blockDevices.capability, filesystems.length),
   };
@@ -367,6 +368,86 @@ function wholeDiskName(device: BlockDevice, byKernelName: ReadonlyMap<string, Bl
     current = parent;
   }
   return current.kernelName;
+}
+
+/**
+ * Partition types that hold a firmware or recovery environment rather than
+ * anybody's data: EFI system, Microsoft reserved, Windows recovery, BIOS boot,
+ * and Linux swap. A file manager hides them for the same reason.
+ */
+const SYSTEM_PARTITION_TYPES: ReadonlySet<string> = new Set([
+  "c12a7328-f81f-11d2-ba4b-00a0c93ec93b",
+  "e3c9e316-0b5c-4db8-817d-f92df00215ae",
+  "de94bba4-06d1-4d40-a16a-bfd50179d6ac",
+  "21686148-6449-6e6f-744e-656564454649",
+  "0657fd6d-a4ab-43c4-84e5-0933c84b4f4f",
+  // MBR: EFI system, Windows recovery, and Linux swap.
+  "0xef",
+  "0x27",
+  "0x82",
+]);
+
+const ENCRYPTED_CONTAINERS: ReadonlySet<string> = new Set(["crypto_LUKS", "BitLocker"]);
+
+/**
+ * Leaves of the block tree that hold data and are not in use.
+ *
+ * A device is in use when a mount reaches it, when lsblk names a place it is
+ * used (swap included), or when anything below it is; a LUKS partition whose
+ * opened container holds `/` is therefore in use, and only its container is
+ * considered. A device with no filesystem signature is never listed, because
+ * nothing says it holds anything at all.
+ */
+function findUnmounted(mounts: readonly MountEntry[], topology: BlockTopology): readonly UnmountedVolume[] {
+  const used = new Set<string>();
+  const markUsed = (device: BlockDevice | undefined): void => {
+    const seen = new Set<string>();
+    let current = device;
+    while (current !== undefined && !seen.has(current.kernelName)) {
+      seen.add(current.kernelName);
+      used.add(current.kernelName);
+      current = current.parentName === undefined ? undefined : topology.byKernelName.get(current.parentName);
+    }
+  };
+  for (const mount of mounts) {
+    markUsed(backingDevice(mount, topology));
+  }
+  const parents = new Set<string>();
+  for (const device of topology.devices) {
+    if (device.mountPoint !== undefined) {
+      markUsed(device);
+    }
+    if (device.parentName !== undefined) {
+      parents.add(device.parentName);
+    }
+  }
+
+  const volumes: UnmountedVolume[] = [];
+  for (const device of topology.devices) {
+    const type = device.filesystemType;
+    if (
+      type === undefined ||
+      type === "swap" ||
+      used.has(device.kernelName) ||
+      parents.has(device.kernelName) ||
+      isMemoryBackedDevice(device) ||
+      device.type === "loop" ||
+      device.type === "rom" ||
+      (device.partitionType !== undefined && SYSTEM_PARTITION_TYPES.has(device.partitionType))
+    ) {
+      continue;
+    }
+    volumes.push({
+      id: device.kernelName,
+      devicePath: device.path ?? `/dev/${device.kernelName}`,
+      deviceId: wholeDiskName(device, topology.byKernelName),
+      sizeBytes: device.sizeBytes,
+      filesystemType: type,
+      ...(device.label === undefined ? {} : { label: device.label }),
+      state: ENCRYPTED_CONTAINERS.has(type) ? "locked" : "unmounted",
+    });
+  }
+  return volumes;
 }
 
 /** Physical disks only, counted once. Partitions belong to their disk, not beside it. */

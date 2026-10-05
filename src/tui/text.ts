@@ -300,6 +300,11 @@ export function groupDigits(value: bigint | number): string {
 
 /** A short "how long ago" for a nanosecond or millisecond timestamp. */
 export function relativeAge(thenMilliseconds: number, nowMilliseconds: number): string {
+  // Zero is what a filesystem with no timestamp there (FAT's root) reports,
+  // and what the helper clamps a pre-1970 time to: no time was recorded.
+  if (thenMilliseconds <= 0) {
+    return "-";
+  }
   const seconds = Math.max(0, Math.floor((nowMilliseconds - thenMilliseconds) / 1000));
   if (seconds < 60) {
     return "just now";
@@ -330,6 +335,9 @@ export function nanosecondsToMilliseconds(value: bigint): number {
 
 /** `2026-10-03 14:02` in local time: when something happened, as the clock on the wall said. */
 export function localDateTime(milliseconds: number): string {
+  if (milliseconds <= 0) {
+    return "unknown";
+  }
   const date = new Date(milliseconds);
   const pad = (value: number): string => String(value).padStart(2, "0");
   return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())} ${pad(date.getHours())}:${pad(date.getMinutes())}`;

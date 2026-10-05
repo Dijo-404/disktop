@@ -16,6 +16,13 @@ export interface BlockDevice {
   readonly parentName: string | undefined;
   /** The node under `/dev`, which is how a mount names its source. */
   readonly path: string | undefined;
+  /** The signature lsblk found on the device, such as `ext4` or `crypto_LUKS`. */
+  readonly filesystemType: string | undefined;
+  readonly label: string | undefined;
+  /** The GPT or MBR partition type, which names system partitions. */
+  readonly partitionType: string | undefined;
+  /** One place the device is in use, including `[SWAP]`. */
+  readonly mountPoint: string | undefined;
 }
 
 export interface LsblkResult {
@@ -24,7 +31,7 @@ export interface LsblkResult {
 }
 
 /** Asked for by name so a future lsblk column order cannot shift a value. */
-export const LSBLK_COLUMNS = "NAME,KNAME,PATH,TYPE,SIZE,ROTA,RM,MODEL,TRAN,MAJ:MIN,PKNAME";
+export const LSBLK_COLUMNS = "NAME,KNAME,PATH,TYPE,SIZE,ROTA,RM,MODEL,TRAN,MAJ:MIN,PKNAME,FSTYPE,LABEL,PARTTYPE,MOUNTPOINT";
 
 export const LSBLK_ARGUMENTS: readonly string[] = ["--json", "--bytes", "--output", LSBLK_COLUMNS];
 
@@ -93,6 +100,10 @@ function visit(rows: readonly unknown[], parentName: string | undefined, devices
         minor: deviceNumber?.minor,
         parentName: text(row["pkname"]) ?? parentName,
         path: text(row["path"]),
+        filesystemType: text(row["fstype"]),
+        label: text(row["label"]),
+        partitionType: text(row["parttype"])?.toLowerCase(),
+        mountPoint: text(row["mountpoint"]),
       });
     }
 

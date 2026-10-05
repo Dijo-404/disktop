@@ -387,7 +387,7 @@ pub fn mount_roots() -> Vec<Vec<u8>> {
         let Some(field) = line.split(|byte| *byte == b' ').nth(4) else {
             continue;
         };
-        let decoded = unescape_octal(field);
+        let decoded = crate::mounts::unescape_octal(field);
         if decoded.first() == Some(&b'/') {
             roots.push(decoded);
         }
@@ -442,28 +442,6 @@ fn trim_trailing_slash(mut path: Vec<u8>) -> Vec<u8> {
         path.pop();
     }
     path
-}
-
-/// mountinfo escapes space, tab, newline and backslash as three octal digits.
-fn unescape_octal(field: &[u8]) -> Vec<u8> {
-    let mut decoded = Vec::with_capacity(field.len());
-    let mut index = 0;
-    while index < field.len() {
-        if field[index] == b'\\' && index + 3 < field.len() {
-            let digits = &field[index + 1..index + 4];
-            if digits.iter().all(|byte| (b'0'..=b'7').contains(byte)) {
-                let value = digits
-                    .iter()
-                    .fold(0u16, |total, byte| total * 8 + u16::from(byte - b'0'));
-                decoded.push(value as u8);
-                index += 4;
-                continue;
-            }
-        }
-        decoded.push(field[index]);
-        index += 1;
-    }
-    decoded
 }
 
 fn describe_resolution(segment: &[u8], error: &io::Error, is_symlink: bool) -> Refusal {

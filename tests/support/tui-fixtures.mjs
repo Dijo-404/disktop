@@ -242,6 +242,19 @@ export function fakeServices(overrides = {}) {
         return undefined;
       },
     },
+    elevated: {
+      async recorded(scanId) {
+        calls.push(["elevated-recorded", scanId]);
+        return overrides.elevatedRecord;
+      },
+      async unreadable() {
+        return { paths: [], more: false };
+      },
+      async measure(snapshot, options) {
+        calls.push(["elevated-measure", snapshot.scanId, options.interactive]);
+        return overrides.elevatedOutcome ?? { kind: "nothing-unreadable" };
+      },
+    },
     find: {
       async find(request) {
         calls.push(["find", request.kind]);

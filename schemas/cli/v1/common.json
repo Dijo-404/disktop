@@ -1716,6 +1716,86 @@
           ]
         }
       }
+    },
+    "elevatedMeasurement": {
+      "description": "Directories an ordinary user's scan could not read, measured afterwards by the system's own du running read-only as root through pkexec or sudo. Kept beside the scan and never added into its totals; their contents are not in the index.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["status"],
+      "properties": {
+        "status": {
+          "description": "`denied` is a refused or cancelled password prompt; `unavailable` means nothing could ask for administrator rights here.",
+          "type": "string",
+          "enum": ["measured", "denied", "unavailable", "nothing-unreadable"]
+        },
+        "explanation": { "type": "string" },
+        "accounting": { "type": "string", "enum": ["allocated", "apparent"] },
+        "measuredAt": { "type": "string" },
+        "directories": { "$ref": "#/$defs/decimalInteger" },
+        "bytes": { "$ref": "#/$defs/decimalInteger" },
+        "skipped": {
+          "description": "Directories asked about and not measured, such as a name that is not valid UTF-8.",
+          "$ref": "#/$defs/decimalInteger"
+        },
+        "more": {
+          "description": "The scan holds more unreadable directories than one request measures.",
+          "type": "boolean"
+        },
+        "largest": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["path", "bytes"],
+            "properties": {
+              "path": { "$ref": "#/$defs/rawPath" },
+              "bytes": { "$ref": "#/$defs/decimalInteger" }
+            }
+          }
+        }
+      }
+    },
+    "unmountedVolume": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "devicePath",
+        "deviceId",
+        "sizeBytes",
+        "filesystemType",
+        "state"
+      ],
+      "properties": {
+        "id": {
+          "$ref": "#/$defs/identifier"
+        },
+        "devicePath": {
+          "type": "string"
+        },
+        "deviceId": {
+          "description": "The whole disk the volume is on.",
+          "$ref": "#/$defs/identifier"
+        },
+        "sizeBytes": {
+          "$ref": "#/$defs/decimalInteger"
+        },
+        "filesystemType": {
+          "description": "The signature lsblk found, such as ntfs or crypto_LUKS.",
+          "type": "string"
+        },
+        "label": {
+          "type": "string"
+        },
+        "state": {
+          "description": "`locked` is an encrypted container that has not been opened.",
+          "type": "string",
+          "enum": [
+            "unmounted",
+            "locked"
+          ]
+        }
+      }
     }
   }
 }

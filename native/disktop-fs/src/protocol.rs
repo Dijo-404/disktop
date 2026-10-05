@@ -303,6 +303,8 @@ struct FilterArguments {
     max_child_entries: Option<String>,
     #[serde(default)]
     broken: Option<bool>,
+    #[serde(default)]
+    unentered: Option<bool>,
 }
 
 #[derive(Deserialize)]
@@ -2187,6 +2189,7 @@ fn query_request(arguments: &QueryIndexArguments) -> Result<QueryRequest, String
                 "maxChildEntries",
             )?,
             broken: filter.broken,
+            unentered: filter.unentered,
         },
         sort,
         order,

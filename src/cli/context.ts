@@ -1,4 +1,5 @@
 import type { DashboardService, DashboardSettings } from "../application/dashboard.js";
+import type { ElevatedService } from "../application/elevated.js";
 import type { ExploreService } from "../application/explore.js";
 import type { ApplyService } from "../application/apply-action.js";
 import type { FindService } from "../application/find.js";
@@ -39,6 +40,8 @@ export interface StorageServices {
   readonly scan: ScanService;
   readonly explore: ExploreService;
   readonly snapshots: SnapshotService;
+  /** Sizes of what a scan could not read, measured with administrator rights on request. */
+  readonly elevated: ElevatedService;
   readonly defaults: ScanDefaults;
   readonly find: FindDefaults;
 }
@@ -111,6 +114,11 @@ export interface CliContext {
    * written into a log or a pipe, a carriage-return progress line is noise.
    */
   readonly progress: boolean;
+  /**
+   * Whether somebody can answer a password prompt: a terminal on stdin for
+   * sudo, or a desktop session for pkexec's dialog.
+   */
+  readonly promptable: boolean;
   /** Settings are passed in, so a `--units` given on the command line reaches the TUI. */
   launchTui(settings: CliSettings): Promise<number>;
 }

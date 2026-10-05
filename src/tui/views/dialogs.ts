@@ -113,6 +113,27 @@ export function renderDialog(dialog: Dialog, context: ViewContext, home: string 
         hints: [["y", "scan"], ["esc", "cancel"]],
       };
     }
+    case "confirm-elevate": {
+      const inner = boxInner(context.width);
+      const count = dialog.unreadable;
+      const content = [
+        new LineBuilder(inner).add(`Measure ${count} unreadable director${count === 1n ? "y" : "ies"} as root?`, "strong").build(),
+        { spans: [] },
+        ...wrap(
+          "Your scan could not read these, so their contents are missing from it. The system's own du can measure them running as root, read-only: it reads names and sizes and changes nothing.",
+          inner,
+        ).map((text) => new LineBuilder(inner).add(text, "dim").build()),
+        { spans: [] },
+        ...wrap(
+          "Your system asks for your password, in a desktop dialog or here in the terminal. The sizes are shown beside the scan, one level deep, and never added into its totals.",
+          inner,
+        ).map((text) => new LineBuilder(inner).add(text, "dim").build()),
+      ];
+      return {
+        lines: boxed("Measure as root", content, context.width, context.height, context.theme, "warn", footer([["y", "ask for my password"], ["esc", "cancel"]], inner)),
+        hints: [["y", "ask for my password"], ["esc", "cancel"]],
+      };
+    }
     case "finding":
       return findingDialog(dialog, context, home);
   }
