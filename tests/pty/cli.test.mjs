@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { spawn, spawnSync } from "node:child_process";
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
@@ -266,11 +266,19 @@ test("Ctrl+C typed at a terminal stops a scan through the helper, which survives
   // A real Ctrl+C is a SIGINT to the terminal's whole foreground process
   // group. The helper must not be in it: killed outright, it could not finish
   // and report the scan, and in an apply it could not journal the item it was
-  // on. /usr is large on every Linux host and only read.
+  // on. A throttled fixture keeps the scan running even in a small container
+  // with a release helper; /usr there can finish before the key is typed.
   const home = mkdtempSync(join(tmpdir(), "disktop-pty-"));
   try {
+    const root = join(home, "scan");
+    mkdirSync(root);
+    for (let index = 0; index < 8; index += 1) {
+      const directory = join(root, `directory-${index}`);
+      mkdirSync(directory);
+      writeFileSync(join(directory, "data"), Buffer.alloc(4096));
+    }
     const result = await drivePty(
-      "node dist/bin/disktop.js scan /usr --json",
+      `node dist/bin/disktop.js scan '${root.replaceAll("'", "'\\''")}' --throttle 1 --json`,
       "\u0003",
       {
         TERM: "xterm-256color",
