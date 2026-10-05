@@ -71,6 +71,16 @@ const MEASUREMENT_BUDGET_SHARE = 4n;
  * Every other layer receives what it needs as an argument, which is why the
  * dependency rule can forbid the CLI, the TUI, and the entry point from
  * reaching a Linux command or the helper at all.
+ *
+ * @module composition/root
+ */
+
+/**
+ * Every application service a surface (CLI or TUI) may call.
+ *
+ * A surface receives this object whole and picks what it needs; it never
+ * constructs a service itself. Defaults and settings travel here too, so a
+ * surface never reads configuration storage directly.
  */
 export interface Services {
   readonly dashboard: DashboardService;
@@ -102,11 +112,31 @@ export interface Services {
   };
 }
 
+/**
+ * Overrides used by tests and by callers embedding Disktop.
+ *
+ * Production callers pass nothing: the real `process.env` and the real home
+ * directory are used.
+ */
 export interface CompositionOptions {
+  /** Environment variables to read instead of `process.env`. */
   readonly environment?: Readonly<Record<string, string | undefined>>;
+  /** Home directory to resolve XDG locations from instead of `os.homedir()`. */
   readonly homeDirectory?: string;
 }
 
+/**
+ * Build every service the surfaces use, wiring adapters to application
+ * services behind their ports.
+ *
+ * Refuses to start (throws {@link StartupRefused}) when running as root from
+ * an install or Node.js binary that a non-root user could modify — under
+ * EUID 0 Disktop changes no file itself, so a root-owned install is the only
+ * safe way to run privileged.
+ *
+ * @param options - Environment and home-directory overrides; tests use these.
+ * @returns The full service set for this process.
+ */
 export async function createServices(options: CompositionOptions = {}): Promise<Services> {
   const environment = options.environment ?? process.env;
   if ((process.geteuid?.() ?? -1) === 0 && inInitialUserNamespace()) {
