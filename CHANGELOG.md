@@ -7,6 +7,33 @@ All notable changes to Disktop are recorded here. Versions follow [Semantic Vers
 The first public release. Everything below the Phase headings was built in internal
 phases that were never published; this is the first version anybody can install.
 
+### Status, 2026-10-05
+
+Not published. Phases 0–7 are complete. Phase 8 (whole-product validation and the sole
+release) is in progress:
+
+- **Done and verified locally:** the package, the four-helper release build and its
+  checksums, the packed-tarball install test, the hardening audit of every mutation, and
+  a first run on real hardware — an Arch laptop with Btrfs on LUKS, subvolume mounts, a
+  Windows partition, and a locked 4 TB LUKS drive. That run found the wrong answers
+  listed first under Phase 8 below, and they are fixed. The local gate (`npm run check`,
+  the Rust format, lint, and test gates, `npm run test:package`) passes: 996 unit and
+  contract tests, 119 integration (2 skipped: the cross-disk move needs a second
+  writable filesystem, `DISKTOP_TEST_DESTINATION_FS`), 13 recovery, 16 PTY, 9 package,
+  and 244 helper tests.
+- **Still required before the one publication:** the CI workflows green on GitHub,
+  including the ARM64 runners (the ARM64 helpers have been built but never run); the
+  host and VM checks the support matrix still lists as not validated (distribution
+  managers, the user timer, privileged manager cleanup, SMART, ZFS, WSL, SSH); and,
+  after publishing, provenance and a registry install verified on clean accounts.
+- **Known limits, stated rather than hidden:** on Btrfs, reflinked and compressed files
+  each report their full size, so a scan's file total can exceed what `df` reports as
+  used (`uv`'s cache reflinks packages into virtualenvs); `du -x`, used for the
+  measurement taken as root, stops at a Btrfs subvolume nested inside an unreadable
+  directory; that measurement lists one level below each directory and is not
+  browsable further; and the TUI's short confirmation dialogs still stretch to the full
+  height of the screen.
+
 ### Phase 7: the complete terminal UI, reports, and completions
 
 - The TUI is the whole product in a terminal, at 80×24 and down to 40×10:
