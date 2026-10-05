@@ -94,4 +94,4 @@ against the real helper journal with a fake command runner.
 | `notify-send`, systemd user instance | Opt-in desktop alert timer | CLI alert check remains usable; notification/timer capability is separate. |
 | `sudo` or `pkexec` | Reviewed privileged manager action | Refuse that action when scoped elevation cannot run. Never elevate the whole npm process. |
 
-Network and removable mounts are shown in inventory but scanned only on explicit selection. Scans stay on one filesystem by default. Permission-denied paths and optional-tool gaps must remain visible in TUI and JSON. A successful read-only inventory does not imply that cleanup is supported on the same host.
+Network and removable mounts are shown in inventory but scanned only on explicit selection. Scans stay on one filesystem by default, which includes that filesystem's other subvolume mounts below the root (Btrfs `/home` under `/`); unmounted data partitions and locked encrypted containers are listed with their size and no usage. Permission-denied paths and optional-tool gaps must remain visible in TUI and JSON. A successful read-only inventory does not imply that cleanup is supported on the same host.

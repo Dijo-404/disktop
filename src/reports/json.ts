@@ -1,4 +1,5 @@
-import { includedSections, type Report } from "../application/report.js";
+import { includedSections, type LargestEntries, type Report } from "../application/report.js";
+import { decimalBytes } from "../domain/sizes.js";
 import type { SnapshotSummary } from "../ports/snapshots.js";
 import {
   encodeAlert,
@@ -13,6 +14,7 @@ import {
   encodeRawPath,
   encodeScanTotals,
   encodeTypeTotal,
+  encodeUnmountedVolume,
   encodeWarning,
 } from "../cli/output.js";
 import { filesystemUsage } from "./usage.js";
@@ -56,6 +58,7 @@ export function reportDocument(report: Report): Record<string, unknown> {
         };
       }),
       alerts: capacity.alerts.map(encodeAlert),
+      unmounted: capacity.unmounted.map(encodeUnmountedVolume),
     },
     scan: scan.included
       ? {
@@ -75,7 +78,23 @@ export function reportDocument(report: Report): Record<string, unknown> {
                   items: scan.largest.entries.map(encodeIndexedEntry),
                 },
               }),
+          ...(scan.children === undefined ? {} : { children: rankedEntries(scan.children) }),
+          ...(scan.largestFiles === undefined ? {} : { largestFiles: rankedEntries(scan.largestFiles) }),
           ...(scan.typeTotals === undefined ? {} : { typeTotals: scan.typeTotals.map(encodeTypeTotal) }),
+          ...(scan.elevated === undefined
+            ? {}
+            : {
+                elevated: {
+                  measuredAt: scan.elevated.measuredAt,
+                  accounting: scan.elevated.accounting,
+                  bytes: decimalBytes(scan.elevated.totalBytes),
+                  items: scan.elevated.measurements.map((measurement) => ({
+                    path: encodeRawPath(measurement.path),
+                    bytes: decimalBytes(measurement.bytes),
+                    children: measurement.children.map((child) => ({ path: encodeRawPath(child.path), bytes: decimalBytes(child.bytes) })),
+                  })),
+                },
+              }),
         }
       : { included: false, reason: scan.reason },
     findings: findings.included
@@ -90,6 +109,16 @@ export function reportDocument(report: Report): Record<string, unknown> {
           categoryTotals: findings.summary.categoryTotals.map(encodeCategoryTotal),
         }
       : { included: false, reason: findings.reason },
+  };
+}
+
+function rankedEntries(ranked: LargestEntries): Record<string, unknown> {
+  return {
+    sort: "allocated",
+    order: "descending",
+    limit: ranked.limit,
+    more: ranked.more,
+    items: ranked.entries.map(encodeIndexedEntry),
   };
 }
 

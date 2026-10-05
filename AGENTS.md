@@ -36,6 +36,19 @@ any of them names a different helper. `package.json` `files` is an allowlist che
 `tests/package/package.test.mjs` against the packed tarball, which it then installs and
 runs. `prepublishOnly` refuses outside the guarded publish workflow.
 
+Mount policy and read-only escalation: without `crossFilesystems` a scan stays on the
+root's filesystem, which includes its other mounts showing a part of it nothing else in
+the scan reaches (`native/disktop-fs/src/mounts.rs` decides from mountinfo: same
+superblock, non-overlapping mount roots); another filesystem or a repeating bind mount is
+refused. Snapshots record `sameFilesystemMounts`, and scans under different policies are
+never compared. A directory with no child count was never entered and is shown as
+unknown, never as its own bytes. "Which scan covers this path" is `scanReaches` in
+`src/domain/paths.ts`, which honours excludes and skipped mounts; nothing else decides
+it. The only read-only escalation is `src/platform/linux/elevated.ts`: the system's
+root-owned `du` with fixed flags over index paths, through pkexec or sudo. Disktop's own
+helper never runs as root from a user-writable install, and measured sizes are kept
+beside a scan (`src/storage/elevated.ts`), never added to its totals.
+
 Phase 6's contracts: a manager plan holds an action id, its items, and its parameters, and
 its argv is derived from them by the fixed templates in `src/domain/managers.ts` every time
 it is read; no command is ever stored or read back from a plan file. Adding a manager action

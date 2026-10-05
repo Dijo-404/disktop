@@ -8,9 +8,9 @@ Status: planned `1.0.0` command surface. Every command the parser declares is im
 | --- | --- |
 | `disktop` | Opens the [terminal UI](#terminal-ui) when stdin and stdout are both terminals and `TERM` can address the cursor, and prints the text dashboard otherwise (a pipe, `TERM=dumb`, or no `TERM`). |
 | `disktop --json` | One `dashboard.json` envelope: capability, filesystems, and alerts. |
-| `disktop devices [--json]` | Physical disks counted once with their partitions, plus every mounted filesystem joined to its backing disk. |
+| `disktop devices [--json]` | Physical disks counted once with their partitions, every mounted filesystem joined to its backing disk, and the partitions holding data that nothing has mounted (`unmounted`), such as a Windows partition or a locked LUKS container, whose usage is unknown until they are mounted. EFI, recovery, reserved, and swap partitions are left out. |
 | `disktop alerts check [--threshold PERCENT] [--notify] [--json]` | Space and inode thresholds. Exits `1` when one is reached. `--notify`, or `alerts.notify` in the configuration, also sends one desktop notification; one that could not be sent is a warning and never changes the exit status. |
-| `disktop scan [PATH] [--json]` | Walks `PATH` (the working directory by default) through the helper, writes the detailed index, and saves a snapshot. `--accounting allocated\|apparent`, `--cross-filesystems`, `--throttle RATE`, `--max-depth DEPTH`. Ctrl+C stops it at a directory boundary and still reports what was measured. |
+| `disktop scan [PATH] [--json]` | Walks `PATH` (the working directory by default) through the helper, writes the detailed index, and saves a snapshot. `--accounting allocated\|apparent`, `--cross-filesystems`, `--throttle RATE`, `--max-depth DEPTH`, `--sudo`. Ctrl+C stops it at a directory boundary and still reports what was measured. |
 | `disktop explore [PATH] [--json]` | One page of `PATH` and everything below it, from the most recent scan covering it. `--sort`, `--order`, `--kind`, `--min-size`, `--max-size`, `--ext`, `--name`, `--older-than DAYS`, `--limit`, `--cursor`, `--type-totals`, `--owners`. |
 | `disktop snapshots list\|diff [--json]` | Lists saved snapshots, or compares two of them (`--from`, `--to`; the two most recent by default). |
 | `disktop clean [--json]` | Lists what every detector found, and changes nothing. `--dry-run` is accepted and redundant. `--category CATEGORY` narrows the list, `--limit COUNT` shortens it, and `--no-sizes` skips measurement so every size stays unknown. |
@@ -31,13 +31,15 @@ A command declared in the table before it is built is marked `[planned]` in the 
 
 ## Scanning, exploring, and growth
 
-`scan` does not delete or move anything. It walks the tree through the Rust helper, which opens every directory with `openat2` containment: it never follows a symlink, and without `--cross-filesystems` it refuses to descend into a nested mount, including a bind mount of the same filesystem. A directory it cannot open is counted and named, never treated as empty, and any scan that missed something reports `complete: false` with at least one warning.
+`scan` does not delete or move anything. It walks the tree through the Rust helper, which opens every directory with `openat2` containment: it never follows a symlink, and without `--cross-filesystems` it stays on the filesystem the root is on. That filesystem includes its other mounts below the root that show a part of it nothing else in the scan reaches — Btrfs subvolumes mounted at `/home`, `/var/log`, or `/.snapshots` are the common case, and a scan of `/` that stopped at them would account for a fraction of what `df` reports as used. A mount of a different filesystem (`/boot`, `/proc`, a USB disk) is refused, and so is a bind mount repeating a tree the scan already reaches, so nothing is counted twice; each refused mount is listed in `excludedMounts` with a warning saying which of the two it was. A directory it cannot open is counted and named, never treated as empty, and any scan that missed something reports `complete: false` with at least one warning.
+
+`--sudo` then measures the directories the scan could not read, with administrator rights: the system's own root-owned `du` runs read-only through `pkexec` (a desktop password dialog) or `sudo` (a password prompt on the terminal), with fixed flags and the absolute paths as its only arguments. Nothing Disktop ships runs as root. The sizes are kept beside the scan, one level deep, and are never added into its totals; the scan stays `incomplete` because the index still cannot browse inside those directories. `scan --json` reports them under `elevated` (`common.json#/$defs/elevatedMeasurement`); a refused or cancelled password prompt is `status: "denied"`, and a machine where nothing can ask for administrator rights is `unavailable`. `explore` and `report` show the measured sizes where they apply, and the TUI does the same from Explore with `A`.
 
 Bytes are counted once per inode. A second hardlink to an inode the scan already counted is listed with `shared: true`, and its bytes are reported as `sharedBytes` rather than added to the totals, because deleting that path frees nothing.
 
 A directory's `allocatedBytes` and `apparentBytes` are the totals for its whole subtree; a file's are its own. Per-extension totals cover regular files only, for the same reason: adding directory rows to them would count the same bytes twice.
 
-`explore` never scans. It reads the index a previous `scan` wrote, and the path narrows the listing to that directory and everything below it, so exploring `~/Downloads` after scanning `~` answers about Downloads. If no stored scan covers the path, or the path was not in the scan, it says so and names the command that would produce one.
+`explore` never scans. It reads the index a previous `scan` wrote, and the path narrows the listing to that directory and everything below it, so exploring `~/Downloads` after scanning `~` answers about Downloads. If no stored scan reaches the path — none has a root above it, or every one that does stayed out of a mount or exclude between the two — it says so and names the command that would produce one. A directory the scan never went inside is listed with `?` for its size and says why (`another mount, not scanned`, or `unreadable, size unknown`), or with its size measured as root when `--sudo` measured it; its own few bytes are never printed as though it were nearly empty.
 
 A scan of a tree with many unreadable directories reports every one of them in `inaccessibleDirectories`, but lists at most a few hundred individually and then summarises the rest as a `warnings-truncated` warning giving the count per code. Nothing is hidden; the list is bounded so that the output, the index, and every stored snapshot do not grow with the filesystem.
 
@@ -45,7 +47,7 @@ A scan of a tree with many unreadable directories reports every one of them in `
 
 ### Comparing against `du`
 
-`disktop scan --json` reports `allocatedBytes` on the same basis as `du -x --block-size=1`: `st_blocks × 512`, each inode counted once, no mount crossing. The two agree exactly on the same tree, and `tests/integration/scan.test.mjs` asserts it.
+`disktop scan --json` reports `allocatedBytes` on the same basis as `du -x --block-size=1`: `st_blocks × 512`, each inode counted once, no other filesystem entered. The two agree exactly on the same tree, and `tests/integration/scan.test.mjs` asserts it. On Btrfs they differ by design: `du -x` stops wherever the device number changes, which is at every subvolume, mounted or not, while Disktop walks the subvolumes of the filesystem it is scanning.
 
 `sharedBytes` is reported in the same unit as the totals beside it, so the two can be compared directly.
 
@@ -57,7 +59,7 @@ Apparent bytes are not comparable against `du`. `du --apparent-size` leaves the 
 disktop                                      Open the TUI
 disktop --json                               Dashboard without a TTY
 disktop devices --json
-disktop scan [PATH] --accounting allocated|apparent --cross-filesystems --json
+disktop scan [PATH] --accounting allocated|apparent --cross-filesystems --sudo --json
 disktop explore [PATH] --sort allocated --min-size 1GiB --ext log --json
 disktop find duplicates|stale|empty|broken [PATH] --json
 disktop snapshots list|diff --json
@@ -256,11 +258,18 @@ A report has up to three sections, and each one says whether it is complete:
 
 - **Capacity**, always: every filesystem with its size, available bytes, the share used
   counted the way `df` counts it, the share of inodes used where the filesystem reports
-  inodes, every alert, and every block device. This is the dashboard's joined view.
-- **Scan**, with `--path PATH`: the newest stored scan whose root covers the path — its
-  scope, totals, completeness, and warnings — plus the `--limit` largest entries under
-  the path by allocated bytes (50 by default, at most 1000) and the bytes per file
-  extension under it. The totals are the whole scan's; the entries and type totals are
+  inodes, every alert, every block device, and the partitions holding data that nothing
+  has mounted, whose usage is unknown. This is the dashboard's joined view.
+- **Scan**, with `--path PATH`: the newest stored scan that reached the path — its
+  scope, totals, completeness, and warnings — plus, each cut at `--limit` (50 by default,
+  at most 1000) and ranked by allocated bytes: what is directly inside the path
+  (`children`, which do not overlap and so add up to the path's size), the largest files
+  anywhere under it (`largestFiles`), and every entry under it (`entries`, where a
+  directory is ranked beside its own ancestors), with the bytes per file extension under
+  it. Unreadable directories under the path that were measured as root afterwards
+  (`scan --sudo`, or `A` in the TUI) are listed under `elevated`, never added to the
+  totals. A scan that stayed out of a mount or exclude between its root and the path does
+  not count as reaching it. The totals are the whole scan's; the entries and type totals are
   the path's. Without `--path` there is no scan section, and the report says so: the
   working directory is never assumed, so a report run from a timer or a script does not
   quietly depend on where it was started. A path no stored scan covers is an input error
@@ -345,9 +354,12 @@ a spreadsheet may display a large one rounded, and the file still holds it exact
 | `filesystem` | filesystem, with its first mount point | `id`, `kind` (type), path, `total_bytes`, `free_bytes`, `available_bytes`, `used_percent`, `inodes_used_percent`, `status` (`read-only` or `read-write`), `detail` |
 | `mount` | further mount point of a filesystem | `id`, path |
 | `device` | block device | `id`, `kind` (`ssd`, `hdd`, `unknown`), `total_bytes`, `entries` (partitions), `detail` |
+| `unmounted` | partition with data that nothing has mounted | `id`, `kind` (filesystem type), `path_display` (the device node), `total_bytes`, `status` (`unmounted` or `locked`), `detail` |
 | `alert` | alert | `id` (filesystem), `kind`, `used_percent`, `threshold_percent`, `detail` |
 | `scan` | included scan | `id` (scan), `kind` (accounting), path (the `--path`), `allocated_bytes`, `apparent_bytes`, `shared_bytes` (whole scan), `entries` (scanned), `modified_at` (when scanned), `status`, `detail` |
 | `scan-root`, `excluded-mount` | root of the scan, mount it did not enter | `id` (scan), path |
+| `child`, `largest-file` | entry directly inside the path; largest file under it | `id`, `kind`, path, `allocated_bytes`, `apparent_bytes` (both empty with `status` `not-entered` for a directory the scan never went inside), `entries`, `modified_at`, `status` |
+| `measured-as-root` | unreadable directory measured afterwards with administrator rights | `id` (scan), path, `size_bytes`, `size_basis`, `modified_at` (when measured), `detail` |
 | `entry` | listed entry, largest first | `id`, `kind`, path, `allocated_bytes`, `apparent_bytes`, `entries` (a directory's children), `modified_at`, `status` (`shared-hardlink`, `broken-symlink`) |
 | `entry-limit` | listing cut at `--limit` | `entries` (the limit), `detail` |
 | `type-total` | file extension, `id` empty for none | `id`, `allocated_bytes`, `apparent_bytes`, `entries` |
@@ -387,7 +399,11 @@ be shown the same.
 Sizes are shown in the `--units` you chose with the exact byte count in a tooltip;
 capacity is drawn as bars whose width is the used percentage, red where an alert has
 been raised; a page follows the reader's light or dark preference. Incomplete sections
-are badged and their warnings listed at the top.
+are badged and their warnings listed at the top, one line per kind of warning that opens
+(an HTML `details` element, no script) to every path it names. The scan section shows
+what is directly inside the path with each entry's share of it, then the largest files,
+then the file types; a directory the scan never went inside shows `unknown` and why,
+rather than a size.
 
 ## Shell completions
 
@@ -539,8 +555,8 @@ is a reviewed plan, applied through `clean apply`'s service, and journalled.
 
 | Tab | Shows | Keys beyond the common ones |
 | --- | --- | --- |
-| 1 Disks | Filesystems with usage bars; the selected one's used, root-reserved, and available space, device, inodes, and mounts. | Enter explore it, `S` scan it |
-| 2 Explore | A stored scan, a directory at a time: size, share of the parent, growth since the previous comparable snapshot, a trend sparkline of the total, file types. | Enter/`l` open, `h`/Backspace up, `s` sort, `f` finders (largest, duplicates, stale, empty, broken), `/` filter, `t` types, `n` more, `c` plan, `S` scan |
+| 1 Disks | Filesystems with usage bars; the selected one's used, root-reserved, and available space, device, inodes, and mounts. Below them, partitions holding data that nothing has mounted (a Windows partition, a locked LUKS drive), with how to mount or unlock them. | Enter explore it, `S` scan it |
+| 2 Explore | A stored scan, a directory at a time: size, share of the parent, growth since the previous comparable snapshot, a trend sparkline of the total, file types. A directory the scan never entered shows `?` and why; after `A`, an unreadable one shows its size measured as root and opens to one level of what is inside. | Enter/`l` open, `h`/Backspace up, `s` sort, `f` finders (largest, duplicates, stale, empty, broken), `/` filter, `t` types, `n` more, `c` plan, `S` scan, `A` measure unreadable directories as root (asks for your password) |
 | 3 Clean | Findings a plan could act on, totalled by category, then informational ones. | Enter details, `c` plan, `p` detectors, `r` look again |
 | 4 Dev, 5 Apps | The same findings narrowed to development or to applications. | as Clean |
 | 6 History | The journal, item by item. | `u` undo a Trash action, `n` older |

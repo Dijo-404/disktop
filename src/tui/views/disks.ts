@@ -1,4 +1,4 @@
-import type { Filesystem, StorageDevice } from "../../domain/models.js";
+import type { Filesystem, StorageDevice, UnmountedVolume } from "../../domain/models.js";
 import { formatBytes, usedPercentOfInodes, usedPercentOfSpace } from "../../domain/sizes.js";
 import { LineBuilder, type ScreenLine } from "../frame.js";
 import { cellWidth, groupDigits, padEnd, padStart, truncate, truncateMiddle } from "../text.js";
@@ -65,20 +65,32 @@ export function renderDisks(context: ViewContext): ViewOutput {
   lines.push(header.build());
 
   const listRows = Math.max(1, height - 1 - detailHeight);
-  const window = listWindow(state.disks.selected, view.filesystems.length, listRows);
+  const rowCount = view.filesystems.length + view.unmounted.length;
+  const window = listWindow(state.disks.selected, rowCount, listRows);
   for (let index = window.start; index < window.end; index += 1) {
-    const filesystem = view.filesystems[index] as Filesystem;
     const selected = index === state.disks.selected;
     hits.push({ row: top + lines.length, from: 0, to: width, action: { kind: "row", index } });
-    lines.push(filesystemRow(filesystem, selected, columns, context));
+    const filesystem = view.filesystems[index];
+    lines.push(
+      filesystem === undefined
+        ? unmountedRow(view.unmounted[index - view.filesystems.length] as UnmountedVolume, selected, columns, context)
+        : filesystemRow(filesystem, selected, columns, context),
+    );
   }
   while (lines.length < 1 + listRows) {
     lines.push({ spans: [] });
   }
 
-  const selected = view.filesystems[state.disks.selected];
-  if (detailHeight > 0 && selected !== undefined) {
-    for (const line of detailLines(selected, view.devices, detailHeight, context)) {
+  if (detailHeight > 0) {
+    const selected = view.filesystems[state.disks.selected];
+    const volume = view.unmounted[state.disks.selected - view.filesystems.length];
+    const detail =
+      selected !== undefined
+        ? detailLines(selected, view.devices, detailHeight, context)
+        : volume !== undefined
+          ? unmountedDetailLines(volume, view.devices, detailHeight, context)
+          : [];
+    for (const line of detail) {
       lines.push(line);
     }
   }
@@ -88,6 +100,7 @@ export function renderDisks(context: ViewContext): ViewOutput {
     .add(" ")
     .add(view.complete ? theme.glyphs.ok : theme.glyphs.warn, view.complete ? "ok" : "warn")
     .add(` ${view.filesystems.length} filesystem${view.filesystems.length === 1 ? "" : "s"} on ${devices} device${devices === 1 ? "" : "s"}`, "dim")
+    .add(view.unmounted.length === 0 ? "" : `${theme.glyphs.separator}${view.unmounted.length} not mounted`, "dim")
     .add(`${theme.glyphs.separator}alert at ${threshold}% used`, "dim")
     .add(view.complete ? "" : `${theme.glyphs.separator}${view.warnings.length} reading(s) missing`, "warn")
     .build();
@@ -147,6 +160,55 @@ function filesystemRow(filesystem: Filesystem, selected: boolean, columns: Colum
     line.add(padStart(inodes, columns.inodes), "dim");
   }
   return line.build({ selected });
+}
+
+/**
+ * A partition with data on it that nothing has mounted. Its bytes are real,
+ * but no filesystem reports them, so the row says it cannot be measured
+ * rather than showing a size beside an empty bar.
+ */
+function unmountedRow(volume: UnmountedVolume, selected: boolean, columns: Columns, context: ViewContext): ScreenLine {
+  const { state, theme, width } = context;
+  const line = new LineBuilder(width);
+  line.add(selected ? `${theme.glyphs.pointer} ` : "  ", "accent");
+  const name = volume.label === undefined ? volume.id : `${volume.label} (${volume.id})`;
+  line.add(truncateMiddle(name, columns.mount - 1, theme.glyphs.ellipsis), "muted");
+  line.padTo(2 + columns.mount);
+  if (columns.type > 0) line.add(padEnd(volumeType(volume), columns.type - 1, theme.glyphs.ellipsis), "dim").add(" ");
+  if (columns.size > 0) line.add(padStart(formatBytes(volume.sizeBytes, state.units), columns.size - 1), "dim").add(" ");
+  const status = volume.state === "locked" ? "locked" : "not mounted";
+  const room = (columns.bar > 0 ? columns.bar + 1 : 0) + 5 + columns.free;
+  line.add(padStart(status, room), volume.state === "locked" ? "warn" : "muted");
+  return line.build({ selected });
+}
+
+function volumeType(volume: UnmountedVolume): string {
+  return volume.filesystemType === "crypto_LUKS" ? "LUKS" : volume.filesystemType;
+}
+
+function unmountedDetailLines(volume: UnmountedVolume, devices: readonly StorageDevice[], height: number, context: ViewContext): ScreenLine[] {
+  const { state, theme, width } = context;
+  const lines: ScreenLine[] = [ruleLine(truncateMiddle(volume.label ?? volume.devicePath, Math.max(8, width - 12), theme.glyphs.ellipsis), width, theme)];
+  const label = (text: string): LineBuilder => new LineBuilder(width).add("  ").add(padEnd(text, 9), "muted");
+  const device = devices.find((candidate) => candidate.id === volume.deviceId);
+  const parts = [
+    volume.devicePath,
+    volumeType(volume),
+    formatBytes(volume.sizeBytes, state.units),
+    device === undefined ? undefined : `on ${device.model ?? device.name}`,
+  ].filter((part): part is string => part !== undefined);
+  lines.push(label("Device").add(truncate(parts.join(theme.glyphs.separator), width - 13, theme.glyphs.ellipsis)).build());
+  const locked = volume.state === "locked";
+  lines.push(
+    label("State")
+      .add(locked ? "Encrypted and locked: what it holds and how full it is are unknown." : "Not mounted: how full it is is unknown.", locked ? "warn" : "dim")
+      .build(),
+  );
+  const how = locked
+    ? `Unlock and mount it (file manager, or udisksctl unlock -b ${volume.devicePath}), then press r.`
+    : `Mount it (file manager, or udisksctl mount -b ${volume.devicePath}), then press r to measure it.`;
+  lines.push(label("Next").add(truncate(how, width - 13, theme.glyphs.ellipsis), "dim").build());
+  return lines.slice(0, height);
 }
 
 function deviceFor(filesystem: Filesystem, devices: readonly StorageDevice[]): StorageDevice | undefined {

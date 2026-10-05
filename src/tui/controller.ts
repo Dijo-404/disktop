@@ -3,7 +3,8 @@ import type { ActionOperation, ActionPlan, SourceDisposition } from "../domain/a
 import { StaleScanIndex } from "../domain/errors.js";
 import type { Finding } from "../domain/findings.js";
 import type { IndexedEntry, RawPath } from "../domain/models.js";
-import { isWithin, pathBytes, rawPathFromBytes, rawPathFromUtf8 } from "../domain/paths.js";
+import { isWithin, pathBytes, rawPathFromBytes, rawPathFromUtf8, scanReaches } from "../domain/paths.js";
+import { formatBytes } from "../domain/sizes.js";
 import { staleBeforeNanoseconds } from "../domain/staleness.js";
 import type { EntryFilter } from "../ports/scan.js";
 import type { SnapshotSummary } from "../ports/snapshots.js";
@@ -89,7 +90,7 @@ export interface ControllerHooks {
   readonly size?: () => { readonly columns: number; readonly rows: number };
 }
 
-type TaskKind = "inventory" | "explore" | "trend" | "scan" | "findings" | "history" | "plan" | "apply" | "undo" | "duplicates";
+type TaskKind = "inventory" | "explore" | "trend" | "scan" | "findings" | "history" | "plan" | "apply" | "undo" | "duplicates" | "elevate";
 
 /** Tasks that change something on disk. They are never abandoned, only asked to stop. */
 const MUTATING: ReadonlySet<TaskKind> = new Set<TaskKind>(["apply", "undo"]);
@@ -348,6 +349,9 @@ export class TuiController {
       case "scan":
         this.#askToScan();
         return;
+      case "elevate":
+        this.#askToElevate();
+        return;
       case "sort":
         if (state.tab === "Explore" && state.explore.snapshot !== undefined && state.explore.mode !== "duplicates") {
           const sort = nextSort(state.explore.sort);
@@ -477,9 +481,9 @@ export class TuiController {
       return;
     }
     const confirming =
-      ((dialog.kind === "review" || dialog.kind === "undo-confirm" || dialog.kind === "confirm-scan") && intent.kind === "confirm") ||
+      ((dialog.kind === "review" || dialog.kind === "undo-confirm" || dialog.kind === "confirm-scan" || dialog.kind === "confirm-elevate") && intent.kind === "confirm") ||
       (dialog.kind === "review" && intent.kind === "submit") ||
-      (dialog.kind === "confirm-scan" && intent.kind === "open");
+      ((dialog.kind === "confirm-scan" || dialog.kind === "confirm-elevate") && intent.kind === "open");
     if (confirming && !this.#dialogSettled()) {
       return;
     }
@@ -555,6 +559,11 @@ export class TuiController {
           this.#scan(dialog.path);
         }
         return;
+      case "confirm-elevate":
+        if (intent.kind === "confirm" || intent.kind === "open") {
+          this.#elevate();
+        }
+        return;
       case "finding":
         if (intent.kind === "move") {
           const delta = Number.isFinite(intent.delta) ? intent.delta : intent.delta > 0 ? 10_000 : -10_000;
@@ -604,7 +613,9 @@ export class TuiController {
         if (mount !== undefined) {
           this.#set(switchTab(state, "Explore"));
           this.#openExplore(mount, true);
+          return;
         }
+        this.#explainUnmounted();
         return;
       }
       case "Explore": {
@@ -612,6 +623,10 @@ export class TuiController {
         // A directory still loading is not opened again: a second Enter would
         // record the same parent twice on the trail.
         if (state.explore.loading) {
+          return;
+        }
+        if (row?.kind === "measured") {
+          this.#set(withNotice(state, "Only one level below an unreadable directory is measured, and it is not in the index.", "info"));
           return;
         }
         if (row?.kind === "entry" && row.entry.kind === "directory") {
@@ -879,7 +894,8 @@ export class TuiController {
     this.#run("inventory", undefined, async (_signal, generation) => {
       const view = await this.#services.dashboard.inventory();
       this.#ifCurrent("inventory", generation, (state) => {
-        const updated = { ...state, disks: { view, selected: Math.min(state.disks.selected, Math.max(0, view.filesystems.length - 1)) } };
+        const rows = view.filesystems.length + view.unmounted.length;
+        const updated = { ...state, disks: { view, selected: Math.min(state.disks.selected, Math.max(0, rows - 1)) } };
         return announce ? withNotice(updated, view.complete ? "Filesystems read again." : "Filesystems read again; some readings could not be taken.", view.complete ? "ok" : "warn") : updated;
       });
     });
@@ -898,7 +914,9 @@ export class TuiController {
       const snapshot =
         wanted === undefined
           ? snapshots[0]
-          : snapshots.find((candidate) => candidate.scope.roots.some((root) => isWithin(pathBytes(root), pathBytes(wanted))));
+          : snapshots.find((candidate) =>
+              scanReaches(candidate.scope.roots, [...candidate.scope.excludes, ...candidate.completeness.excludedMounts], wanted),
+            );
       const root = wanted ?? snapshot?.scope.roots[0] ?? this.#services.home;
       if (snapshot === undefined) {
         this.#ifCurrent("explore", generation, (state) => {
@@ -908,11 +926,23 @@ export class TuiController {
         });
         return;
       }
+      const elevated = await this.#services.elevated.recorded(snapshot.scanId);
       this.#ifCurrent("explore", generation, (state) => {
-        const rest = omit(state.explore, "trend", "typeTotals");
+        const rest = omit(state.explore, "trend", "typeTotals", "elevated");
         return {
           ...state,
-          explore: { ...rest, root, snapshot, mode: "browse", trail: [], rows: [], selected: 0, loading: true, growth: new Map<string, bigint>() },
+          explore: {
+            ...rest,
+            root,
+            snapshot,
+            mode: "browse",
+            trail: [],
+            rows: [],
+            selected: 0,
+            loading: true,
+            growth: new Map<string, bigint>(),
+            ...(elevated === undefined ? {} : { elevated }),
+          },
         };
       });
       await this.#loadDirectoryNow(root, 0, undefined, snapshot, generation);
@@ -947,6 +977,37 @@ export class TuiController {
           ...state,
           explore: { ...state.explore, loading: false, rows: [], empty: `${path.display} is not in this scan. Press S to scan it.` },
         }));
+        return;
+      }
+      if (entry.kind === "directory" && entry.childEntries === undefined) {
+        // The walk never went inside, so the index has nothing below it. What
+        // was measured as root, if anything was, is shown in its place.
+        this.#ifCurrent("explore", generation, (state) => {
+          const measured = state.explore.elevated?.measurements.find((measurement) => measurement.path.bytesBase64 === path.bytesBase64);
+          const mount = snapshot.completeness.excludedMounts.some((excluded) => excluded.bytesBase64 === path.bytesBase64);
+          const rows: ExploreRow[] = (measured?.children ?? []).map((child) => ({ kind: "measured", path: child.path, bytes: child.bytes }));
+          const rest = omit(state.explore, "empty", "nextCursor", "typeTotals");
+          return {
+            ...state,
+            explore: {
+              ...rest,
+              mode: "browse",
+              directory: { path, id: entry.id, entry },
+              rows,
+              selected: Math.min(selected, Math.max(0, rows.length - 1)),
+              loading: false,
+              ...(rows.length > 0
+                ? {}
+                : {
+                    empty: mount
+                      ? "Another filesystem is mounted here and the scan stayed on its own. Pick it on the Disks tab to scan it."
+                      : measured !== undefined
+                        ? "Measured as root: it holds nothing below it."
+                        : "This directory could not be read, so the scan holds nothing below it. Press A to measure it as root.",
+                  }),
+            },
+          };
+        });
         return;
       }
       const showTypes = this.#state.explore.showTypes;
@@ -1186,6 +1247,7 @@ export class TuiController {
     if (state.tab === "Disks") {
       const mount = state.disks.view.filesystems[state.disks.selected]?.mounts[0];
       if (mount === undefined) {
+        this.#explainUnmounted();
         return;
       }
       path = mount;
@@ -1195,6 +1257,82 @@ export class TuiController {
       return;
     }
     this.#set({ ...state, dialog: { kind: "confirm-scan", path, reason: state.explore.snapshot === undefined ? "Nothing has been scanned here yet." : "This replaces the stored scan's view with a fresh one; the older scan stays available for growth comparisons." } });
+  }
+
+  /** A: offer to measure what the scan on screen could not read, as root. */
+  #askToElevate(): void {
+    const state = this.#state;
+    const snapshot = state.explore.snapshot;
+    if (state.tab !== "Explore" || snapshot === undefined || state.explore.scan !== undefined) {
+      return;
+    }
+    const unreadable = snapshot.completeness.inaccessibleDirectories;
+    if (unreadable === 0n) {
+      this.#set(withNotice(state, "This scan read every directory it reached; nothing needs administrator rights.", "info"));
+      return;
+    }
+    this.#set({ ...state, dialog: { kind: "confirm-elevate", scanId: snapshot.scanId, unreadable } });
+  }
+
+  /**
+   * Run the measurement with the terminal handed over, because sudo asks on
+   * it and pkexec falls back to it when no desktop dialog answers.
+   */
+  #elevate(): void {
+    const snapshot = this.#state.explore.snapshot;
+    this.#set(withoutDialog(this.#state));
+    if (snapshot === undefined) {
+      return;
+    }
+    this.#run("elevate", { label: "Measuring unreadable directories as root", cancellable: true }, async (signal) => {
+      this.#hooks.suspend(
+        "Disktop is measuring the directories its scan could not read, with the system's du running as root, read-only.\n" +
+          "Your system will ask for your password (a dialog on the desktop, or sudo here). Nothing is changed.\n",
+      );
+      let outcome;
+      try {
+        outcome = await this.#services.elevated.measure(snapshot, { interactive: true, signal });
+      } finally {
+        this.#hooks.resume();
+      }
+      const state = this.#state;
+      switch (outcome.kind) {
+        case "measured": {
+          const count = outcome.record.measurements.length;
+          const units = state.units;
+          const current = state.explore.snapshot?.scanId === snapshot.scanId;
+          const next = current ? { ...state, explore: { ...state.explore, elevated: outcome.record } } : state;
+          this.#set(
+            withNotice(
+              next,
+              `Measured ${count} unreadable director${count === 1 ? "y" : "ies"} as root: ${formatBytes(outcome.totalBytes, units)}. Shown beside the scan, not added to it.`,
+              "ok",
+            ),
+          );
+          return;
+        }
+        case "nothing-unreadable":
+          this.#set(withNotice(state, "Every unreadable directory turned out to be a mount the scan stays out of; nothing was measured.", "info"));
+          return;
+        case "denied":
+          this.#set(withNotice(state, outcome.explanation, "warn"));
+          return;
+        case "unavailable":
+          this.#set(withNotice(state, outcome.capability.explanation, "warn"));
+          return;
+      }
+    });
+  }
+
+  /** Enter or S on a partition nothing has mounted: there is nothing to read yet. */
+  #explainUnmounted(): void {
+    const state = this.#state;
+    const volume = state.disks.view.unmounted[state.disks.selected - state.disks.view.filesystems.length];
+    if (volume === undefined) {
+      return;
+    }
+    const action = volume.state === "locked" ? "Unlock and mount" : "Mount";
+    this.#set(withNotice(state, `${volume.devicePath} is not mounted, so there is nothing to scan yet. ${action} it, then press r.`, "info"));
   }
 
   #scan(root: RawPath): void {
@@ -1311,6 +1449,10 @@ export class TuiController {
     }
     if (state.tab === "Explore") {
       const row = selectedExploreRow(state);
+      if (row?.kind === "measured") {
+        this.#set(withNotice(state, "This was measured as root and is not in the index; Disktop plans nothing it could not read.", "info"));
+        return;
+      }
       if (row?.kind === "entry") {
         this.#plan({ operation: "trash", path: row.entry.path }, PATH_OPERATIONS, "path");
       } else if (row?.kind === "member") {
@@ -1542,6 +1684,8 @@ function dialogIdentity(dialog: Dialog): string {
       return `undo:${dialog.record.id}`;
     case "confirm-scan":
       return `scan:${dialog.path.bytesBase64}`;
+    case "confirm-elevate":
+      return `elevate:${dialog.scanId}`;
     case "finding":
       return `finding:${dialog.finding.id}`;
     default:

@@ -56,6 +56,10 @@
         },
         "prunedSnapshots": {
           "$ref": "common.json#/$defs/decimalInteger"
+        },
+        "elevated": {
+          "description": "Present when --sudo asked for the unreadable directories to be measured with administrator rights.",
+          "$ref": "common.json#/$defs/elevatedMeasurement"
         }
       }
     }

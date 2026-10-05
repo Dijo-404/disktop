@@ -391,6 +391,10 @@
           "description": "Keep only rows with at most this many direct children. A row with no count is left out, so an unreadable directory never answers a search for empty ones.",
           "$ref": "#/$defs/decimalInteger"
         },
+        "unentered": {
+          "description": "Keep only directories the walk recorded but never went inside (unreadable ones and mounts it stayed out of), or only everything else.",
+          "type": "boolean"
+        },
         "broken": {
           "description": "Keep only broken symlinks, or only unbroken entries.",
           "type": "boolean"

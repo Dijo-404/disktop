@@ -89,6 +89,25 @@
         "readOnly": false,
         "deviceId": "sdb"
       }
+    ],
+    "unmounted": [
+      {
+        "id": "nvme0n1p3",
+        "devicePath": "/dev/nvme0n1p3",
+        "deviceId": "nvme0n1",
+        "sizeBytes": "547094528000",
+        "filesystemType": "ntfs",
+        "label": "Windows-SSD",
+        "state": "unmounted"
+      },
+      {
+        "id": "sdb2",
+        "devicePath": "/dev/sdb2",
+        "deviceId": "sdb",
+        "sizeBytes": "1073741824",
+        "filesystemType": "crypto_LUKS",
+        "state": "locked"
+      }
     ]
   }
 }

@@ -6,11 +6,14 @@ versioned JSON for everything the UI does.
 
 ![Disktop's terminal UI: the disks dashboard, a scanned directory, cleanup findings, and a reviewed plan](https://raw.githubusercontent.com/Dijo-404/disktop/main/docs/demo.svg)
 
-- **Every disk at a glance** — devices, filesystems, mounts, free space, inode use, and
-  a warning before a filesystem fills.
+- **Every disk at a glance** — devices, filesystems, mounts, free space, inode use,
+  partitions nothing has mounted (a Windows partition, a locked LUKS drive), and a
+  warning before a filesystem fills.
 - **Fast, mount-safe scans** — a native helper walks with `openat2` containment, never
-  follows a symlink, stays on one filesystem, counts hardlinks once, and keeps the
-  index on disk so memory stays flat on million-file trees.
+  follows a symlink, stays on one filesystem (Btrfs subvolumes such as `/home`
+  included), counts hardlinks once, and keeps the index on disk so memory stays flat on
+  million-file trees. What it could not read can be measured afterwards as root, read-only,
+  behind your system's own password prompt.
 - **Find what is worth looking at** — largest files and directories, file-type
   breakdowns, growth since the last scan, duplicates (byte-compared), stale files,
   empty directories, broken links, and two dozen detectors for build output, language
@@ -65,7 +68,7 @@ plan is only reviewed and confirmed at 60×20 or larger, where all of it fits.
 
 | Tab | What it shows |
 | --- | --- |
-| **1 Disks** | Every filesystem with a usage bar, and for the selected one a bar that separates used, root-reserved, and available space, its device, inodes, and mounts. |
+| **1 Disks** | Every filesystem with a usage bar, and for the selected one a bar that separates used, root-reserved, and available space, its device, inodes, and mounts; then the partitions nothing has mounted, with how to mount or unlock them. |
 | **2 Explore** | A stored scan, directory by directory: size, share of the parent, growth since the previous comparable scan, a trend of the total, and a file-type breakdown. `f` cycles finders: largest files, duplicates, stale, empty directories, broken links. |
 | **3 Clean** | Everything the detectors found that a plan could act on, totalled by category, then what is there for information (swap, SMART, open-deleted files). |
 | **4 Dev** · **5 Apps** | The same findings, narrowed to developer environments and caches, or to installed applications and their data. |
@@ -83,6 +86,7 @@ Keys (also under `?`):
 | `f` | next finder (Explore) |
 | `t` | file-type breakdown on or off |
 | `S` | scan the selected filesystem or this directory |
+| `A` | measure the directories the scan could not read, as root and read-only (your system asks for your password) |
 | `c` | review a plan to clean the selection |
 | `o` (in a review) | plan the next operation instead: Trash, a move to another disk, a compression, permanent removal; a move or a compression asks for its destination first |
 | `y` / type `yes` | apply a reversible / an irreversible plan |
@@ -109,7 +113,7 @@ when stderr is a terminal.
 | --- | --- |
 | `disktop devices` | Devices, filesystems, mounts, free space, inodes. |
 | `disktop alerts check [--threshold N] [--notify]` | Exit `1` when a filesystem passes its space or inode threshold. |
-| `disktop scan [PATH]` | Index a tree and save a snapshot. `--accounting allocated\|apparent`, `--cross-filesystems`, `--throttle 50MiB`, `--max-depth N`. |
+| `disktop scan [PATH]` | Index a tree and save a snapshot. `--accounting allocated\|apparent`, `--cross-filesystems`, `--throttle 50MiB`, `--max-depth N`, `--sudo` (then measure what it could not read, as root, read-only). |
 | `disktop explore [PATH]` | Pages of a stored scan: `--sort`, `--kind`, `--min-size`, `--ext`, `--name`, `--older-than`, `--type-totals`, `--owners`. |
 | `disktop find duplicates\|stale\|empty\|broken` | Finders over a stored scan; duplicates are byte-compared, `--keep oldest\|newest\|in-path`. |
 | `disktop snapshots list\|diff` | Growth between comparable scans. |

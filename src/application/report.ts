@@ -1,6 +1,7 @@
 import { CapabilityUnavailable, StaleScanIndex, type OperationFailure } from "../domain/errors.js";
 import type { Capability, IndexedEntry, RawPath, Warning } from "../domain/models.js";
-import { isWithin, pathBytes } from "../domain/paths.js";
+import { isWithin, pathBytes, scanReaches } from "../domain/paths.js";
+import type { ElevatedMeasurement, ElevatedRecord } from "../ports/elevated.js";
 import type { ReportFilePort, ReportTargetCheck, ReportWriteOutcome } from "../ports/reports.js";
 import type { TypeTotal } from "../ports/scan.js";
 import type { SnapshotSummary } from "../ports/snapshots.js";
@@ -39,7 +40,25 @@ export interface ScanSection {
   readonly snapshot: SnapshotSummary;
   /** Absent when the index could not answer, which a warning explains. */
   readonly largest?: LargestEntries;
+  /**
+   * What is directly inside the subject, largest first. Unlike `largest`,
+   * which ranks a directory beside its own ancestors, these do not overlap,
+   * so their sizes add up to the subject's.
+   */
+  readonly children?: LargestEntries;
+  /** The largest regular files anywhere under the subject. */
+  readonly largestFiles?: LargestEntries;
   readonly typeTotals?: readonly TypeTotal[];
+  /** Unreadable directories under the subject, measured as root when somebody asked. */
+  readonly elevated?: ElevatedSummary;
+}
+
+export interface ElevatedSummary {
+  readonly measuredAt: string;
+  readonly accounting: ElevatedRecord["accounting"];
+  /** Largest first; never added into the scan's own totals. */
+  readonly measurements: readonly ElevatedMeasurement[];
+  readonly totalBytes: bigint;
 }
 
 export interface FindingsSection {
@@ -86,6 +105,8 @@ export interface ReportDependencies {
   readonly footprint: FootprintService;
   readonly files: ReportFilePort;
   readonly effectiveUserId: number;
+  /** What `--sudo` or the TUI's A measured, when anything was. */
+  readonly elevated?: { recorded(scanId: string): Promise<ElevatedRecord | undefined> };
 }
 
 /** Every section a report carries, in the order the formats present them. */
@@ -149,6 +170,11 @@ export function createReportService(dependencies: ReportDependencies): ReportSer
           );
         }
         scan = await scanSection(dependencies.explore, request.subject, snapshot, request.limit);
+        const record = await dependencies.elevated?.recorded(snapshot.scanId);
+        const elevated = record === undefined ? undefined : elevatedUnder(record, request.subject);
+        if (elevated !== undefined) {
+          scan = { ...scan, elevated };
+        }
       }
 
       let findings: FindingsSection | OmittedSection = {
@@ -186,14 +212,32 @@ export function createReportService(dependencies: ReportDependencies): ReportSer
   };
 }
 
-/** The newest snapshot one of whose roots is the path or an ancestor of it. */
+/** The newest snapshot that really reached the path, past no exclude or skipped mount. */
 async function newestCovering(
   snapshots: Pick<SnapshotService, "list">,
   subject: RawPath,
 ): Promise<SnapshotSummary | undefined> {
-  const wanted = pathBytes(subject);
   const stored = await snapshots.list();
-  return stored.find((snapshot) => snapshot.scope.roots.some((root) => isWithin(pathBytes(root), wanted)));
+  return stored.find((snapshot) =>
+    scanReaches(snapshot.scope.roots, [...snapshot.scope.excludes, ...snapshot.completeness.excludedMounts], subject),
+  );
+}
+
+/** The measurements at or below the subject, largest first, or nothing when none are. */
+function elevatedUnder(record: ElevatedRecord, subject: RawPath): ElevatedSummary | undefined {
+  const base = pathBytes(subject);
+  const measurements = record.measurements
+    .filter((measurement) => isWithin(base, pathBytes(measurement.path)))
+    .sort((left, right) => (left.bytes === right.bytes ? 0 : left.bytes > right.bytes ? -1 : 1));
+  if (measurements.length === 0) {
+    return undefined;
+  }
+  return {
+    measuredAt: record.measuredAt,
+    accounting: record.accounting,
+    measurements,
+    totalBytes: measurements.reduce((sum, measurement) => sum + measurement.bytes, 0n),
+  };
 }
 
 /**
@@ -249,6 +293,23 @@ async function scanSection(
     return unanswered(outcome.capability, "The index could not be read, so the largest entries and type totals are missing.");
   }
 
+  // The breakdown that adds up: what is directly inside, then the largest
+  // files on their own. Either is left out, not emptied, if the index cannot
+  // answer for it.
+  const own = await explore.page({ scanId: snapshot.scanId, filter: { atPath: subject }, limit: 1 });
+  const subjectRow = own.kind === "page" ? own.page.entries.find((entry) => entry.path.bytesBase64 === subject.bytesBase64) : undefined;
+  const children =
+    subjectRow === undefined
+      ? undefined
+      : await explore.page({ scanId: snapshot.scanId, filter: { parentId: subjectRow.id }, sort: "allocated", order: "descending", limit });
+  const files = await explore.page({
+    scanId: snapshot.scanId,
+    filter: { underPath: subject, kinds: ["file"] },
+    sort: "allocated",
+    order: "descending",
+    limit,
+  });
+
   return {
     included: true,
     complete: snapshot.completeness.complete,
@@ -256,6 +317,10 @@ async function scanSection(
     subject,
     snapshot,
     largest: { limit, entries: outcome.page.entries, more: outcome.page.nextCursor !== undefined },
+    ...(children?.kind === "page"
+      ? { children: { limit, entries: children.page.entries, more: children.page.nextCursor !== undefined } }
+      : {}),
+    ...(files.kind === "page" ? { largestFiles: { limit, entries: files.page.entries, more: files.page.nextCursor !== undefined } } : {}),
     typeTotals: outcome.page.typeTotals ?? [],
   };
 }

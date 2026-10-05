@@ -92,6 +92,7 @@ export async function runCli(args: readonly string[], context: CliContext): Prom
       ...(parsed.operand === undefined ? {} : { path: parsed.operand }),
       ...(accounting === undefined ? {} : { accounting }),
       crossFilesystems: parsed.flags.has("cross-filesystems"),
+      sudo: parsed.flags.has("sudo"),
       ...(optional(parsed, "throttle")),
       ...(optional(parsed, "max-depth", "maxDepth")),
     });

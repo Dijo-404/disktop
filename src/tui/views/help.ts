@@ -36,6 +36,7 @@ function tabSection(tab: TabName): Section {
           ["c", "plan cleaning the row"],
           ["o (review)", "move or compress"],
           ["S", "scan again"],
+          ["A", "measure unreadable as root"],
         ],
       ];
     case "Clean":

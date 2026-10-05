@@ -668,6 +668,20 @@ pub fn extension_of(name: &[u8]) -> String {
         Some(slash) => &name[slash + 1..],
         None => name,
     };
+    // A trailing run of all-digit suffixes is a version (`libssl.so.3`) or a
+    // rotation (`app.log.1`), and the type is the suffix before it, when
+    // there is one: `ls.1` has nothing else and keeps its number.
+    let mut end = base.len();
+    while let Some(dot) = base[..end].iter().rposition(|byte| *byte == b'.') {
+        let segment = &base[dot + 1..end];
+        let numeric = !segment.is_empty() && segment.iter().all(u8::is_ascii_digit);
+        let earlier = base[..dot].iter().rposition(|byte| *byte == b'.');
+        if !numeric || earlier.is_none_or(|earlier| earlier == 0) {
+            break;
+        }
+        end = dot;
+    }
+    let base = &base[..end];
     let Some(dot) = base.iter().rposition(|byte| *byte == b'.') else {
         return String::new();
     };
@@ -866,6 +880,20 @@ mod tests {
         assert_eq!(extension_of(b"README"), "");
         assert_eq!(extension_of(b"trailing."), "");
         assert_eq!(extension_of(b"/var/log/system.log"), "log");
+    }
+
+    #[test]
+    fn a_version_or_rotation_number_is_not_a_file_type() {
+        // A shared library's soname and version, and a rotated log, are the
+        // type before the numbers; /usr was otherwise mostly ".1", ".0", ".3".
+        assert_eq!(extension_of(b"libssl.so.3"), "so");
+        assert_eq!(extension_of(b"libLLVM.so.20.1.8"), "so");
+        assert_eq!(extension_of(b"app.log.1"), "log");
+        assert_eq!(extension_of(b"backup.7z.001"), "7z");
+        // With nothing but numbers after the name, the number is all there is.
+        assert_eq!(extension_of(b"ls.1"), "1");
+        assert_eq!(extension_of(b"syslog.2"), "2");
+        assert_eq!(extension_of(b"photo.3gp"), "3gp");
     }
 
     #[test]

@@ -29,6 +29,8 @@ export type Intent =
   | { readonly kind: "clean" }
   | { readonly kind: "undo" }
   | { readonly kind: "providers" }
+  /** Measure what the scan could not read, as root, after a confirmation. */
+  | { readonly kind: "elevate" }
   | { readonly kind: "confirm" }
   | { readonly kind: "deny" }
   | { readonly kind: "operation" }
@@ -143,6 +145,8 @@ export function intentForKey(key: string): Intent {
       return { kind: "undo" };
     case "p":
       return { kind: "providers" };
+    case "A":
+      return { kind: "elevate" };
     case "y":
     case "Y":
       return { kind: "confirm" };

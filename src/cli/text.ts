@@ -1,8 +1,9 @@
 import type { OwnerShare } from "../application/explore.js";
 import { describeCommand, type ManagerScope } from "../domain/managers.js";
-import type { Alert, Filesystem, IndexedEntry, StorageDevice, Warning } from "../domain/models.js";
+import type { Alert, Filesystem, IndexedEntry, RawPath, StorageDevice, UnmountedVolume, Warning } from "../domain/models.js";
 import type { DecidedGroup } from "../application/duplicates.js";
 import type { ScanSummary } from "../application/scan.js";
+import type { ElevatedOutcome } from "../application/elevated.js";
 import type { SnapshotDiff } from "../application/snapshots.js";
 import type { FootprintSummary, ProviderReport } from "../application/footprint.js";
 import type { TypeTotal } from "../ports/scan.js";
@@ -65,11 +66,49 @@ export function deviceLines(devices: readonly StorageDevice[], units: Units): st
   ];
 }
 
+/** What `--sudo` measured, in a few lines under the scan's own. */
+export function elevatedLines(outcome: ElevatedOutcome, units: Units): string[] {
+  switch (outcome.kind) {
+    case "nothing-unreadable":
+      return ["Nothing was unreadable, so nothing needed administrator rights."];
+    case "denied":
+      return [`Unreadable directories were not measured: ${safeLine(outcome.explanation)}`];
+    case "unavailable":
+      return [`Unreadable directories could not be measured: ${safeLine(outcome.capability.explanation)}`];
+    case "measured": {
+      const record = outcome.record;
+      const largest = [...record.measurements].sort((left, right) => (left.bytes === right.bytes ? 0 : left.bytes > right.bytes ? -1 : 1));
+      return [
+        `Measured as root  ${formatBytes(outcome.totalBytes, units)} in ${record.measurements.length} unreadable director${record.measurements.length === 1 ? "y" : "ies"} (not added to the totals above)`,
+        ...largest.slice(0, 8).map((measurement) => `  ${formatBytes(measurement.bytes, units).padStart(10)}  ${measurement.path.display}`),
+        ...(record.skipped.length > 0 ? [`  ${record.skipped.length} could not be measured (a name du cannot be given, or one that vanished)`] : []),
+      ];
+    }
+  }
+}
+
+/** Partitions with data on them that no mount reaches, so `df` never shows them. */
+export function unmountedLines(volumes: readonly UnmountedVolume[], units: Units): string[] {
+  const rows = volumes.map((volume) => ({
+    name: volume.devicePath,
+    type: volume.filesystemType,
+    size: formatBytes(volume.sizeBytes, units),
+    state: volume.state === "locked" ? "encrypted, locked" : "not mounted",
+    label: volume.label ?? "",
+  }));
+  const nameWidth = Math.max(11, ...rows.map((row) => row.name.length));
+  const typeWidth = Math.max(4, ...rows.map((row) => row.type.length));
+  return [
+    `${"Not mounted".padEnd(nameWidth)}  ${"Type".padEnd(typeWidth)}  ${"Size".padStart(10)}  ${"State".padEnd(17)}  Label`,
+    ...rows.map((row) => `${row.name.padEnd(nameWidth)}  ${row.type.padEnd(typeWidth)}  ${row.size.padStart(10)}  ${row.state.padEnd(17)}  ${row.label}`.trimEnd()),
+    "Their usage is unknown until they are mounted (or unlocked and mounted).",
+  ];
+}
+
 export function alertLines(alerts: readonly Alert[]): string[] {
   return alerts.map((alert) => `[${alert.kind}] ${alert.message}`);
 }
 
-/** Warnings go to stderr so a redirected stdout still holds only the answer. */
 /**
  * Text that did not come from Disktop, made safe to print.
  *
@@ -85,8 +124,35 @@ function safeLine(value: string): string {
   return sanitizeForDisplay(new Uint8Array(Buffer.from(value, "utf8")));
 }
 
+/** Warnings of one kind listed one by one before the rest are counted instead. */
+const WARNINGS_LISTED_PER_CODE = 3;
+
+/**
+ * One line per warning, naming the path it is about, until one kind repeats.
+ * Warnings go to stderr so a redirected stdout still holds only the answer.
+ *
+ * A scan of `/` by an ordinary user can carry hundreds of unreadable
+ * directories, and as many identical lines would bury the answer they belong
+ * to. The first few of each kind are listed with their paths and the rest are
+ * counted; `--json` still carries every one.
+ */
 export function warningLines(warnings: readonly Warning[]): string[] {
-  return warnings.map((warning) => `warning: ${warning.code}: ${safeLine(warning.message)}`);
+  const lines: string[] = [];
+  const counts = new Map<string, number>();
+  for (const warning of warnings) {
+    const seen = counts.get(warning.code) ?? 0;
+    counts.set(warning.code, seen + 1);
+    if (seen < WARNINGS_LISTED_PER_CODE) {
+      const where = warning.path === undefined ? "" : `${warning.path.display}: `;
+      lines.push(`warning: ${warning.code}: ${where}${safeLine(warning.message)}`);
+    }
+  }
+  for (const [code, count] of counts) {
+    if (count > WARNINGS_LISTED_PER_CODE) {
+      lines.push(`warning: ${code}: ${count - WARNINGS_LISTED_PER_CODE} more like this (--json lists every one)`);
+    }
+  }
+  return lines;
 }
 
 /** What one finished or partial scan measured, at 80 columns. */
@@ -113,16 +179,44 @@ export function scanLines(summary: ScanSummary, snapshotId: string, units: Units
 }
 
 /** Largest first by default; the ranking column is named in the header. */
-export function entryLines(entries: readonly IndexedEntry[], units: Units, accounting: "allocated" | "apparent"): string[] {
+/** What the scan knows about the directories it did not go inside. */
+export interface UnenteredContext {
+  readonly excludedMounts: readonly RawPath[];
+  /** Sizes measured as root afterwards, by path bytes in base64. */
+  readonly measuredAsRoot?: ReadonlyMap<string, bigint>;
+}
+
+export function entryLines(
+  entries: readonly IndexedEntry[],
+  units: Units,
+  accounting: "allocated" | "apparent",
+  unentered?: UnenteredContext,
+): string[] {
   if (entries.length === 0) {
     return ["No entries matched."];
   }
-  const rows = entries.map((entry) => ({
-    size: formatBytes(accounting === "apparent" ? entry.apparentBytes : entry.allocatedBytes, units),
-    kind: entry.kind === "directory" ? "dir" : entry.kind === "symlink" ? "link" : entry.kind === "file" ? "file" : "other",
-    note: entry.shared ? " (shared hardlink)" : "",
-    path: entry.path.display,
-  }));
+  const skipped = new Set((unentered?.excludedMounts ?? []).map((path) => path.bytesBase64));
+  const rows = entries.map((entry) => {
+    const kind = entry.kind === "directory" ? "dir" : entry.kind === "symlink" ? "link" : entry.kind === "file" ? "file" : "other";
+    // A directory without a child count was never entered: what it holds is
+    // unknown, and printing its own few bytes would read as "nearly empty".
+    if (unentered !== undefined && entry.kind === "directory" && entry.childEntries === undefined) {
+      const measured = unentered.measuredAsRoot?.get(entry.path.bytesBase64);
+      if (skipped.has(entry.path.bytesBase64)) {
+        return { size: "?", kind, note: " (another mount, not scanned)", path: entry.path.display };
+      }
+      if (measured !== undefined) {
+        return { size: formatBytes(measured, units), kind, note: " (unreadable; measured as root)", path: entry.path.display };
+      }
+      return { size: "?", kind, note: " (unreadable, size unknown)", path: entry.path.display };
+    }
+    return {
+      size: formatBytes(accounting === "apparent" ? entry.apparentBytes : entry.allocatedBytes, units),
+      kind,
+      note: entry.shared ? " (shared hardlink)" : "",
+      path: entry.path.display,
+    };
+  });
   const sizeWidth = Math.max(9, ...rows.map((row) => row.size.length));
 
   return [

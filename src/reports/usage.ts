@@ -25,7 +25,9 @@ export function filesystemUsage(filesystem: Filesystem): FilesystemUsage {
  */
 export function instantFromNanoseconds(nanoseconds: bigint): string | undefined {
   const milliseconds = nanoseconds / 1_000_000n;
-  if (nanoseconds < 0n || milliseconds > 8_640_000_000_000_000n) {
+  // Exactly zero is what a filesystem with no timestamp there reports (FAT's
+  // root), and what the helper clamps a pre-1970 time to: no time recorded.
+  if (nanoseconds <= 0n || milliseconds > 8_640_000_000_000_000n) {
     return undefined;
   }
   return new Date(Number(milliseconds)).toISOString();

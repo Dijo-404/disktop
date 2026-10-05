@@ -123,6 +123,25 @@ export function isWithin(parent: Uint8Array, child: Uint8Array): boolean {
   );
 }
 
+/**
+ * Whether a scan with these roots really reached `target`: one root is the
+ * target or an ancestor of it, and nothing the scan stayed out of — an
+ * exclude, or a mount it did not enter — lies between them. A scan of `/`
+ * that stopped at `/home` names an ancestor of every home directory and holds
+ * none of them.
+ */
+export function scanReaches(roots: readonly RawPath[], skipped: readonly RawPath[], target: RawPath): boolean {
+  const wanted = pathBytes(target);
+  return (
+    roots.some((root) => isWithin(pathBytes(root), wanted)) &&
+    !skipped.some((path) => {
+      const bytes = pathBytes(path);
+      // A skipped mount that is itself a root was walked from inside.
+      return isWithin(bytes, wanted) && !roots.some((root) => isWithin(bytes, pathBytes(root)));
+    })
+  );
+}
+
 export function bytesEqual(left: Uint8Array, right: Uint8Array): boolean {
   return left.length === right.length && left.every((byte, index) => byte === right[index]);
 }

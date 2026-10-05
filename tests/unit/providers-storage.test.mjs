@@ -106,6 +106,24 @@ test("swap is read from /proc/swaps and offers no action at all", async () => {
   assert.ok(swap.evidence.some((line) => line.includes("-2")), JSON.stringify(swap.evidence));
 });
 
+test("zram swap is memory, not disk, so it is not reported as space on a disk", async () => {
+  // This machine's own /proc/swaps: compressed RAM first, then a real partition.
+  const swaps = join(fixture.home, "swaps-with-zram");
+  await writeFile(
+    swaps,
+    "Filename\t\t\t\tType\t\tSize\t\tUsed\t\tPriority\n" +
+      "/dev/zram0                              partition\t16133116\t681160\t\t100\n" +
+      "/dev/nvme0n1p5                          partition\t8388604\t\t0\t\t-2\n",
+  );
+  try {
+    const result = await discover(createSwapProvider({ swapsPath: rawPathFromUtf8(swaps) }), environmentFor());
+    assert.deepEqual(result.findings.map((finding) => finding.title), ["Swap partition /dev/nvme0n1p5"]);
+    assert.equal(result.capability.status, "available");
+  } finally {
+    await rm(swaps, { force: true });
+  }
+});
+
 test("a machine with no swap says so rather than reporting nothing", async () => {
   const result = await discover(
     createSwapProvider({ swapsPath: rawPathFromUtf8("/does/not/exist") }),

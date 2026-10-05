@@ -24,6 +24,13 @@ export interface SnapshotScope {
   readonly maxDepth?: string;
   /** The filesystem identities the scan actually touched. */
   readonly filesystems: readonly string[];
+  /**
+   * True when the walk entered mounts of the scanned filesystem below its
+   * root, such as Btrfs subvolumes at `/home`. Snapshots taken before it did
+   * have no such field and stopped at every mount; the two do not measure the
+   * same tree.
+   */
+  readonly sameFilesystemMounts?: boolean;
 }
 
 /** One directory's subtree aggregate. Snapshots keep these, never every file. */

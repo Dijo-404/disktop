@@ -19,6 +19,7 @@
         "network": false,
         "removable": false
       }
-    ]
+    ],
+    "unmounted": []
   }
 }

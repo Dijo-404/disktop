@@ -7,6 +7,7 @@ mod guard;
 mod index;
 mod journal;
 mod manager;
+mod mounts;
 mod protocol;
 mod query;
 mod subtree;
