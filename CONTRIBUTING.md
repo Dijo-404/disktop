@@ -52,6 +52,14 @@ Do not add `rm -rf`, shell-built cleanup commands, or direct file mutation to a 
 
 Create destructive test trees under isolated temporary directories. Never aim cleanup tests at a developer's home, the CI runner home, or a real system cache. Use mount namespaces or VMs for bind mounts, symlink races, and privileged manager behavior. Test odd byte filenames, hardlinks, sparse files, permission failures, interruptions, and journal recovery for affected code. The Ubuntu, Fedora, and Arch CI container jobs are smoke checks of the build, the terminal tests, and the packed package; they are not a substitute for the host and VM checks in the support matrix.
 
+Keep read-only fixtures independent of host state too. Swap-provider tests restrict
+path facts to their temporary tree so `/swapfile` on a runner cannot become a fixture
+finding. The terminal scan-interruption test uses a temporary tree and `--throttle 1`
+to keep the real helper running until Ctrl+C arrives, including release builds in
+minimal containers where `/usr` can be scanned before the key is sent.
+Live inventory tests allow documented warnings about unreadable mounts while still
+rejecting broken-pipe errors and stack traces when an output reader exits early.
+
 ## Pull requests
 
 Keep a change focused on an owning module and its contracts. Include the relevant acceptance evidence in the pull request description. Update user documentation, schemas, and the support matrix alongside behavior changes. CI checks TypeScript, Rust, recovery, the performance budget, the four release helpers, the packed package on x86-64, ARM64, glibc, and musl, and Linux distribution smoke tests; all must pass before a phase gate can be claimed complete.
