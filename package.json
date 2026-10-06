@@ -67,10 +67,10 @@
     "prepublishOnly": "node scripts/prepublish-guard.mjs"
   },
   "devDependencies": {
-    "@types/node": "24.19.0",
+    "@types/node": "24.19.1",
     "ajv": "8.20.0",
-    "eslint": "10.11.0",
-    "typescript": "6.0.3",
+    "eslint": "10.12.0",
+    "typescript": "7.0.2",
     "typescript-eslint": "8.71.0"
   },
   "dependencies": {
