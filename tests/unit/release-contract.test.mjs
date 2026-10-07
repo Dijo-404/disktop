@@ -119,9 +119,16 @@ test("package.json is the public 1.0.0 CLI and ships only what a user needs", ()
   assert.equal(manifest.scripts.prepublishOnly, "node scripts/prepublish-guard.mjs");
   assert.match(manifest.scripts.build, /^node scripts\/clean-dist\.mjs && /, "a build starts from an empty dist/");
   assert.deepEqual(Object.keys(manifest.dependencies), ["terminal-kit"]);
+  const compilerAliases = {
+    "@typescript/native": "npm:typescript@",
+    typescript: "npm:@typescript/typescript6@",
+  };
   for (const [name, range] of Object.entries({ ...manifest.dependencies, ...manifest.devDependencies })) {
-    assert.match(range, /^\d+\.\d+\.\d+$/, `${name} is pinned to an exact version`);
+    const prefix = compilerAliases[name];
+    if (prefix !== undefined) assert.ok(range.startsWith(prefix), `${name} uses the supported compiler alias`);
+    assert.match(prefix === undefined ? range : range.slice(prefix.length), /^\d+\.\d+\.\d+$/, `${name} is pinned to an exact version`);
   }
+  for (const name of Object.keys(compilerAliases)) assert.ok(manifest.devDependencies[name], `${name} stays development-only`);
   const tsconfig = read("tsconfig.json");
   assert.doesNotMatch(tsconfig, /"(declaration|sourceMap|declarationMap)":\s*true/, "a CLI ships no .d.ts or .map files");
 });
