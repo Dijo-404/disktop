@@ -23,6 +23,16 @@ function namedHelpers(text) {
   return [...new Set(text.match(HELPER_NAME) ?? [])].sort();
 }
 
+/** One YAML job or step, bounded by the next declaration at its indentation. */
+function workflowBlock(text, header, indentation) {
+  const start = text.indexOf(`${header}\n`);
+  assert.ok(start >= 0, `missing workflow declaration: ${header.trim()}`);
+  const afterHeader = start + header.length + 1;
+  const tail = text.slice(afterHeader);
+  const next = new RegExp(`^ {0,${indentation}}\\S`, "m").exec(tail)?.index ?? tail.length;
+  return text.slice(start, afterHeader + next);
+}
+
 test("the locator and the release build name the same four helpers and checksum file", () => {
   assert.deepEqual([...HELPER_TARGETS].sort(), release.RELEASE_TARGETS.map((target) => target.name).sort());
   assert.deepEqual(release.RELEASE_TARGETS.map(release.binaryName).sort(), BINARIES);
@@ -57,6 +67,34 @@ test("CI and publication both audit npm and the native lockfile without advisory
     assert.match(text, /cargo audit --file native\/disktop-fs\/Cargo\.lock --deny warnings/, workflow);
     assert.doesNotMatch(text, /cargo audit[^\n]*--ignore\b|npm audit[^\n]*\|\|/, workflow);
   }
+});
+
+test("the publish token check and publication use the same compatible credential mapping", () => {
+  const publish = workflowBlock(read(".github/workflows/publish.yml"), "  publish:", 2);
+  const check = workflowBlock(publish, "      - name: Require the one-time first-publish token", 6);
+  const publication = workflowBlock(publish, "      - name: Publish audited v1.0.0 with provenance", 6);
+  const expected = "${{ secrets.NPM_TOKEN || secrets.DISKTOP }}";
+  for (const step of [check, publication]) {
+    const credentials = [...step.matchAll(/^          NODE_AUTH_TOKEN: (.+)$/gm)];
+    assert.equal(credentials.length, 1, "each credential consumer has exactly one step-scoped token");
+    assert.equal(credentials[0][1], expected, "NPM_TOKEN takes precedence over the DISKTOP alias");
+  }
+  assert.match(check, /if \[ -z "\$NODE_AUTH_TOKEN" \]; then[\s\S]*Missing NPM_TOKEN or DISKTOP[\s\S]*exit 1/);
+  assert.match(publication, /^        run: npm publish "\$ARCHIVE" --ignore-scripts --provenance --access public$/m);
+});
+
+test("publish credentials are confined to the two consumers in the protected publish job", () => {
+  const workflow = read(".github/workflows/publish.yml");
+  const publish = workflowBlock(workflow, "  publish:", 2);
+  const secretOrToken = /\bsecrets\s*(?:\.|\[)|\bNODE_AUTH_TOKEN\s*:/;
+  assert.doesNotMatch(workflow.replace(publish, ""), secretOrToken, "build, verify and workflow-level configuration cannot access publish credentials");
+  assert.match(publish, /^    environment: npm-publish$/m, "reviewer approval protects every token consumer");
+  assert.match(publish, /^    needs: \[build, verify\]$/m, "all artifact gates precede publication");
+  assert.match(publish, /^      id-token: write$/m, "provenance permissions remain in the protected job");
+  const check = workflowBlock(publish, "      - name: Require the one-time first-publish token", 6);
+  const publication = workflowBlock(publish, "      - name: Publish audited v1.0.0 with provenance", 6);
+  assert.doesNotMatch(publish.replace(check, "").replace(publication, ""), secretOrToken, "other protected steps also receive no token");
+  assert.deepEqual([...publish.matchAll(/\bsecrets\.([A-Za-z_][A-Za-z_0-9]*)/g)].map((match) => match[1]), ["NPM_TOKEN", "DISKTOP", "NPM_TOKEN", "DISKTOP"]);
 });
 
 test("the vendor README and ADR 0003 describe the same contract", () => {

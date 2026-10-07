@@ -9,7 +9,7 @@ and post-publication provenance and registry-install verification.
 
 | Gate | Result |
 | --- | --- |
-| `npm run check` | Typecheck/lint/build passed; 1,084 unit/contract, 128 integration, 13 recovery and 18 PTY tests passed. |
+| `npm run check` | Typecheck/lint/build passed; 1,086 unit/contract, 128 integration, 13 recovery and 18 PTY tests passed. |
 | Rust formatting, Clippy `-D warnings`, locked tests | Passed; 266 tests, no ignored tests. |
 | `npm run bench` | Seven checks passed at 1,000,000 entries; unchanged memory and latency budgets, including the category-aggregation scaling regression. |
 | Private filesystem faults | Full output, full journal, read-only source and cross-device moves passed without skips in an isolated container, with source bytes preserved on refusal. |

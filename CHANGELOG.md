@@ -17,7 +17,7 @@ release) is in progress:
   a first run on real hardware — an Arch laptop with Btrfs on LUKS, subvolume mounts, a
   Windows partition, and a locked 4 TB LUKS drive. Those hardware runs exposed
   accounting and mount-policy defects now covered by regressions. The local gate (`npm run check`,
-  the Rust format, lint, and test gates) passes: 1,084 unit and contract tests,
+  the Rust format, lint, and test gates) passes: 1,086 unit and contract tests,
   128 integration, 13 recovery, 18 PTY, and 266 helper tests. The seven ordinary
   integration skips are external-tool, namespace, second-filesystem and opt-in timer
   or disposable-manager cases; separate gates passed real cross-device/full-disk/
