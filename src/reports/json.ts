@@ -15,6 +15,7 @@ import {
   encodeScanTotals,
   encodeTypeTotal,
   encodeUnmountedVolume,
+  encodeStorageVolume,
   encodeWarning,
 } from "../cli/output.js";
 import { filesystemUsage } from "./usage.js";
@@ -59,6 +60,7 @@ export function reportDocument(report: Report): Record<string, unknown> {
       }),
       alerts: capacity.alerts.map(encodeAlert),
       unmounted: capacity.unmounted.map(encodeUnmountedVolume),
+      volumes: capacity.volumes.map(encodeStorageVolume),
     },
     scan: scan.included
       ? {

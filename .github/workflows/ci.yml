@@ -35,6 +35,8 @@ jobs:
         run: rustup toolchain install 1.93.0 --profile minimal --component rustfmt,clippy
       - name: Install npm dependencies
         run: npm ci
+      - name: Audit locked dependencies
+        run: npm audit
       - name: Check TypeScript types
         run: npm run typecheck
       - name: Lint
@@ -57,7 +59,28 @@ jobs:
         run: npm run test:pty
       # The default tree size; `npm run bench` is the million-entry run.
       - name: Scan memory and latency budget
-        run: npm run test:performance
+        env:
+          DISKTOP_REQUIRE_RELEASE_BENCHMARK: '1'
+        run: |
+          npm run build
+          npm run build:native
+          cargo build --release --locked --manifest-path native/disktop-fs/Cargo.toml
+          node --test tests/performance/*.test.mjs
+
+  dependency-security:
+    name: Rust dependency advisories
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Install pinned Rust and advisory checker
+        run: |
+          rustup toolchain install 1.93.0 --profile minimal
+          cargo install --locked cargo-audit --version 0.22.2
+      - name: Check the helper lockfile against RustSec
+        run: cargo audit --file native/disktop-fs/Cargo.lock --deny warnings
 
   release-binaries:
     name: Release helpers for four Linux targets
@@ -98,6 +121,75 @@ jobs:
           path: disktop-helpers.tar
           if-no-files-found: error
           retention-days: 7
+
+  filesystem-faults:
+    name: Full and read-only filesystem safety
+    needs: release-binaries
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: '24'
+          cache: npm
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: disktop-helpers
+          path: .release-helpers
+      - name: Prepare the application and release helpers
+        run: |
+          tar -xf .release-helpers/disktop-helpers.tar -C vendor/bin
+          npm ci
+          npm run build
+      # Keep real root ownership visible to the journal while running the app
+      # as an ordinary user. Only the disposable container receives mount
+      # capability; the checkout is read-only and all mutation uses tmpfs.
+      - name: Require the actual filesystem fault cases, without skips
+        run: >-
+          docker run --rm --cap-add SYS_ADMIN
+          --security-opt seccomp=unconfined --security-opt apparmor=unconfined
+          --env DISKTOP_TEST_REQUIRE_FILESYSTEM_FAULTS=1 --env HOME=/tmp
+          --volume "$GITHUB_WORKSPACE:/disktop:ro" --workdir /disktop
+          node:24-bookworm sh -c
+          'chmod u-s /usr/bin/mount /usr/bin/umount;
+          unshare --mount --fork setpriv --reuid "$(stat -c %u /disktop)"
+          --regid "$(stat -c %g /disktop)" --clear-groups
+          --inh-caps +sys_admin --ambient-caps +sys_admin
+          node --test tests/integration/filesystem-failures.test.mjs'
+
+  manager-actions:
+    name: Reviewed package-manager cleanup
+    needs: release-binaries
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        manager: [apt, dnf, pacman]
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: '24'
+          cache: npm
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: disktop-helpers
+          path: .release-helpers
+      - name: Prepare the application and release helpers
+        run: |
+          tar -xf .release-helpers/disktop-helpers.tar -C vendor/bin
+          npm ci
+          npm run build
+      # Only a disposable container gets the exact-command sudo rule. The app
+      # runs as an ordinary account; its checkout is mounted read-only.
+      - name: Require real scoped cleanup, verification and journal outcomes
+        run: node tests/support/managers-disposable.mjs '${{ matrix.manager }}'
 
   helper-handshake:
     name: Helper handshake
@@ -242,7 +334,7 @@ jobs:
         run: |
           case '${{ matrix.distro }}' in
             Ubuntu) apt-get update && apt-get install -y --no-install-recommends git ca-certificates curl tar gzip xz-utils util-linux bsdutils passwd ;;
-            Fedora) dnf install -y git ca-certificates tar gzip xz util-linux util-linux-script shadow-utils ;;
+            Fedora) dnf install -y git ca-certificates tar gzip xz util-linux util-linux-script shadow-utils systemd ;;
             Arch) pacman -Syu --noconfirm git ca-certificates tar gzip xz util-linux shadow ;;
           esac
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -271,7 +363,7 @@ jobs:
         shell: sh
         run: >-
           runuser -u disktop -- env "PATH=$PATH" HOME=/home/disktop DISKTOP_PACKAGE_REQUIRE_ALL_TARGETS=1
-          sh -c 'npm ci && npm run test:pty && npm run test:package'
+          sh -c 'npm ci && npm run test:pty && node --test tests/integration/managers-host.test.mjs && npm run test:package'
       # A container may not reach lsblk or every mount, which is an incomplete
       # result (3), not a failure. An operational error (2) still fails the job.
       - name: Read this container's inventory as that account

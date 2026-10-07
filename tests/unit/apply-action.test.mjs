@@ -498,3 +498,29 @@ test("as root, a stored Trash plan is refused and a manager plan still runs", as
   const applied = await managed.service.apply({ planId: manager.id, confirmed: true, acknowledgePermanent: true }, SIGNAL);
   assert.equal(applied.kind, "applied");
 });
+
+test("a cancellation before apply never reaches the action port", async () => {
+  const stored = plan();
+  const { service: apply, applied } = service(stored);
+  const controller = new AbortController();
+  controller.abort();
+  const result = await apply.apply({ planId: stored.id, confirmed: true }, controller.signal);
+  assert.equal(result.kind, "refused");
+  assert.equal(result.failure.code, "cancelled");
+  assert.deepEqual(applied, []);
+});
+
+test("cancellation while the reviewed plan loads stops before any action starts", async () => {
+  const stored = plan();
+  const controller = new AbortController();
+  let called = false;
+  const apply = createApplyService({
+    store: { async get() { controller.abort(); return stored; } },
+    actions: { async apply() { called = true; throw new Error("must not run"); } },
+    now: () => NOW,
+  });
+  const result = await apply.apply({ planId: stored.id, confirmed: true }, controller.signal);
+  assert.equal(result.kind, "refused");
+  assert.equal(result.failure.code, "cancelled");
+  assert.equal(called, false);
+});

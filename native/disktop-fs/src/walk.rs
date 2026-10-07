@@ -137,7 +137,7 @@ struct Walk<'a> {
     totals: ScanTotals,
     /// Only inodes with more than one link are remembered, so the set stays a
     /// function of how many hardlinks exist rather than of the tree's size.
-    counted_inodes: HashSet<(u64, u64)>,
+    counted_inodes: crate::inode_map::Map<()>,
     processed_bytes: u64,
     /// Counted per code once the warning list is full, so a summary can say
     /// how much was left out.
@@ -182,7 +182,7 @@ pub fn walk(
             warnings: Vec::new(),
             filesystems: Vec::new(),
         },
-        counted_inodes: HashSet::new(),
+        counted_inodes: crate::inode_map::Map::new(),
         processed_bytes: 0,
         suppressed: std::collections::BTreeMap::new(),
         filesystems: HashSet::new(),
@@ -303,6 +303,14 @@ impl Walk<'_> {
             }
         };
 
+        // Own the descriptor before the first fallible index write too.
+        let directory = match Directory::from_descriptor(descriptor) {
+            Ok(directory) => directory,
+            Err(error) => {
+                self.note_inaccessible(path, &error);
+                return Ok(());
+            }
+        };
         let id = self.sink.entry(&EntryRecord {
             parent: None,
             // A root row stores its whole absolute path; every row below it
@@ -314,13 +322,6 @@ impl Walk<'_> {
         })?;
         self.account(&metadata, false);
 
-        let directory = match Directory::from_descriptor(descriptor) {
-            Ok(directory) => directory,
-            Err(error) => {
-                self.note_inaccessible(path, &error);
-                return Ok(());
-            }
-        };
         self.filesystems.insert(metadata.device);
 
         let mut stack = vec![Frame {
@@ -391,7 +392,7 @@ impl Walk<'_> {
                 }
             };
 
-            let shared = self.already_counted(&metadata);
+            let shared = self.already_counted(&metadata)?;
             let broken =
                 metadata.kind == EntryKind::Symlink && !sys::target_exists(descriptor, &name);
             let parent_id = frame.id;
@@ -472,6 +473,24 @@ impl Walk<'_> {
                 return Ok(());
             }
         };
+
+        // A directory may have been replaced between statx and openat2. Its
+        // new children do not belong under the old indexed identity.
+        match sys::metadata_of(descriptor) {
+            Ok(live)
+                if live.device == metadata.device
+                    && live.inode == metadata.inode
+                    && live.kind == EntryKind::Directory => {}
+            _ => {
+                sys::close(descriptor);
+                self.note_churn(
+                    &path,
+                    &io::Error::other("the directory was replaced before it could be opened"),
+                );
+                self.attribute_unentered(stack, &metadata);
+                return Ok(());
+            }
+        }
 
         match Directory::from_descriptor(descriptor) {
             Ok(directory) => {
@@ -569,13 +588,13 @@ impl Walk<'_> {
 
     /// An inode reached through a second hardlink is recorded, but its bytes
     /// are attributed once, to the first path the walk saw.
-    fn already_counted(&mut self, metadata: &Metadata) -> bool {
+    fn already_counted(&mut self, metadata: &Metadata) -> io::Result<bool> {
         if metadata.link_count <= 1 || metadata.kind == EntryKind::Directory {
-            return false;
+            return Ok(false);
         }
-        !self
+        Ok(!self
             .counted_inodes
-            .insert((metadata.device, metadata.inode))
+            .insert((metadata.device, metadata.inode), ())?)
     }
 
     fn account(&mut self, metadata: &Metadata, shared: bool) {
@@ -783,6 +802,82 @@ mod tests {
             throttle_bytes_per_second: None,
             max_depth: None,
         }
+    }
+
+    #[test]
+    fn an_index_write_failure_closes_the_scan_root_descriptor() {
+        let sandbox = Sandbox::new("walk-index-error-fd");
+        struct Fails;
+        impl ScanSink for Fails {
+            fn entry(&mut self, _: &EntryRecord<'_>) -> io::Result<i64> {
+                Err(io::Error::other("index full"))
+            }
+            fn finish_directory(&mut self, _: i64, _: &DirectoryTotals) -> io::Result<()> {
+                unreachable!()
+            }
+            fn progress(&mut self, _: &Progress) {
+                unreachable!()
+            }
+        }
+        for _ in 0..32 {
+            assert!(
+                walk(
+                    &options(sandbox.path()),
+                    &mut Fails,
+                    &AtomicBool::new(false)
+                )
+                .is_err()
+            );
+        }
+        let descriptors = std::fs::read_dir("/proc/self/fd").unwrap();
+        for descriptor in descriptors.flatten() {
+            assert_ne!(
+                std::fs::read_link(descriptor.path()).ok().as_deref(),
+                Some(sandbox.path()),
+                "a failed scan retained an open root directory"
+            );
+        }
+    }
+
+    #[test]
+    fn a_directory_replaced_after_it_was_indexed_is_never_descended_into() {
+        let sandbox = Sandbox::new("walk-replaced-directory");
+        sandbox.directory(b"child");
+        sandbox.file(b"child/reviewed", 1);
+        struct Replaces<'a> {
+            root: &'a std::path::Path,
+            collector: Collector,
+        }
+        impl ScanSink for Replaces<'_> {
+            fn entry(&mut self, record: &EntryRecord<'_>) -> io::Result<i64> {
+                let id = self.collector.entry(record)?;
+                if record.name == b"child" {
+                    std::fs::rename(self.root.join("child"), self.root.join("old-child"))?;
+                    std::fs::create_dir(self.root.join("child"))?;
+                    std::fs::write(self.root.join("child/unreviewed"), b"new")?;
+                }
+                Ok(id)
+            }
+            fn finish_directory(&mut self, id: i64, totals: &DirectoryTotals) -> io::Result<()> {
+                self.collector.finish_directory(id, totals)
+            }
+            fn progress(&mut self, snapshot: &Progress) {
+                self.collector.progress(snapshot);
+            }
+        }
+        let mut sink = Replaces {
+            root: sandbox.path(),
+            collector: Collector::default(),
+        };
+        let totals = walk(&options(sandbox.path()), &mut sink, &AtomicBool::new(false)).unwrap();
+        assert!(!totals.complete);
+        assert!(
+            totals
+                .warnings
+                .iter()
+                .any(|warning| warning.code == "changed-during-scan")
+        );
+        assert!(!sink.collector.rows.iter().any(|row| row.1 == b"unreviewed"));
     }
 
     #[test]

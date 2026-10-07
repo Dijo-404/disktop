@@ -5,14 +5,22 @@
   "status": "complete",
   "exitCode": 0,
   "data": {
-    "capability": { "status": "available", "explanation": "ok" },
+    "capability": {
+      "status": "available",
+      "explanation": "ok"
+    },
     "devices": [],
     "filesystems": [
       {
         "id": "fs-259-2",
         "type": "ext4",
         "source": "/dev/nvme0n1p2",
-        "mounts": [{ "bytesBase64": "Lw==", "display": "/" }],
+        "mounts": [
+          {
+            "bytesBase64": "Lw==",
+            "display": "/"
+          }
+        ],
         "totalBytes": 981450162176,
         "freeBytes": "121332867072",
         "availableBytes": "71341047808",
@@ -20,6 +28,7 @@
         "removable": false
       }
     ],
-    "unmounted": []
+    "unmounted": [],
+    "volumes": []
   }
 }

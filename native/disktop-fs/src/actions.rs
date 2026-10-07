@@ -17,6 +17,7 @@
 
 use crate::archive;
 use crate::content;
+use crate::directory_names::{Names, Store};
 use crate::guard::{self, Fingerprint, Guard, GuardContext};
 use crate::journal::{Counts, Identity, Journal, Outcome, State};
 use crate::sys::{self, EntryKind};
@@ -47,6 +48,8 @@ pub(crate) enum Checkpoint {
     /// A target was revalidated, its Trash name reserved, and it is about to
     /// be renamed into Trash.
     Reserved,
+    /// An item in Trash was identified and is about to be restored.
+    Restoring,
 }
 
 #[cfg(test)]
@@ -453,9 +456,15 @@ fn hardlink_one(
             Outcome::Skipped,
         );
     }
+    match sys::xattrs_equal(keep.descriptor, compared.as_raw_fd()) {
+        Ok(true) => {}
+        Ok(false) => return refuse("metadata-incompatible", "The files have different ACLs or extended attributes. Linking would discard this file's metadata, so neither file was changed.".to_owned(), Outcome::Failed),
+        Err(error) => return refuse("metadata-incompatible", format!("ACLs and extended attributes could not be compared, so neither file was changed: {error}"), Outcome::Failed),
+    }
     // The gate. A digest said these were probably identical; this is the only
     // thing that says they are. See docs/adr/0006.
-    let identical = content::bytes_equal(keep.descriptor, compared.as_raw_fd());
+    let identical =
+        content::bytes_equal_cancellable(keep.descriptor, compared.as_raw_fd(), cancelled);
     match identical {
         Ok(true) => {}
         Ok(false) => {
@@ -469,7 +478,11 @@ fn hardlink_one(
         }
         Err(error) => {
             return refuse(
-                "permission-denied",
+                if transfer::is_cancelled(&error) {
+                    "cancelled"
+                } else {
+                    "permission-denied"
+                },
                 format!("The two files could not be compared, so neither was changed: {error}"),
                 Outcome::Failed,
             );
@@ -563,7 +576,9 @@ fn hardlink_one(
     // guess. Anything else is exchanged straight back.
     let swapped_out = sys::metadata_at(parent.descriptor(), &staging);
     let unchanged = matches!(&swapped_out, Ok(held) if held.device == live.device && held.inode == live.inode)
-        && same_file(compared.as_raw_fd(), &live);
+        && same_file(compared.as_raw_fd(), &live)
+        && same_file(keep.descriptor, &keep.metadata)
+        && sys::xattrs_equal(keep.descriptor, compared.as_raw_fd()).unwrap_or(false);
     drop(compared);
     if !unchanged {
         let report = match sys::renameat_exchange(
@@ -656,6 +671,9 @@ fn same_file(descriptor: libc::c_int, reviewed: &sys::Metadata) -> bool {
             && now.inode == reviewed.inode
             && now.apparent_bytes == reviewed.apparent_bytes
             && now.modified_nanoseconds == reviewed.modified_nanoseconds
+            && now.owner_id == reviewed.owner_id
+            && now.group_id == reviewed.group_id
+            && now.permissions == reviewed.permissions
     })
 }
 
@@ -2454,6 +2472,7 @@ fn restore_one(
 
     // No-replace again: an undo that overwrote whatever is at the original
     // path now would undo one loss by causing another.
+    checkpoint(Checkpoint::Restoring);
     let moved = sys::renameat_no_replace(
         source.descriptor(),
         &source.name,
@@ -2462,6 +2481,23 @@ fn restore_one(
     );
 
     let report = match moved {
+        Ok(())
+            if !sys::metadata_at(destination.descriptor(), &destination.name).is_ok_and(
+                |arrived| identity.is_some_and(|recorded| recorded.unchanged(&arrived)),
+            ) =>
+        {
+            let rolled_back = sys::renameat_no_replace(
+                destination.descriptor(),
+                &destination.name,
+                source.descriptor(),
+                &source.name,
+            )
+            .and_then(|()| make_rename_durable(source.descriptor(), destination.descriptor()));
+            match rolled_back {
+                Ok(()) => refuse("changed-target", "The item in Trash was replaced just before restoration, so its replacement was put back in Trash and the original location was left empty.".to_owned(), Outcome::Skipped),
+                Err(error) => refuse("changed-target", format!("The item in Trash changed just before restoration and could not be put back. Check the original location and Trash before retrying: {error}"), Outcome::Uncertain),
+            }
+        }
         Ok(()) => match make_rename_durable(destination.descriptor(), source.descriptor()) {
             Ok(()) => {
                 remove_trash_metadata(from);
@@ -2839,15 +2875,12 @@ fn unremovable_inside(parent: libc::c_int, name: &[u8]) -> std::io::Result<Optio
 
     struct Frame {
         directory: sys::Directory,
-        names: Vec<Vec<u8>>,
+        names: Names,
         path: Vec<u8>,
     }
-    fn enter(descriptor: libc::c_int, path: Vec<u8>) -> std::io::Result<Frame> {
+    fn enter(descriptor: libc::c_int, path: Vec<u8>, store: &Store) -> std::io::Result<Frame> {
         let mut directory = sys::Directory::from_descriptor(descriptor)?;
-        let mut names = Vec::new();
-        while let Some(name) = directory.next_name()? {
-            names.push(name);
-        }
+        let names = Names::read(&mut directory, store, &AtomicBool::new(false))?;
         Ok(Frame {
             directory,
             names,
@@ -2858,9 +2891,14 @@ fn unremovable_inside(parent: libc::c_int, name: &[u8]) -> std::io::Result<Optio
     if !credentials.may_empty(&top) {
         return Ok(Some(name.to_vec()));
     }
-    let mut stack = vec![enter(open_for_removal(parent, name)?, name.to_vec())?];
+    let store = Store::default();
+    let mut stack = vec![enter(
+        open_for_removal(parent, name)?,
+        name.to_vec(),
+        &store,
+    )?];
     while let Some(frame) = stack.last_mut() {
-        let Some(child) = frame.names.pop() else {
+        let Some(child) = frame.names.pop()? else {
             stack.pop();
             continue;
         };
@@ -2883,7 +2921,7 @@ fn unremovable_inside(parent: libc::c_int, name: &[u8]) -> std::io::Result<Optio
             return Err(crate::subtree::too_deep());
         }
         let opened = open_for_removal(descriptor, &child)?;
-        stack.push(enter(opened, path)?);
+        stack.push(enter(opened, path, &store)?);
     }
     Ok(None)
 }
@@ -3013,7 +3051,7 @@ fn remove_entry_as(
 fn remove_children(descriptor: libc::c_int, removal: Removal) -> std::io::Result<()> {
     struct Frame {
         directory: sys::Directory,
-        names: Vec<Vec<u8>>,
+        names: Names,
         /// The name this directory has in the one above it, which is what is
         /// removed once it is empty. The top directory is the caller's.
         entered_as: Option<Vec<u8>>,
@@ -3024,13 +3062,13 @@ fn remove_children(descriptor: libc::c_int, removal: Removal) -> std::io::Result
     // unspecified, and a walk that silently missed one would report a tree as
     // gone while something was still in it. Memory follows the widest
     // directory times the depth, not the size of the tree.
-    fn enter(descriptor: libc::c_int, entered_as: Option<Vec<u8>>) -> std::io::Result<Frame> {
+    fn enter(
+        descriptor: libc::c_int,
+        entered_as: Option<Vec<u8>>,
+        store: &Store,
+    ) -> std::io::Result<Frame> {
         let mut directory = sys::Directory::from_descriptor(descriptor)?;
-        let mut names = Vec::new();
-        while let Some(name) = directory.next_name()? {
-            names.push(name);
-        }
-        names.reverse();
+        let names = Names::read(&mut directory, store, &AtomicBool::new(false))?;
         Ok(Frame {
             directory,
             names,
@@ -3038,9 +3076,10 @@ fn remove_children(descriptor: libc::c_int, removal: Removal) -> std::io::Result
         })
     }
 
-    let mut stack = vec![enter(descriptor, None)?];
+    let store = Store::default();
+    let mut stack = vec![enter(descriptor, None, &store)?];
     while let Some(frame) = stack.last_mut() {
-        let Some(name) = frame.names.pop() else {
+        let Some(name) = frame.names.pop()? else {
             let finished = stack.pop().expect("the frame being read is on the stack");
             let entered_as = finished.entered_as.clone();
             // Closed before it is removed, so nothing holds the directory open
@@ -3072,7 +3111,7 @@ fn remove_children(descriptor: libc::c_int, removal: Removal) -> std::io::Result
         if removal == Removal::Staged {
             let _ = sys::fchmod(child, PRIVATE_DIRECTORY_MODE);
         }
-        stack.push(enter(child, Some(name))?);
+        stack.push(enter(child, Some(name), &store)?);
     }
     Ok(())
 }
@@ -4698,6 +4737,115 @@ mod tests {
             b"the same words"
         );
         assert!(leftovers(&sandbox).is_empty(), "{:?}", leftovers(&sandbox));
+    }
+
+    fn set_attribute(path: &std::path::Path, value: &[u8]) -> bool {
+        use std::os::unix::ffi::OsStrExt;
+        let path = std::ffi::CString::new(path.as_os_str().as_bytes()).unwrap();
+        let name = c"user.disktop-test";
+        let status = unsafe {
+            libc::setxattr(
+                path.as_ptr(),
+                name.as_ptr(),
+                value.as_ptr().cast(),
+                value.len(),
+                0,
+            )
+        };
+        if status == 0 {
+            return true;
+        }
+        assert_eq!(
+            std::io::Error::last_os_error().raw_os_error(),
+            Some(libc::EOPNOTSUPP)
+        );
+        false
+    }
+
+    #[test]
+    fn hardlink_replacement_preserves_a_duplicates_different_extended_attributes() {
+        use std::os::unix::fs::MetadataExt;
+        let sandbox = duplicates("link-xattrs");
+        let path = sandbox.path().join("work/copy.txt");
+        if !set_attribute(&path, b"metadata that must survive") {
+            return;
+        }
+        let inode = std::fs::metadata(&path).unwrap().ino();
+        let request = linking(&sandbox, b"work/keep.txt", &[b"work/copy.txt"]);
+        let (summary, items) =
+            collect(|report| run_dedup_hardlink(&request, report, &AtomicBool::new(false)));
+        assert_eq!(summary.ok().expect("the action ran").completed, 0);
+        assert_eq!(items[0].reason, Some("metadata-incompatible"));
+        assert_eq!(std::fs::metadata(path).unwrap().ino(), inode);
+    }
+
+    #[test]
+    fn metadata_changed_after_the_compare_is_exchanged_back_without_releasing_it() {
+        use std::os::unix::fs::MetadataExt;
+        let sandbox = duplicates("link-xattrs-race");
+        let path = sandbox.path().join("work/copy.txt");
+        if !set_attribute(&path, b"same")
+            || !set_attribute(&sandbox.path().join("work/keep.txt"), b"same")
+        {
+            return;
+        }
+        let inode = std::fs::metadata(&path).unwrap().ino();
+        let request = linking(&sandbox, b"work/keep.txt", &[b"work/copy.txt"]);
+        let changing = path.clone();
+        at_checkpoint(move |at| {
+            if at == Checkpoint::Compared {
+                assert!(set_attribute(&changing, b"an edit after comparison"));
+            }
+        });
+        let (summary, items) =
+            collect(|report| run_dedup_hardlink(&request, report, &AtomicBool::new(false)));
+        assert_eq!(summary.ok().expect("the action ran").completed, 0);
+        assert_eq!(items[0].reason, Some("changed-target"));
+        assert_eq!(std::fs::metadata(path).unwrap().ino(), inode);
+        assert!(leftovers(&sandbox).is_empty());
+    }
+
+    #[test]
+    fn a_trash_entry_replaced_just_before_restore_is_put_back_without_claiming_undo() {
+        let sandbox = Sandbox::new("restore-race");
+        sandbox.directory(b"state");
+        sandbox.directory(b"work");
+        sandbox.file(b"work/notes.txt", 64);
+        let request = TrashRequest {
+            plan_id: "plan-0123456789abcd".to_owned(),
+            journal_directory: sandbox.path().join("state"),
+            home_trash_directory: joined(&sandbox, b"trash-home"),
+            targets: vec![reviewed(&joined(&sandbox, b"work/notes.txt"), 64)],
+        };
+        let (summary, _) = collect(|report| run_trash(&request, report, &AtomicBool::new(false)));
+        let summary = summary.ok().expect("the action ran");
+        let held = sandbox.path().join("trash-home/files/notes.txt");
+        let changing = held.clone();
+        at_checkpoint(move |at| {
+            if at == Checkpoint::Restoring {
+                std::fs::rename(&changing, changing.with_extension("saved")).unwrap();
+                std::fs::write(&changing, b"somebody else's Trash entry").unwrap();
+            }
+        });
+        let restore = RestoreRequest {
+            journal_directory: request.journal_directory,
+            journal_id: summary.journal_id,
+        };
+        let (summary, items) =
+            collect(|report| run_restore(&restore, report, &AtomicBool::new(false)));
+        assert_eq!(summary.ok().expect("the action ran").completed, 0);
+        assert_eq!(items[0].reason, Some("changed-target"));
+        assert!(!sandbox.path().join("work/notes.txt").exists());
+        assert_eq!(
+            std::fs::read(&held).unwrap(),
+            b"somebody else's Trash entry"
+        );
+        assert!(
+            sandbox
+                .path()
+                .join("trash-home/info/notes.txt.trashinfo")
+                .exists()
+        );
     }
 
     #[test]

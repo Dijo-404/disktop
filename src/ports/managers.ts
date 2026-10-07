@@ -81,14 +81,15 @@ export interface ManagerVerification {
 
 export interface ManagerAdapter {
   readonly id: ManagerAdapterId;
-  discover(): Promise<ManagerDiscovery>;
-  preview(action: ManagerActionId, parameters: Readonly<Record<string, string>>): Promise<ManagerPreviewOutcome>;
-  preflight(scope: ManagerScope): Promise<PreflightResult>;
+  /** A bounded discovery refuses with EOVERFLOW rather than presenting a sampled count as exact. */
+  discover(signal?: AbortSignal): Promise<ManagerDiscovery>;
+  preview(action: ManagerActionId, parameters: Readonly<Record<string, string>>, signal?: AbortSignal): Promise<ManagerPreviewOutcome>;
+  preflight(scope: ManagerScope, signal?: AbortSignal): Promise<PreflightResult>;
   verify(scope: ManagerScope, attempted: ReadonlySet<number>, runs: readonly CommandRun[]): Promise<ManagerVerification>;
   spacePath(scope: ManagerScope): Promise<string | undefined>;
 }
 
 export interface ManagerInventoryPort {
-  discover(): Promise<readonly ManagerDiscovery[]>;
-  preview(action: ManagerActionId, parameters: Readonly<Record<string, string>>): Promise<ManagerPreviewOutcome>;
+  discover(signal?: AbortSignal): Promise<readonly ManagerDiscovery[]>;
+  preview(action: ManagerActionId, parameters: Readonly<Record<string, string>>, signal?: AbortSignal): Promise<ManagerPreviewOutcome>;
 }

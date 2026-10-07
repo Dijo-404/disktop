@@ -110,8 +110,20 @@ export function createNativeScanner(
       }
     },
 
-    async query(query: EntryQuery): Promise<EntryPage> {
+    async query(query: EntryQuery, signal?: AbortSignal): Promise<EntryPage> {
+      signal?.throwIfAborted();
       const client = await connect(options.start);
+      let closing: Promise<void> | undefined;
+      const close = (): Promise<void> => closing ??= client.close();
+      const abort = (): void => {
+        // query-index is synchronous in this dedicated helper and cannot
+        // read a cancel request while SQLite is working. This process owns
+        // only a read query: close it with the client's bounded shutdown.
+        // The same promise is awaited below, including any shutdown error.
+        void close().catch(() => undefined);
+      };
+      signal?.addEventListener("abort", abort, { once: true });
+      if (signal?.aborted === true) abort();
       try {
         const event = await client.request("query-index", {
           scanId: query.scanId,
@@ -123,7 +135,8 @@ export function createNativeScanner(
           ...(query.cursor === undefined ? {} : { cursor: query.cursor }),
           ...(query.includeTypeTotals === undefined ? {} : { includeTypeTotals: query.includeTypeTotals }),
           ...(query.includeOwnerTotals === undefined ? {} : { includeOwnerTotals: query.includeOwnerTotals }),
-        });
+        }, signal);
+        signal?.throwIfAborted();
         // The scan ID is what turns the helper's "not in the index" into a
         // stale index a surface can explain, rather than a failure.
         refuseError(event, client, query.scanId);
@@ -134,8 +147,12 @@ export function createNativeScanner(
           ...(page.typeTotals === undefined ? {} : { typeTotals: page.typeTotals.map(toTypeTotal) }),
           ...(page.ownerTotals === undefined ? {} : { ownerTotals: page.ownerTotals.map(toOwnerTotal) }),
         };
+      } catch (error) {
+        signal?.throwIfAborted();
+        throw error;
       } finally {
-        await client.close();
+        signal?.removeEventListener("abort", abort);
+        await close();
       }
     },
   };

@@ -1,6 +1,6 @@
 import { randomBytes } from "node:crypto";
 import { constants } from "node:fs";
-import { access, link, lstat, open, rename, stat, unlink } from "node:fs/promises";
+import { access, link, lstat, open, stat, unlink } from "node:fs/promises";
 import type { OperationFailure } from "../domain/errors.js";
 import type { RawPath, Warning } from "../domain/models.js";
 import { pathBytes, rawPathFromBytes } from "../domain/paths.js";
@@ -105,11 +105,14 @@ export function createReportFiles(options: ReportFileOptions = {}): ReportFilePo
             failure: codeOf(error) === "EEXIST" ? await existsFailure(target, bytes) : failureFor(error, target, directory),
           };
         }
-        const claimed = await publishWithoutLinks(staging, bytes, target, directory);
-        if (claimed !== undefined) {
-          return claimed;
-        }
-        return finish(directory, content, warnings);
+        await unlink(staging).catch(() => undefined);
+        return {
+          kind: "refused",
+          failure: {
+            code: "unsupported",
+            message: `${display(directory)} cannot publish a report without overwriting a concurrent file because this filesystem does not support hard links (${codeOf(error)}). Choose an output directory on a filesystem with hard-link support, such as ext4 or Btrfs. Nothing was published.`,
+          },
+        };
       }
 
       try {
@@ -124,46 +127,6 @@ export function createReportFiles(options: ReportFileOptions = {}): ReportFilePo
       return finish(directory, content, warnings);
     },
   };
-}
-
-/**
- * Publish on a filesystem that cannot link: claim the name with an exclusive
- * create, then rename the finished staging file over the empty file this call
- * just made. The rename only ever replaces that placeholder, so the promise
- * not to replace anything still holds, and the name holds either nothing,
- * the placeholder, or the whole report.
- */
-async function publishWithoutLinks(
-  staging: Buffer,
-  bytes: Buffer,
-  target: RawPath,
-  directory: Buffer,
-): Promise<ReportWriteOutcome | undefined> {
-  let placeholder;
-  try {
-    const handle = await open(bytes, constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | constants.O_NOFOLLOW, REPORT_FILE_MODE);
-    placeholder = await handle.stat({ bigint: true });
-    await handle.close();
-  } catch (error) {
-    await unlink(staging).catch(() => undefined);
-    return {
-      kind: "refused",
-      failure: codeOf(error) === "EEXIST" ? await existsFailure(target, bytes) : failureFor(error, target, directory),
-    };
-  }
-  try {
-    await rename(staging, bytes);
-  } catch (error) {
-    await unlink(staging).catch(() => undefined);
-    // Take the placeholder back only if it is still the empty file made
-    // above; anything else at that name is somebody else's.
-    const now = await lstat(bytes, { bigint: true }).catch(() => undefined);
-    if (now !== undefined && now.ino === placeholder.ino && now.dev === placeholder.dev && now.size === 0n) {
-      await unlink(bytes).catch(() => undefined);
-    }
-    return { kind: "refused", failure: failureFor(error, target, directory) };
-  }
-  return undefined;
 }
 
 async function finish(directory: Buffer, content: Uint8Array, warnings: Warning[]): Promise<ReportWriteOutcome> {

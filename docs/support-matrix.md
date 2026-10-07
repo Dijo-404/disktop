@@ -1,6 +1,9 @@
 # Linux support matrix
 
-Status: **release targets, not validated support claims**. Phase 0 has fixed the minimums below; no platform row is certified yet, and Phase 8 supplies install and acceptance evidence before publishing the single `1.0.0` release.
+Status: **release-candidate validation matrix**. Rows distinguish automated coverage,
+actual host checks and remaining unproven environments. The [validation record](release-readiness.md)
+contains the final local engineering evidence. Hardware/VM gaps below and protected
+release approval remain publication gates for the single `1.0.0` release.
 
 ## Fixed minimums
 
@@ -54,12 +57,12 @@ Node 24 remains the [LTS baseline](https://nodejs.org/en/about/previous-releases
 
 | Environment | Planned checks | Current status |
 | --- | --- | --- |
-| Ubuntu | TypeScript/Rust checks, dpkg and apt adapters, integration tests, PTY tests, packed install. | CI container (`ubuntu:24.04`): PTY tests, inventory, and the package smoke test as an unprivileged account; a root-owned global install run as root. Adapters not validated. |
-| Fedora | rpm/dnf adapters and Linux integration tests in container or VM. | CI container (`fedora:latest`): the same checks. Adapters not validated. |
-| Arch | pacman adapter and Linux integration tests in container or VM. | CI container (`archlinux:latest`): the same checks. Adapters not validated. |
-| Host or VM with systemd and representative mounts | User timer, scoped privilege, mount topology, SMART where hardware permits, Btrfs/ZFS where available. | Partly, on one Arch host (kernel 6.18, util-linux 2.42): Btrfs on LUKS with six subvolume mounts scanned as one filesystem (291 GiB of 331 GiB used found, the rest unreadable to the user or shared between files), a FAT `/boot` and the pseudo filesystems refused, an unmounted NTFS partition and a locked LUKS drive listed, and the read-only measurement as root through pkexec's desktop dialog (583 unreadable directories, 55.9 GiB). User timer, manager cleanup under privilege, SMART, and ZFS not validated. |
+| Ubuntu | TypeScript/Rust checks, dpkg and apt adapters, integration tests, PTY tests, packed install. | CI container (`ubuntu:24.04`): PTY, read-only manager discovery/kernel preview, inventory and package smoke tests as an ordinary account; root inventory from a root-owned global install. Actual apt cache cleanup passed through a reviewed plan, exact-command sudo and native journal in a disposable Ubuntu 24.04 container. Kernel purge and other manager mutations still need separate checks. |
+| Fedora | rpm/dnf adapters and Linux integration tests in container or VM. | CI container (`fedora:latest`): the same checks, including dnf cache discovery and kernel preview. Actual DNF5 cache cleanup passed through the real reviewed pipeline on Fedora 44; old-kernel removal remains unproven. |
+| Arch | pacman adapter and Linux integration tests in container or VM. | CI container (`archlinux:latest`): the same checks, including pacman cache discovery. Actual pacman cache cleanup passed through the real reviewed pipeline in a disposable Arch container. |
+| Host or VM with systemd and representative mounts | User timer, scoped privilege, mount topology, SMART where hardware permits, Btrfs/ZFS where available. | Partly, on one Arch host (kernel 6.18, util-linux 2.42): Btrfs on LUKS with six subvolume mounts scanned as one filesystem (291 GiB of 331 GiB used found, the rest unreadable to the user or shared between files), a FAT `/boot` and the pseudo filesystems refused, an unmounted NTFS partition and a locked LUKS drive listed, and the read-only measurement as root through pkexec's desktop dialog (583 unreadable directories, 55.9 GiB). The current timer and mount-fault checks are recorded below. Non-cache privileged manager cleanup, SMART health and ZFS remain unvalidated. |
 | WSL | Detect Windows mounts and exclude `/mnt/c` by default; explicit selection behavior. | Not validated. |
-| tmux and SSH terminal | 80×24 layout, mouse fallback, `NO_COLOR`, ASCII rendering, and terminal restoration. | tmux: `tests/pty/tmux.test.mjs` drew at 80×24, redrew on resize, said so below the minimum, and gave the shell's screen back on `q`, on an Arch host with tmux 3.7c; it is skipped where tmux is not installed. `NO_COLOR` and ASCII are covered by the PTY suite outside tmux. Mouse inside tmux and SSH not validated. |
+| tmux and SSH terminal | 80×24 layout, mouse fallback, `NO_COLOR`, ASCII rendering, and terminal restoration. | tmux drew at 80×24, handled resize and below-minimum states, and restored the shell screen. A real rootless loopback SSH server passed ASCII/NO_COLOR output and quit/SIGINT restoration, including exact stty state. Mouse input is exercised by PTY tests; mouse through a remote SSH/tmux chain remains unproven. |
 
 Containers cannot prove hardware health, real mount behavior, privilege prompts, or terminal behavior for every host. Those cases need a host or VM check before a support claim is made. Linux distribution names above describe the CI targets, not a complete compatibility list.
 
@@ -67,19 +70,36 @@ Containers cannot prove hardware health, real mount behavior, privilege prompts,
 
 | Adapter | Distribution | Checked here |
 | --- | --- | --- |
-| apt (`apt-get clean`), old kernels (`dpkg --purge`, simulated with `apt-get -s purge`) | Debian, Ubuntu | Fixture output; not run on a host. |
-| dnf (`dnf clean packages`), old kernels (`rpm -e`, tested with `rpm -e --test`) | Fedora | Fixture output; not run on a host. |
-| pacman (`pacman -Sc`) | Arch | Cache read on an Arch host (read-only); kernels reported as nothing to remove, since pacman keeps one version. |
+| apt (`apt-get clean`), old kernels (`dpkg --purge`, simulated with `apt-get -s purge`) | Debian, Ubuntu | Actual cache cleanup through scoped sudo and the native journal on Ubuntu 24.04; kernel removal remains fixture coverage. |
+| dnf (`dnf clean packages`), old kernels (`rpm -e`, tested with `rpm -e --test`) | Fedora | Actual DNF5 cache cleanup through scoped sudo and the native journal on Fedora 44; kernel removal remains fixture coverage. |
+| pacman (`pacman -Sc`) | Arch | Actual cache cleanup through scoped sudo and the native journal in Arch; host cache discovery remains read-only and kernels report nothing to remove. |
 | journald (`journalctl --vacuum-size`) | systemd hosts | Disk usage read on an Arch host (read-only). |
 | Snap (`snap remove --revision`) | Ubuntu and others | Fixture output; not run on a host. |
 | Flatpak (`flatpak uninstall --unused`) | any | Installations listed on an Arch host (read-only). |
 | Docker, Podman | any | Docker read on an Arch host (read-only), including the named-versus-anonymous volume split; Podman from fixture output. |
 | systemd-tmpfiles (`--clean`, crash prefixes) | systemd hosts | Dry runs on an Arch host. |
 | `sudo -n` refusal | any | Observed on an Arch host where sudo needs a password. |
-| systemd user timer | systemd hosts | Units written and removed under a throwaway configuration directory; the host's own user manager was not changed. |
+| systemd user timer | systemd hosts | Real user-manager runtime install, fixture alert execution, disable and removal passed using throwaway unit files. Existing timer units are preserved. |
 
-No test suite runs a real manager command that changes anything. Apply is exercised
-against the real helper journal with a fake command runner.
+The mandatory disposable-manager gate runs real apt/DNF5/pacman cache cleanup as an
+ordinary account, with only the exact reviewed command granted sudo rights. It refuses
+host execution, writable repository mounts, cache mounts and any cache containing more
+than its root-certified fixture. It checks plan review, started/finished journal
+acknowledgements, removal, live verification, preserved package databases/sentinel data,
+complete history and refused undo. No fake command runner participates. Other manager
+mutations retain real-helper/fake-runner integration coverage and the host gaps above.
+
+The 2026-10-07 host inventory found both connected NVMe SSDs and all eleven persistent
+partition/mapper/LVM entries, including EFI/reserved/swap partitions. Actual private
+mounts proved same-filesystem coverage and bind/other-filesystem exclusions. The
+isolated container fault gate proved full output, full journal, read-only source and
+cross-device actions without skips. The real user timer and SSH checks are now
+validated, as are actual apt/DNF5/pacman cache mutations in disposable containers.
+Non-cache manager mutations, SMART hardware health, ZFS and WSL remain the outstanding
+environment checks. The packed CLI's actual SMART queries under read-only NVMe device
+mappings reported permission denial and incomplete discovery safely, without claiming
+health or widening privileges. Earlier read-only scoped `du`/pkexec and Btrfs
+host results above remain evidence for those narrower behaviors.
 
 ## Optional dependency behavior
 
