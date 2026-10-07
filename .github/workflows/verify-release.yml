@@ -1,0 +1,95 @@
+name: Verify the published initial npm release
+
+on:
+  pull_request:
+    paths:
+      - .github/workflows/verify-release.yml
+      - .github/workflows/publish.yml
+      - scripts/verify-registry-release.mjs
+      - tests/unit/registry-release.test.mjs
+  workflow_dispatch:
+    inputs:
+      expected_commit:
+        description: Full source commit pointed to by v1.0.0
+        required: true
+        type: string
+      expected_sha256:
+        description: SHA-256 of the exact audited disktop-1.0.0.tgz publication artifact
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    if: github.repository == 'Dijo-404/disktop'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    env:
+      EXPECTED_COMMIT: ${{ github.event_name == 'pull_request' && '3d6448560d19d75b27fce75765819d89f36be09e' || inputs.expected_commit }}
+      EXPECTED_SHA256: ${{ github.event_name == 'pull_request' && 'a2deddd76c137e349370fb839b887baff14b3ec27c649f1ce809616bf8b39acd' || inputs.expected_sha256 }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          path: verification
+          persist-credentials: false
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: '24'
+          package-manager-cache: false
+      - name: Validate exact source and artifact inputs
+        run: |
+          node --input-type=module <<'NODE'
+          import { validateInputs } from './verification/scripts/verify-registry-release.mjs';
+          validateInputs(process.env.EXPECTED_COMMIT, process.env.EXPECTED_SHA256);
+          NODE
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: refs/tags/v1.0.0
+          path: source
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Require the exact tagged public source
+        working-directory: source
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$EXPECTED_COMMIT"
+          test "$(git rev-list -n 1 refs/tags/v1.0.0)" = "$EXPECTED_COMMIT"
+          node --input-type=module <<'NODE'
+          import assert from 'node:assert/strict';
+          import fs from 'node:fs';
+          const pkg = JSON.parse(fs.readFileSync('package.json', 'utf8'));
+          assert.equal(pkg.name, 'disktop');
+          assert.equal(pkg.version, '1.0.0');
+          assert.equal(pkg.private, false);
+          assert.equal(pkg.repository.url, 'git+https://github.com/Dijo-404/disktop.git');
+          NODE
+      - name: Install reviewed source test dependencies
+        working-directory: source
+        run: npm ci --ignore-scripts
+      - name: Verify the exact public registry artifact
+        run: node verification/scripts/verify-registry-release.mjs download "$RUNNER_TEMP/disktop-registry"
+      - name: Clean registry install and cryptographic signature audit
+        run: |
+          set -euo pipefail
+          mkdir "$RUNNER_TEMP/disktop-registry/consumer"
+          cd "$RUNNER_TEMP/disktop-registry/consumer"
+          printf '%s\n' '{"name":"disktop-release-verification","private":true,"version":"1.0.0"}' > package.json
+          npm install --ignore-scripts --save-exact --no-audit --registry=https://registry.npmjs.org disktop@1.0.0
+          npm audit signatures --json --include-attestations --registry=https://registry.npmjs.org > ../signatures.json
+      - name: Require verified provenance identity and installed artifact
+        run: |
+          set -euo pipefail
+          node verification/scripts/verify-registry-release.mjs audit "$RUNNER_TEMP/disktop-registry" "$RUNNER_TEMP/disktop-registry/signatures.json"
+          test "$("$RUNNER_TEMP/disktop-registry/consumer/node_modules/.bin/disktop" --version)" = '1.0.0'
+          "$RUNNER_TEMP/disktop-registry/consumer/node_modules/.bin/disktop" --help
+      - name: Run all consumer checks against the exact registry tarball
+        working-directory: source
+        env:
+          DISKTOP_PACKAGE_TARBALL: ${{ runner.temp }}/disktop-registry/disktop-1.0.0.tgz
+          DISKTOP_PACKAGE_REQUIRE_ALL_TARGETS: '1'
+        run: node --test tests/package/package.test.mjs
+      - name: Confirm the registry artifact remains unchanged
+        working-directory: ${{ runner.temp }}/disktop-registry
+        run: printf '%s  %s\n' "$EXPECTED_SHA256" 'disktop-1.0.0.tgz' | sha256sum --check --strict

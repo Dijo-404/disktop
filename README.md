@@ -22,21 +22,18 @@ versioned JSON for everything the UI does.
   protected paths that no flag can override, a durable journal, and results that keep
   "selected", "moved to Trash", and "free space actually gained" apart.
 
-> **Release information:** check [npm](https://www.npmjs.com/package/disktop) for
-> `1.0.0` availability and the
+> **Disktop 1.0.0 is available on [npm](https://www.npmjs.com/package/disktop/v/1.0.0).**
+> Published on 2026-10-07; the registry artifact, provenance and clean consumer
+> execution have been verified. The
 > [release record](https://github.com/Dijo-404/disktop/blob/main/docs/release-readiness.md)
-> for publication and verification status. Remaining hardware and VM checks are
-> assigned to testers after initial publication; automated release checks and
-> protected workflow approval remain required. Before npm publication, run from a
-> checkout (see [Development](#development)).
+> records the reviewed artifact and postpublication verification status. Remaining
+> hardware and VM checks are assigned to testers and remain unvalidated.
 
 ## Install
 
-Once `1.0.0` is published to npm:
-
 ```sh
-npx disktop            # run without installing
-npm install -g disktop # or install the `disktop` command
+npx disktop@1.0.0            # run without installing
+npm install -g disktop@1.0.0 # or install the `disktop` command
 ```
 
 Requirements:
