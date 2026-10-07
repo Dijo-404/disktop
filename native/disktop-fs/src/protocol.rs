@@ -3120,6 +3120,8 @@ mod tests {
 
     #[test]
     fn moving_to_trash_reports_what_it_moved_apart_from_what_the_filesystem_shows() {
+        use std::os::unix::fs::MetadataExt;
+
         const SIZE: u64 = 16 * 1024 * 1024;
         let sandbox = Sandbox::new("trash-space");
         sandbox.directory(b"work");
@@ -3137,27 +3139,40 @@ mod tests {
             })
             .collect();
         let written = sandbox.path().join("work/big.bin");
-        std::fs::write(&written, bytes).unwrap();
+        std::fs::write(&written, &bytes).unwrap();
         std::fs::File::open(&written).unwrap().sync_all().unwrap();
+        let original = std::fs::metadata(&written).unwrap();
 
         let mut file = sandbox.bytes();
         file.extend_from_slice(b"/work/big.bin");
         let events = run_trash("trash-2", &sandbox, &[target(&file, SIZE)]);
         let result = &completion(&events, "trash-2")["result"];
 
+        assert_eq!(result["state"], "complete");
+        assert_eq!(result["completed"], "1");
+        assert_eq!(result["failed"], "0");
+        assert_eq!(result["selectedBytes"], SIZE.to_string());
         assert_eq!(result["bytesMovedToTrash"], SIZE.to_string());
-        let before: u64 = result["freeBytesBefore"].as_str().unwrap().parse().unwrap();
-        let after: u64 = result["freeBytesAfter"].as_str().unwrap().parse().unwrap();
-        // Same filesystem, so the rename gave nothing back. The two numbers are
-        // reported separately precisely so this is visible rather than implied.
-        // They are readings of the whole filesystem, which every other test in
-        // this binary is writing to at the same time, and a directory `fsync`
-        // anywhere can commit their allocations between the two. Half of what
-        // moved is what tells "freed it" apart from that.
-        assert!(
-            after.abs_diff(before) < SIZE / 2,
-            "a Trash move on one filesystem frees nothing: {before} -> {after}"
-        );
+        for key in ["freeBytesBefore", "freeBytesAfter"] {
+            result[key]
+                .as_str()
+                .unwrap()
+                .parse::<u64>()
+                .expect("free space is reported as its own unsigned decimal reading");
+        }
+        // Other tests and host processes allocate on this filesystem between
+        // the two readings. Prove that Trash retained the same allocated inode
+        // and all its bytes instead of attributing their free-space changes to
+        // this rename.
+        let trashed = sandbox.path().join("trash-home/files/big.bin");
+        let retained = std::fs::metadata(&trashed).unwrap();
+        assert!(!written.exists());
+        assert_eq!(retained.dev(), original.dev());
+        assert_eq!(retained.ino(), original.ino());
+        assert_eq!(retained.len(), original.len());
+        assert_eq!(retained.blocks(), original.blocks());
+        assert_eq!(retained.nlink(), original.nlink());
+        assert_eq!(std::fs::read(&trashed).unwrap(), bytes);
     }
 
     #[test]
