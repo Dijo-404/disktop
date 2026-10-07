@@ -1,10 +1,10 @@
 # Disktop: single-release implementation blueprint
 
-Status: the blueprint the `1.0.0` release candidate was built from. Every feature below is implemented; the tree is the code layout as planned, and the note under "Target repository layout" says where a planned file was folded into a neighbour. `disktop` is the npm package and executable name; check registry availability once more immediately before the one publication.
+Status: the blueprint the published `1.0.0` was built from. Every feature below is implemented; the tree is the code layout as planned, and the note under "Target repository layout" says where a planned file was folded into a neighbour. `disktop` is the npm package and executable name. The [release record](docs/release-readiness.md) distinguishes the immutable released source and artifact from later repository documentation.
 
 ## Release contract
 
-There will be **one initial public npm release, `1.0.0`**. Phases in this document are internal build gates, not separate public versions or an MVP release. Every requested Linux feature must be implemented, documented, and tested before publishing. Local builds and CI artifacts are allowed. Missing external tools, hardware, or privileges must produce an explicit capability state; they cannot crash the app or silently pretend a feature succeeded. The platform abstraction ships in `1.0.0`; macOS implementation is outside this Linux release.
+The **initial public npm release is `1.0.0`**, published on 2026-10-07. Phases in this document are internal build gates, not separate public versions or an MVP release. Every requested Linux feature must be implemented, documented, and tested before publishing, subject to the dated manual-check deferral below. Local builds and CI artifacts are allowed. Missing external tools, hardware, or privileges must produce an explicit capability state; they cannot crash the app or silently pretend a feature succeeded. The platform abstraction ships in `1.0.0`; macOS implementation is outside this Linux release.
 
 On **2026-10-07 the release owner deferred** the remaining real SMART health, ZFS,
 WSL and non-cache manager mutation checks to testers after initial publication.
@@ -18,10 +18,14 @@ The user journey is: open a fast dashboard → identify a full filesystem → in
 
 ### Current implementation boundary
 
-The package is the `1.0.0` release candidate. **Phases 0 through 7 are complete**;
-Phase 8, whole-product validation and the sole release, remains open. Its automated
-publication prerequisites must pass before publishing; registry installation and
-provenance verification follow publication. The manual-check deferral above applies.
+The package is the published `1.0.0`. **Phases 0 through 8 are complete**, subject to
+the dated manual-check deferral. The reviewed source passed
+all 19 CI jobs, and the protected workflow passed its build/artifact gates and submitted
+the release. Its immediate registry check failed with 404 before the version became
+publicly available. Subsequent exact-artifact, clean registry consumer and cryptographic
+signature/provenance checks passed independently. A read-only remote verification
+recovery run is pending in the [release record](docs/release-readiness.md); it does not
+republish the release. Deferred environments remain unvalidated.
 
 Phase 0 delivered the contracts, not features: normative JSON Schemas for CLI output (`schemas/cli/v1/`) and the helper protocol (`schemas/native/v1/`) with valid and invalid examples under contract test; byte-exact path handling and the protected-path refusal policy in `src/domain`; XDG locations, configuration defaults, and a strict TOML subset reader in `src/storage`; the source dependency rule enforced by `eslint.config.mjs` and proven by `tests/unit/dependency-rules.test.mjs`; the filesystem fixture generator in `tests/fixtures/generate.mjs`; the fixed kernel and architecture minimums in `docs/support-matrix.md`; the action threat model in `docs/threat-model.md`; and ADRs 0001 to 0005.
 
@@ -106,11 +110,13 @@ containers. All four release helpers build with verified checksums;
 the packed artifact passes clean installation on Node 24/26 and glibc/musl. The
 million-entry resource/latency gate and both dependency advisory checks pass. See
 [the validation record](docs/release-readiness.md) and [support matrix](docs/support-matrix.md).
-Publication still requires green CI at the reviewed commit, every automated release
-gate and approval through the guarded workflow. The remaining hardware/VM checks
-are tester follow-up under the dated release-owner decision above.
-Phase 8 includes publication and subsequent provenance/registry-install verification,
-so it is not marked complete before those happen.
+The reviewed commit passed all 19 CI jobs, every automated release gate and protected
+publication approval. `1.0.0` is published, and its exact registry artifact, clean
+consumer execution and cryptographic provenance have been verified independently
+after the original workflow's immediate registry check failed. Phase 8 is complete
+under the dated release-owner decision; the remaining hardware/VM checks remain
+unvalidated tester follow-up. Later repository documentation does not change the
+immutable `v1.0.0` source or published tarball.
 
 ## Supported environment and packaging
 
@@ -426,7 +432,7 @@ Phase 8 includes the sole initial publication.
 | 5. Advanced analysis and actions **(complete)** | Implement staged duplicate hashes, stale evidence, keep rules, hardlink replacement, cross-disk move, compression, custom rules, and action verification. | Final byte compare, metadata compatibility, copy/hash/fsync, partial-failure recovery, rule limits, and explicit irreversible-action tests pass. |
 | 6. Managed Linux cleanup and alerts **(complete)** | Implement apt/dnf/pacman, journald, Snap, Flatpak, Docker/Podman including volumes, old kernels, `/var/crash`/core policy, system tmpfiles, scoped privilege requests, per-user breakdown, `notify-send` and systemd timer. | Distro-specific adapter tests, actual apt/DNF5/pacman cache cleanup and executed host/VM checks pass; other real manager mutations remain tester follow-up in the support matrix. Every manager action has bounded scope, live preflight, apply, verify, permission, and unsupported cases, with preview where the manager supports it. Timer install/uninstall changes only user units and never cleans automatically. |
 | 7. Complete surfaces **(complete)** | Finish all TUI views, themes, vim/mouse/help, search, config, JSON/CSV/HTML exports, all CLI commands, completions, readable help, README, demo GIF, and no-telemetry statement. | A user can complete every core journey at 80×24; all commands work with no TTY and valid stdout; exports survive malicious filenames. |
-| 8. Whole-product validation and sole release | Run Linux distro CI, native builds, PTY and recovery suites, package smoke tests, benchmarks, docs review, support-matrix checks, and guarded publish workflow. | Automated acceptance and release gates pass; no unresolved critical deletion or data-loss bug; packed tarball and `npx` work on clean accounts. Keep the owner-deferred manual environments explicitly unvalidated. Publish `1.0.0` once through protected approval, then verify provenance and install from the registry. |
+| 8. Whole-product validation and sole release **(complete under the dated manual-check deferral)** | Run Linux distro CI, native builds, PTY and recovery suites, package smoke tests, benchmarks, docs review, support-matrix checks, and guarded publish workflow. | Automated acceptance and release gates passed; no unresolved critical deletion or data-loss bug; packed tarball and clean registry execution passed. `1.0.0` was published through protected approval; its original workflow failed the immediate registry check, then independent registry artifact, consumer and cryptographic provenance checks passed. Owner-deferred manual environments remain explicitly unvalidated. |
 
 ## Feature acceptance matrix
 

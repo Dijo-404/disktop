@@ -1,6 +1,6 @@
 # Agent guide for Disktop
 
-Read [PLAN.md](PLAN.md) before implementation. It is the product scope, target folder structure, interface map, phase gates, and acceptance checklist. **Phases 0 through 7 are complete; Phase 8 (whole-product validation and the sole `1.0.0` release) is the remaining gate.** The contracts are normative and enforced:
+Read [PLAN.md](PLAN.md) before implementation. It is the product scope, target folder structure, interface map, phase gates, and acceptance checklist. **Phases 0 through 8 are complete under the release owner's dated manual-check deferral; `1.0.0` is published and independently verified.** The [release record](docs/release-readiness.md) identifies the immutable tag/artifact, the original workflow's registry-check failure and subsequent successful verification. Never move `v1.0.0`, rebuild its published artifact or republish that version. The contracts are normative and enforced:
 `schemas/cli/v1/` and `schemas/native/v1/` define public JSON and the helper protocol,
 `src/domain/paths.ts` and `src/domain/protected-paths.ts` define path bytes and the refusal
 policy, `src/storage/` defines configuration, `eslint.config.mjs` enforces the dependency rule,

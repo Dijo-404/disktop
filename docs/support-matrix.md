@@ -1,11 +1,12 @@
 # Linux support matrix
 
-Status: **release-candidate validation matrix**. Rows distinguish automated coverage,
+Status: **1.0.0 validation matrix**. Rows distinguish automated coverage,
 actual host checks and remaining unproven environments. The [validation record](release-readiness.md)
-contains the local engineering evidence and the release owner's 2026-10-07 decision
+records publication and independent registry/provenance verification on 2026-10-07, local engineering
+evidence and the release owner's 2026-10-07 decision
 to defer the remaining hardware/VM checks to testers after the initial publication.
-Deferred checks are still unvalidated. Automated release gates and protected
-workflow approval remain required for the single `1.0.0` release.
+Deferred checks are still unvalidated. The published artifact passed the automated
+release gates and protected workflow approval; that does not validate the deferred hosts.
 
 ## Fixed minimums
 
@@ -48,7 +49,7 @@ workflow builds the release the same way; see [adr/0003](adr/0003-prebuilt-binar
 | Build `--release --locked` with `cargo zigbuild`; ELF machine, interpreter, stripping, and glibc floor checked against each name; `SHA256SUMS` written and checked with `sha256sum --check --strict` | x86-64 runner, all four targets |
 | `hello` handshake: package version and a release build checksum | each glibc build on its own runner (Ubuntu 24.04) and on AlmaLinux 8 (glibc 2.28); each musl build on Alpine and on the glibc runner |
 | Package smoke test: allowlist, modes, checksums, global install and `npm exec` with a throwaway home and npm cache, `--help`, `--version`, `--json`, `devices --json`, a scan through the packaged helper, and refusal of a tampered helper or `SHA256SUMS` | Node 24 and 26 on x86-64 and ARM64 runners (glibc builds); `node:24-alpine` on x86-64 and ARM64 (musl builds); Ubuntu, Fedora, and Arch containers |
-| The publish artifact | the same smoke test on the one tarball that will be published: x86-64 glibc in the build job, then ARM64 glibc and x86-64 and ARM64 musl, each checked by SHA-256 first |
+| The published artifact | the same smoke test on the one released tarball: x86-64 glibc in the build job, then ARM64 glibc and x86-64 and ARM64 musl, each checked by SHA-256 first |
 
 Locally, `npm run test:package` runs the same smoke test once `vendor/bin/` holds this
 machine's helper (`node scripts/build-release.mjs --target host`).

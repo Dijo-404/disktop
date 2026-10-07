@@ -320,7 +320,20 @@ jobs:
       - name: Verify registry package and provenance
         run: |
           set -euo pipefail
-          test "$(npm view disktop@1.0.0 version)" = '1.0.0'
+          # Newly published metadata can lag the successful upload. Retry only
+          # this read: publication above must never be repeated by this loop.
+          for attempt in $(seq 1 32); do
+            if version="$(npm view disktop@1.0.0 version --registry=https://registry.npmjs.org --fetch-retries=0 --fetch-timeout=10000)"; then
+              test "$version" = '1.0.0'
+              break
+            fi
+            if [ "$attempt" -eq 32 ]; then
+              echo '::error::Published disktop@1.0.0 remained unavailable after 32 registry checks.'
+              exit 1
+            fi
+            echo "Registry metadata is not available yet; retry $attempt of 32 in 10 seconds."
+            sleep 10
+          done
           mkdir -p "$RUNNER_TEMP/disktop-registry-check"
           npm install --prefix "$RUNNER_TEMP/disktop-registry-check" --ignore-scripts disktop@1.0.0
           cd "$RUNNER_TEMP/disktop-registry-check"
