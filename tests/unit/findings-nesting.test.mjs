@@ -65,12 +65,19 @@ test("category totals stay fast at the most findings discovery can return", () =
   const findings = Array.from({ length: 1250 }, (_, index) =>
     finding(`p:${index}`, [`/home/u/project-${index % 300}/item-${index}`, `/home/u/project-${index % 300}`], "app-cache", BigInt(index)),
   );
-  // This is a CPU-work budget. Concurrent test files can deschedule this
-  // process; their runtime must not look like quadratic aggregation here.
-  // The dedicated performance suite still measures wall-clock latency.
-  const started = process.cpuUsage();
-  categoryTotals(findings);
-  const usage = process.cpuUsage(started);
-  const elapsed = (usage.user + usage.system) / 1000;
-  assert.ok(elapsed < 50, `categoryTotals used ${elapsed.toFixed(1)} ms of CPU for 1250 findings`);
+  // Concurrent test files can deschedule this process, and a cold call can
+  // coincide with V8's background compilation or garbage collection. Measure
+  // the same CPU budget over warm samples; the isolated performance suite also
+  // enforces the wall-clock limit and rejects quadratic scaling.
+  for (let index = 0; index < 10; index += 1) categoryTotals(findings);
+  const samples = [];
+  for (let index = 0; index < 31; index += 1) {
+    const started = process.cpuUsage();
+    const totals = categoryTotals(findings);
+    const usage = process.cpuUsage(started);
+    samples.push((usage.user + usage.system) / 1000);
+    assert.deepEqual(totals, [{ category: "app-cache", findings: 1250, bytes: 780625n, unmeasured: 0, nested: 0 }]);
+  }
+  const elapsed = samples.sort((left, right) => left - right)[15];
+  assert.ok(elapsed < 50, `categoryTotals used ${elapsed.toFixed(1)} ms median CPU for 1250 findings`);
 });
