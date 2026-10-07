@@ -65,8 +65,12 @@ test("category totals stay fast at the most findings discovery can return", () =
   const findings = Array.from({ length: 1250 }, (_, index) =>
     finding(`p:${index}`, [`/home/u/project-${index % 300}/item-${index}`, `/home/u/project-${index % 300}`], "app-cache", BigInt(index)),
   );
-  const started = performance.now();
+  // This is a CPU-work budget. Concurrent test files can deschedule this
+  // process; their runtime must not look like quadratic aggregation here.
+  // The dedicated performance suite still measures wall-clock latency.
+  const started = process.cpuUsage();
   categoryTotals(findings);
-  const elapsed = performance.now() - started;
-  assert.ok(elapsed < 50, `categoryTotals took ${elapsed.toFixed(1)} ms for 1250 findings`);
+  const usage = process.cpuUsage(started);
+  const elapsed = (usage.user + usage.system) / 1000;
+  assert.ok(elapsed < 50, `categoryTotals used ${elapsed.toFixed(1)} ms of CPU for 1250 findings`);
 });
