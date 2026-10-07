@@ -34,6 +34,7 @@
     "schemas/cli/v1/README.md",
     "README.md",
     "LICENSE",
+    "THIRD_PARTY_NOTICES",
     "CHANGELOG.md"
   ],
   "engines": {
@@ -52,6 +53,8 @@
     "build": "node scripts/clean-dist.mjs && tsc -p tsconfig.json && node scripts/set-executable.mjs",
     "build:native": "cargo build --locked --manifest-path native/disktop-fs/Cargo.toml",
     "build:release-native": "node scripts/build-release.mjs",
+    "licenses:native": "node scripts/native-notices.mjs",
+    "licenses:check": "node scripts/native-notices.mjs --check",
     "typecheck": "tsc --noEmit -p tsconfig.json",
     "lint": "eslint src",
     "test": "npm run build && node --test tests/unit/*.test.mjs tests/contract/*.test.mjs",
@@ -63,7 +66,7 @@
     "fixtures": "node scripts/generate-fixtures.mjs",
     "check": "npm run typecheck && npm run lint && npm test && npm run test:integration && npm run test:recovery && npm run test:pty",
     "bench": "npm run build && cargo build --release --locked --manifest-path native/disktop-fs/Cargo.toml && DISKTOP_REQUIRE_RELEASE_BENCHMARK=1 DISKTOP_BENCH_ENTRIES=1000000 node --test tests/performance/*.test.mjs",
-    "prepack": "npm run build",
+    "prepack": "node scripts/native-notices.mjs --check-inputs && npm run build",
     "prepublishOnly": "node scripts/prepublish-guard.mjs"
   },
   "devDependencies": {

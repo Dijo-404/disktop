@@ -43,6 +43,19 @@ Node 24's own Linux binaries require it, so no machine that can run the JavaScri
 refused by the helper. Each binary reports the package version and a build checksum, the
 SHA-256 of the source it was built from, in `hello`.
 
+The tarball also carries `THIRD_PARTY_NOTICES`, including full licence texts and
+copyright attributions for the locked Rust dependencies, embedded SQLite and
+Zstandard C code, and the pinned Rust and musl runtimes. Proc-macro dependencies
+are included conservatively for the code they generate. The generator selects MIT
+where a crate offers that option and retains additional Unicode obligations;
+Zstandard uses its BSD option. `npm run licenses:native` regenerates the notices
+from Cargo's dependency graphs for all four targets and reviewed runtime licence
+assets in `scripts/licenses/`. The release builder recomputes them before compiling;
+unit tests and `npm pack` check the source fingerprints and complete notice body
+without requiring Cargo. Package tests verify that the exact reviewed notices
+survive packing. A native dependency or pinned toolchain change must refresh and
+review the notices before the release gate can pass.
+
 If no binary matches, or the binary or `SHA256SUMS` fails a check, or the kernel lacks a
 primitive an action needs, Disktop reports that capability state and disables the
 affected feature. A packaged binary that fails a check is refused outright, with the

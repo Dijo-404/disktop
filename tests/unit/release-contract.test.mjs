@@ -111,6 +111,7 @@ test("package.json is the public 1.0.0 CLI and ships only what a user needs", ()
     "schemas/cli/v1/README.md",
     "README.md",
     "LICENSE",
+    "THIRD_PARTY_NOTICES",
     "CHANGELOG.md",
   ]);
   for (const hook of ["preinstall", "install", "postinstall", "prepare"]) {
