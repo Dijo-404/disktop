@@ -29,8 +29,8 @@ export function createInstalledAppsProvider(packages: PackageInventoryPort): Fin
     version: VERSION,
     categories: ["installed-app"],
 
-    async probe() {
-      const inventories = await packages.list();
+    async probe(_environment, signal) {
+      const inventories = await packages.list(signal);
       const answered = inventories.filter((inventory) => inventory.capability.status === "available");
       if (answered.length === 0) {
         return { status: "missing-tool", explanation: "No supported package manager answered on this machine." };
@@ -41,8 +41,8 @@ export function createInstalledAppsProvider(packages: PackageInventoryPort): Fin
       };
     },
 
-    async discover(environment) {
-      const inventories = await packages.list();
+    async discover(environment, signal) {
+      const inventories = await packages.list(signal);
       const findings: Finding[] = [];
       const warnings: Warning[] = [];
       let complete = true;

@@ -82,3 +82,38 @@ test("sha256sum writes what the locator reads, and checks what the release write
   const checked = spawnSync("sha256sum", ["--check", "--strict", CHECKSUM_FILE], { cwd: directory, encoding: "utf8" });
   assert.equal(checked.status, 0, checked.stdout + checked.stderr);
 });
+
+test("checksum inputs cannot redirect or block reads and huge binaries are bounded", async () => {
+  const { chmod, open, rm, symlink } = await import("node:fs/promises");
+  const { pathToFileURL } = await import("node:url");
+  const { locateHelper } = await import("../../dist/native/locator.js");
+  const directory = await mkdtemp(join(tmpdir(), "disktop-locator-safety-"));
+  const target = helperTarget();
+  const name = helperBinaryName(target);
+  const binary = join(directory, name);
+  const sums = join(directory, CHECKSUM_FILE);
+  const contents = Buffer.from("#!/bin/false\n");
+  const recorded = `${createHash("sha256").update(contents).digest("hex")}  ${name}\n`;
+  const location = pathToFileURL(`${directory}/`);
+  try {
+    await writeFile(binary, contents);
+    await chmod(binary, 0o755);
+    await writeFile(join(directory, "actual-checksums"), recorded);
+    await symlink(join(directory, "actual-checksums"), sums);
+    assert.equal((await locateHelper(target, location)).found, false, "checksum symlinks are not trusted");
+    await rm(sums);
+    assert.equal(spawnSync("mkfifo", [sums]).status, 0);
+    const began = Date.now();
+    assert.equal((await locateHelper(target, location)).found, false);
+    assert.ok(Date.now() - began < 2000, "a checksum FIFO is refused without waiting for a writer");
+    await rm(sums);
+    await writeFile(sums, recorded);
+    const handle = await open(binary, "w");
+    try { await handle.truncate(256 * 1024 * 1024 + 1); } finally { await handle.close(); }
+    const enormous = await locateHelper(target, location);
+    assert.equal(enormous.found, false);
+    assert.match(enormous.capability.explanation, /bounded regular file/);
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});

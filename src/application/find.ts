@@ -132,7 +132,7 @@ export function createFindService(
           order: "descending",
           limit: boundedLimit(request.limit ?? DEFAULT_PAGE),
           ...(request.cursor === undefined ? {} : { cursor: request.cursor }),
-        });
+        }, signal);
         if (page.kind === "refused") {
           return page;
         }
@@ -165,7 +165,7 @@ export function createFindService(
         order: "descending",
         limit: boundedLimit(request.limit ?? DEFAULT_PAGE),
         ...(request.cursor === undefined ? {} : { cursor: request.cursor }),
-      });
+      }, signal);
 
       if (outcome.kind === "refused") {
         return outcome;
@@ -191,9 +191,10 @@ async function pageOf(
   index: Pick<ExploreService, "page">,
   request: FindRequest,
   query: Parameters<ExploreService["page"]>[0],
+  signal: AbortSignal,
 ): Promise<ExploreOutcome | { readonly kind: "refused"; readonly failure: OperationFailure }> {
   try {
-    return await index.page(query);
+    return await index.page(query, signal);
   } catch (error) {
     if (error instanceof StaleScanIndex) {
       return {

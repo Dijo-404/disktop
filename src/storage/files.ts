@@ -1,6 +1,6 @@
 import { randomBytes } from "node:crypto";
 import { constants } from "node:fs";
-import { open, rename, unlink } from "node:fs/promises";
+import { link, open, rename, unlink } from "node:fs/promises";
 import { dirname } from "node:path";
 
 /**
@@ -59,7 +59,12 @@ export async function readOwnFile(
  * itself survives a power cut. A failure at any step removes the staging file
  * rather than leaving `.partial` litter for the next reader to skip.
  */
-export async function writeFileAtomically(path: string, contents: string, mode: number): Promise<void> {
+export async function writeFileAtomically(
+  path: string,
+  contents: string,
+  mode: number,
+  options: { readonly replaceExisting: boolean } = { replaceExisting: true },
+): Promise<void> {
   const staging = `${path}.${randomBytes(6).toString("hex")}.partial`;
   const handle = await open(staging, "wx", mode);
   let published = false;
@@ -73,7 +78,14 @@ export async function writeFileAtomically(path: string, contents: string, mode: 
     } finally {
       await handle.close();
     }
-    await rename(staging, path);
+    if (options.replaceExisting) {
+      await rename(staging, path);
+    } else {
+      // link publishes a private staged record atomically and refuses an
+      // existing name. A reviewed plan cannot be replaced under the same ID.
+      await link(staging, path);
+      await unlink(staging);
+    }
     published = true;
   } finally {
     if (!published) {

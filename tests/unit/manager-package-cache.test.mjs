@@ -1,8 +1,12 @@
 import assert from "node:assert/strict";
+import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { test } from "node:test";
 import { managerScope } from "../../dist/domain/managers.js";
 import { rawPathFromUtf8 } from "../../dist/domain/paths.js";
 import { createPackageCacheAdapters } from "../../dist/platform/linux/managers/package-cache.js";
+import { createPathProbe } from "../../dist/platform/linux/probe.js";
 
 function fakePaths(tree) {
   const facts = (path) => {
@@ -133,6 +137,24 @@ test("dnf reads both cache layouts, and a missing cache is no proposal", async (
   assert.deepEqual(proposal.items, [{ id: "vim-9.1-1.fc40.x86_64.rpm", bytes: 70n }]);
   const empty = adapters({ tree: {} }).dnf;
   assert.deepEqual((await empty.discover()).proposals, []);
+});
+
+test("dnf cache discovery preserves invalid-byte repository paths", async () => {
+  const root = await mkdtemp(join(tmpdir(), "disktop-dnf-cache-"));
+  try {
+    const packages = Buffer.concat([Buffer.from(`${root}/repository-`), Buffer.from([0xff]), Buffer.from("/packages")]);
+    await mkdir(packages, { recursive: true });
+    await writeFile(Buffer.concat([packages, Buffer.from("/vim-9.1-1.fc40.x86_64.rpm")]), "package");
+    const all = createPackageCacheAdapters({
+      tools: fakeTools(), paths: createPathProbe(), installed: async (tool) => tool === "dnf", roots: { dnf: [root] },
+    });
+    const dnf = all.find((adapter) => adapter.id === "dnf");
+    const discovery = await dnf.discover();
+    assert.deepEqual(discovery.proposals[0].items.map((item) => item.id), ["vim-9.1-1.fc40.x86_64.rpm"]);
+    assert.ok(discovery.proposals[0].estimatedBytes > 0n);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
 });
 
 function aptScope(ids) {

@@ -46,7 +46,7 @@ export type StyleName =
   | "badgeDanger"
   | "badgeInfo";
 
-export type ColorDepth = "none" | "16" | "256";
+export type ColorDepth = "none" | "16" | "256" | "truecolor";
 
 export interface Glyphs {
   /** Eighth-block steps for a fine bar, from one eighth to a full cell. */
@@ -206,9 +206,11 @@ export function selectTheme(environment: TerminalEnvironment, isTty: boolean): T
   const noColor = environment.NO_COLOR !== undefined && environment.NO_COLOR !== "";
   const color: ColorDepth = noColor
     ? "none"
-    : /256|truecolor|direct/i.test(term) || /^(truecolor|24bit)$/i.test(environment.COLORTERM ?? "")
-      ? "256"
-      : "16";
+    : /truecolor|direct/i.test(term) || /^(truecolor|24bit)$/i.test(environment.COLORTERM ?? "")
+      ? "truecolor"
+      : /256/i.test(term)
+        ? "256"
+        : "16";
   const forcedAscii = environment.DISKTOP_ASCII !== undefined && environment.DISKTOP_ASCII !== "" && environment.DISKTOP_ASCII !== "0";
   const unicode = !forcedAscii && term !== "linux" && localeIsUtf8(environment);
   return buildTheme(color, unicode);

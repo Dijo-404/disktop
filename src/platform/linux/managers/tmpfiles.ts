@@ -43,11 +43,14 @@ interface DryRun {
 }
 
 export function createTmpfilesAdapter(ports: TmpfilesPorts): ManagerAdapter {
-  async function dryRun(action: ManagerActionId): Promise<DryRun | undefined> {
+  async function dryRun(action: ManagerActionId, signal?: AbortSignal, reportDenied = false): Promise<DryRun | undefined> {
+    signal?.throwIfAborted();
     const [command] = MANAGER_ACTIONS[action].commands([], {});
     const commandArguments = [...(command?.arguments ?? [])];
     commandArguments.splice(commandArguments.indexOf("--clean") + 1, 0, "--dry-run");
-    const answer = await ports.tools.run("systemd-tmpfiles", commandArguments);
+    const answer = await ports.tools.run("systemd-tmpfiles", commandArguments, signal);
+    signal?.throwIfAborted();
+    if (reportDenied && answer.capability.status === "permission-denied") throw Object.assign(new Error(answer.capability.explanation), { code: "EACCES" });
     if (answer.capability.status !== "available") {
       return undefined;
     }
@@ -58,7 +61,8 @@ export function createTmpfilesAdapter(ports: TmpfilesPorts): ManagerAdapter {
     };
   }
 
-  async function discover(): Promise<ManagerDiscovery> {
+  async function discover(signal?: AbortSignal): Promise<ManagerDiscovery> {
+    signal?.throwIfAborted();
     if (!(await ports.installed("systemd-tmpfiles"))) {
       return {
         adapter: "tmpfiles",
@@ -69,7 +73,7 @@ export function createTmpfilesAdapter(ports: TmpfilesPorts): ManagerAdapter {
     }
     const proposals: ManagerProposal[] = [];
     for (const policy of POLICIES) {
-      const preview = await dryRun(policy.action);
+      const preview = await dryRun(policy.action, signal, true);
       proposals.push({
         action: policy.action,
         title: policy.title,
@@ -101,7 +105,7 @@ export function createTmpfilesAdapter(ports: TmpfilesPorts): ManagerAdapter {
   return {
     id: "tmpfiles",
     discover,
-    preview: (action) => previewFrom(discover, action),
+    preview: (action, _parameters, signal) => previewFrom(discover, action, signal),
     async preflight() {
       return { skipped: new Map() };
     },

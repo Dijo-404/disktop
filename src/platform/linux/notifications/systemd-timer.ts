@@ -53,6 +53,14 @@ export function createSystemdUserTimer(options: SystemdTimerOptions): UserTimerP
     refused,
   });
 
+  const commandFailure = (result: TimerOutcome, command: string, stderr: string, recovery: string): TimerOutcome => ({
+    ...result,
+    failure: {
+      code: /permission|access denied|authentication/i.test(stderr) ? "permission-denied" : "internal-error",
+      message: `systemctl --user ${command} failed: ${sanitizeText(stderr.trim().slice(0, 2048)) || "no diagnostic was returned"}. ${recovery}`,
+    },
+  });
+
   return {
     async install(units) {
       const capability = await probe();
@@ -71,9 +79,16 @@ export function createSystemdUserTimer(options: SystemdTimerOptions): UserTimerP
       await mkdir(options.unitDirectory, { recursive: true, mode: 0o755 });
       await writeFileAtomically(pathOf(SERVICE_UNIT), units.service, UNIT_MODE);
       await writeFileAtomically(pathOf(TIMER_UNIT), units.timer, UNIT_MODE);
-      await systemctl(["--user", "daemon-reload"]);
+      const reloaded = await systemctl(["--user", "daemon-reload"]);
+      if (reloaded.exitCode !== 0) {
+        return commandFailure(outcome(capability, ["written", "written"], false), "daemon-reload", reloaded.stderr,
+          "The units were written but were not enabled. Retry 'disktop timer install' when the user instance is reachable.");
+      }
       const enabled = await systemctl(["--user", "enable", "--now", TIMER_UNIT]);
-      return outcome(capability, ["written", "written"], enabled.exitCode === 0);
+      return enabled.exitCode === 0
+        ? outcome(capability, ["written", "written"], true)
+        : commandFailure(outcome(capability, ["written", "written"], false), `enable --now ${TIMER_UNIT}`, enabled.stderr,
+            "The units remain installed; retry 'disktop timer install' after resolving the systemd error.");
     },
 
     async uninstall() {
@@ -88,7 +103,12 @@ export function createSystemdUserTimer(options: SystemdTimerOptions): UserTimerP
         );
       }
       if (capability.status === "available" && owners[1] === "ours") {
-        await systemctl(["--user", "disable", "--now", TIMER_UNIT]);
+        const disabled = await systemctl(["--user", "disable", "--now", TIMER_UNIT]);
+        if (disabled.exitCode !== 0) {
+          return commandFailure(outcome(capability, owners.map((owner) => owner === "ours" ? "written" : "absent"), true),
+            `disable --now ${TIMER_UNIT}`, disabled.stderr,
+            "The units were kept because the timer could still be running. Retry 'disktop timer uninstall' after resolving the systemd error.");
+        }
       }
       const states: UnitState[] = [];
       for (const [index, name] of names.entries()) {
@@ -101,7 +121,11 @@ export function createSystemdUserTimer(options: SystemdTimerOptions): UserTimerP
         }
       }
       if (capability.status === "available") {
-        await systemctl(["--user", "daemon-reload"]);
+        const reloaded = await systemctl(["--user", "daemon-reload"]);
+        if (reloaded.exitCode !== 0) {
+          return commandFailure(outcome(capability, states, false), "daemon-reload", reloaded.stderr,
+            "The timer was stopped and the units removed. Run 'systemctl --user daemon-reload' to refresh the user instance.");
+        }
       }
       return outcome(capability, states, false);
     },

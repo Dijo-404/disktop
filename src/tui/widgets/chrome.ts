@@ -1,6 +1,6 @@
 import { formatBytes, usedPercentOfInodes, usedPercentOfSpace } from "../../domain/sizes.js";
 import { LineBuilder, type HitRegion, type ScreenLine } from "../frame.js";
-import { TABS, type AppState } from "../state.js";
+import { TABS, diskRows, type AppState } from "../state.js";
 import { cellWidth, truncateMiddle } from "../text.js";
 import type { Theme } from "../themes.js";
 import { barSpans, usageStyle } from "./bars.js";
@@ -18,14 +18,17 @@ export function headerLine(state: AppState, theme: Theme, columns: number, thres
   line.add(` ${glyphs.brand} `, "brand").add("Disktop", "title").add("  ", "band");
 
   const view = state.disks.view;
-  // With a partition nothing has mounted selected, the header keeps showing
-  // the first filesystem rather than claiming none could be read.
-  const selected = view.filesystems[state.disks.selected] ?? view.filesystems[0];
+  const focused = diskRows(view)[state.disks.selected];
+  const selected = focused?.kind === "filesystem" ? focused.filesystem : undefined;
   const alerts = view.alerts.length;
   const alertText = alerts === 0 ? "" : ` ${glyphs.warn} ${alerts} alert${alerts === 1 ? "" : "s"} `;
   const incomplete = view.complete ? "" : ` ${glyphs.warn} incomplete `;
 
-  if (selected === undefined) {
+  if (focused?.kind === "volume") {
+    const volume = focused.volume;
+    line.add(truncateMiddle(volume.devicePath, Math.max(8, columns - line.used - cellWidth(alertText) - cellWidth(incomplete) - 22), glyphs.ellipsis), "strong");
+    line.add(`  ${formatBytes(volume.sizeBytes, state.units)}  `, "dim").add(volume.state === "unknown" ? "usage unknown" : volume.state, volume.state === "locked" ? "warn" : "dim");
+  } else if (selected === undefined) {
     line.add("no filesystem could be read", "dim");
   } else {
     const percent = usedPercentOfSpace(selected.totalBytes, selected.freeBytes, selected.availableBytes);
@@ -81,13 +84,14 @@ export function tabLine(state: AppState, columns: number, row: number): { line: 
   const line = new LineBuilder(columns);
   const hits: HitRegion[] = [];
   const compact = columns < 64;
+  const abbreviations = ["Dsk", "Exp", "Cln", "Dev", "App", "His"];
   line.add(" ");
   for (const [index, tab] of TABS.entries()) {
-    const label = compact ? ` ${tab} ` : ` ${index + 1} ${tab} `;
+    const label = compact ? `${index + 1} ${tab === state.tab ? tab : abbreviations[index]}` : ` ${index + 1} ${tab} `;
     const from = line.used;
     line.add(label, tab === state.tab ? "tabActive" : "tab");
     hits.push({ row, from, to: line.used, action: { kind: "tab", index } });
-    line.add(compact ? "" : " ");
+    if (index < TABS.length - 1) line.add(" ");
   }
   if (!compact) {
     line.addRight("? help ", "muted");

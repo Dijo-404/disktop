@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 /**
  * Draw the README demo: real TUI frames, rendered by the same views and the
- * same 256-colour palette the terminal gets, cycled as an animated SVG.
+ * same Catppuccin Mocha palette the terminal gets, cycled as an animated SVG.
  *
  * The data is a fixed, made-up machine so the image never shows anybody's
  * real filesystem. Run after `npm run build`:
@@ -13,6 +13,8 @@ import { serializeLine } from "../dist/tui/render.js";
 import { renderScreen } from "../dist/tui/screen.js";
 import { initialState } from "../dist/tui/state.js";
 import { buildTheme } from "../dist/tui/themes.js";
+import { cellWidth } from "../dist/tui/text.js";
+import { evaluateAlerts } from "../dist/application/alerts.js";
 
 const COLUMNS = 80;
 const ROWS = 24;
@@ -20,8 +22,8 @@ const CELL_WIDTH = 8.4;
 const CELL_HEIGHT = 17;
 const FONT_SIZE = 14;
 const PADDING = 14;
-const BACKGROUND = "#0d1117";
-const FOREGROUND = "#c9d1d9";
+const BACKGROUND = "#1e1e2e";
+const FOREGROUND = "#cdd6f4";
 const SECONDS_PER_FRAME = 4;
 
 const NOW = Date.parse("2026-10-03T10:00:00Z");
@@ -34,7 +36,7 @@ const path = (display) => ({ bytesBase64: Buffer.from(display).toString("base64"
 const filesystems = [
   {
     id: "fs-259-2", type: "ext4", source: "/dev/nvme0n1p2", mounts: [path("/"), path("/home")],
-    totalBytes: 953n * GiB, freeBytes: 140n * GiB, availableBytes: 92n * GiB,
+    totalBytes: 953n * GiB, freeBytes: 140n * GiB, availableBytes: 90n * GiB,
     totalInodes: 61_054_976n, freeInodes: 36_120_993n, network: false, removable: false, readOnly: false, deviceId: "nvme0n1",
   },
   {
@@ -51,14 +53,25 @@ const filesystems = [
   },
 ];
 
+const unmounted = [
+  { id: "nvme1n1p1", devicePath: "/dev/nvme1n1p1", deviceId: "nvme1n1", sizeBytes: 512n * GiB, filesystemType: "ntfs", label: "Windows-SSD", state: "unmounted" },
+  { id: "nvme1n1p2", devicePath: "/dev/nvme1n1p2", deviceId: "nvme1n1", sizeBytes: 1394n * GiB, filesystemType: "crypto_LUKS", state: "locked" },
+];
+
 const view = {
   capability: { status: "available", explanation: "" },
   devices: [
     { id: "nvme0n1", name: "nvme0n1", kind: "ssd", removable: false, sizeBytes: 954n * GiB, model: "Samsung SSD 980 1TB", transport: "nvme", partitions: ["nvme0n1p1", "nvme0n1p2"] },
     { id: "sda", name: "sda", kind: "hdd", removable: true, sizeBytes: 1863n * GiB, model: "WD Elements", transport: "usb", partitions: ["sda1"] },
+    { id: "nvme1n1", name: "nvme1n1", kind: "ssd", removable: false, sizeBytes: 1907n * GiB, model: "Crucial P3 Plus", transport: "nvme", partitions: ["nvme1n1p1", "nvme1n1p2"] },
   ],
   filesystems,
-  alerts: [{ filesystemId: "fs-259-2", kind: "low-space", usedPercent: 90, thresholdPercent: 90, message: "/ is 90% used: 92.0 GiB left of 953.0 GiB." }],
+  volumes: [
+    ...filesystems.filter((filesystem) => !filesystem.network).map((filesystem) => ({ id: filesystem.source.split("/").at(-1), devicePath: filesystem.source, deviceId: filesystem.deviceId, deviceIds: [filesystem.deviceId], type: "part", sizeBytes: filesystem.totalBytes, filesystemType: filesystem.type, mounts: filesystem.mounts, state: "mounted" })),
+    ...unmounted.map((volume) => ({ ...volume, deviceIds: [volume.deviceId], type: "part", mounts: [] })),
+  ],
+  unmounted,
+  alerts: evaluateAlerts(filesystems, { spacePercent: 90, inodePercent: 90 }),
   warnings: [],
   complete: true,
 };
@@ -152,7 +165,7 @@ const frames = [
   { ...base, tab: "Clean", findings: { ...base.findings, summary, loadedAt: NOW - 60_000 }, dialog: { kind: "review", plan, alternatives: ["trash", "permanent"], typed: "", origin: "finding", findingId: "x" } },
 ];
 
-const theme = buildTheme("256", true);
+const theme = buildTheme("truecolor", true);
 
 function xterm256(index) {
   const basic = ["#000000", "#cd3131", "#0dbc79", "#e5e510", "#2472c8", "#bc3fbc", "#11a8cd", "#e5e5e5", "#666666", "#f14c4c", "#23d18b", "#f5f543", "#3b8eea", "#d670d6", "#29b8db", "#ffffff"];
@@ -187,6 +200,11 @@ function parseRow(serialized) {
       else if (code === 4) style = { ...style, underline: true };
       else if (code === 38 && codes[index + 1] === 5) { style = { ...style, fg: xterm256(codes[index + 2]) }; index += 2; }
       else if (code === 48 && codes[index + 1] === 5) { style = { ...style, bg: xterm256(codes[index + 2]) }; index += 2; }
+      else if ((code === 38 || code === 48) && codes[index + 1] === 2) {
+        const rgb = `#${codes.slice(index + 2, index + 5).map((component) => component.toString(16).padStart(2, "0")).join("")}`;
+        style = { ...style, [code === 38 ? "fg" : "bg"]: rgb };
+        index += 4;
+      }
     }
   }
   return runs;
@@ -201,7 +219,7 @@ function frameSvg(state, index) {
     let column = 0;
     const y = PADDING + row * CELL_HEIGHT;
     for (const run of parseRow(serializeLine(line, COLUMNS, theme))) {
-      const width = [...run.text].length;
+      const width = cellWidth(run.text);
       const x = PADDING + column * CELL_WIDTH;
       if (run.bg !== undefined) {
         parts.push(`<rect x="${x.toFixed(1)}" y="${y}" width="${(width * CELL_WIDTH).toFixed(1)}" height="${CELL_HEIGHT}" fill="${run.bg}"/>`);
@@ -209,7 +227,7 @@ function frameSvg(state, index) {
       if (run.text.trim() !== "") {
         const weight = run.bold ? ' font-weight="bold"' : "";
         const decoration = run.underline ? ' text-decoration="underline"' : "";
-        parts.push(`<text x="${x.toFixed(1)}" y="${y + CELL_HEIGHT - 4}" fill="${run.fg}"${weight}${decoration} textLength="${(width * CELL_WIDTH).toFixed(1)}" lengthAdjust="spacingAndGlyphs">${escapeXml(run.text)}</text>`);
+        parts.push(`<text xml:space="preserve" x="${x.toFixed(1)}" y="${y + CELL_HEIGHT - 4}" fill="${run.fg}"${weight}${decoration} textLength="${(width * CELL_WIDTH).toFixed(1)}" lengthAdjust="spacingAndGlyphs">${escapeXml(run.text)}</text>`);
       }
       column += width;
     }
@@ -229,8 +247,8 @@ const keyframes = frames
   })
   .join("");
 
-const svg = `<svg xmlns="http://www.w3.org/2000/svg" width="${width.toFixed(0)}" height="${height}" viewBox="0 0 ${width.toFixed(0)} ${height}" role="img" aria-label="Disktop terminal UI: disks, explore, clean, and a reviewed plan">
-<style>text{font-family:"JetBrains Mono","DejaVu Sans Mono",Menlo,Consolas,monospace;font-size:${FONT_SIZE}px;white-space:pre}.frame{opacity:0}${keyframes}</style>
+const svg = `<svg xmlns="http://www.w3.org/2000/svg" xml:space="preserve" width="${width.toFixed(0)}" height="${height}" viewBox="0 0 ${width.toFixed(0)} ${height}" role="img" aria-label="Disktop terminal UI: disks, explore, clean, and a reviewed plan">
+<style>text{font-family:"JetBrains Mono","DejaVu Sans Mono",Menlo,Consolas,monospace;font-size:${FONT_SIZE}px;white-space:pre}.frame{opacity:0}.f0{opacity:1}${keyframes}@media(prefers-reduced-motion:reduce){.frame{animation:none}}</style>
 <rect width="100%" height="100%" rx="8" fill="${BACKGROUND}"/>
 ${frames.map(frameSvg).join("\n")}
 </svg>

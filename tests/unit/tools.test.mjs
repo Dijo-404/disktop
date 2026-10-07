@@ -161,13 +161,24 @@ test("a device argument cannot climb out of /dev", async () => {
 test("a query that outlives its time limit is killed, even when it ignores SIGTERM", async () => {
   const { runFixedCommand } = await import("../../dist/platform/linux/process.js");
   const begun = Date.now();
-  const outcome = await runFixedCommand("sh", ["-c", "trap '' TERM; sleep 20 & wait"], {
+  const outcome = await runFixedCommand("sh", ["-c", "trap '' TERM; sleep 20 & printf 'descendant=%s\\n' \"$!\"; wait"], {
     timeoutMilliseconds: 200,
     maxOutputBytes: 1024,
   });
   assert.ok(Date.now() - begun < 5_000, `the query held the caller for ${Date.now() - begun} ms`);
   assert.notEqual(outcome.capability.status, "available");
   assert.match(outcome.capability.explanation, /did not finish within/);
+  const descendant = /descendant=([0-9]+)/.exec(outcome.stdout)?.[1];
+  assert.ok(descendant, "the query actually started a descendant");
+  const { readFile } = await import("node:fs/promises");
+  const deadline = Date.now() + 1000;
+  let alive = true;
+  while (alive && Date.now() < deadline) {
+    const state = await readFile(`/proc/${descendant}/stat`, "utf8").catch(() => undefined);
+    alive = state !== undefined && state.split(") ")[1]?.[0] !== "Z";
+    if (alive) await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+  assert.equal(alive, false, "timing out a query stops its descendants too");
 });
 
 test("a query's output is bounded, and running past the bound is a failure rather than a short answer", async () => {
@@ -237,4 +248,24 @@ test("queries and manager commands select the same daemon and see nothing else",
   assert.equal(seen.LD_PRELOAD, undefined);
   assert.equal(seen.PATH, "/usr/bin:/bin:/usr/sbin:/sbin", "PATH is never the caller's");
   assert.equal(seen.LC_ALL, "C", "parsed output is always in the C locale");
+});
+
+test("read-only queries propagate cancellation and release their abort listeners", async () => {
+  const { getEventListeners } = await import("node:events");
+  const { runFixedCommand } = await import("../../dist/platform/linux/process.js");
+  const controller = new AbortController();
+  const pending = runFixedCommand("sh", ["-c", "sleep 20 & wait"], {
+    timeoutMilliseconds: 10000, maxOutputBytes: 1024,
+  }, undefined, controller.signal);
+  const timer = setTimeout(() => controller.abort(), 50);
+  const began = Date.now();
+  try {
+    const result = await pending;
+    assert.match(result.capability.explanation, /cancelled/);
+    assert.ok(Date.now() - began < 2000, "cancellation does not wait for the query's normal deadline");
+    assert.equal(getEventListeners(controller.signal, "abort").length, 0);
+  } finally { clearTimeout(timer); }
+  const cancelled = await runFixedCommand("sh", ["-c", "printf should-not-run"], undefined, undefined, controller.signal);
+  assert.equal(cancelled.stdout, "");
+  assert.match(cancelled.capability.explanation, /before it started/);
 });

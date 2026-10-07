@@ -30,6 +30,15 @@ const SCOPE = {
   filesystems: ["2049"],
 };
 
+test("a missing snapshot directory is empty, but directory read failures surface", async () => {
+  const root = await sandbox();
+  const store = createSnapshotStore(root);
+  assert.deepEqual(await store.list(), []);
+  await writeFile(join(root, "snapshots"), "a store directory was replaced by a file");
+  await assert.rejects(store.list(), { code: "ENOTDIR" });
+  await assert.rejects(store.prune({ keepLatest: 1 }), { code: "ENOTDIR" });
+});
+
 function snapshot(id, scannedAt, directories, overrides = {}) {
   return {
     version: 1,

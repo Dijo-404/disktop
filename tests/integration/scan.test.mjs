@@ -6,8 +6,9 @@
  * reads or writes the developer's own configuration, cache, or data.
  */
 import assert from "node:assert/strict";
-import { spawnSync } from "node:child_process";
-import { mkdtemp, rm } from "node:fs/promises";
+import { spawn, spawnSync } from "node:child_process";
+import { mkdtemp, readdir, rm } from "node:fs/promises";
+import { setTimeout as delay } from "node:timers/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { after, test } from "node:test";
@@ -130,7 +131,30 @@ test("allocated totals agree with du -x over the same scope", async () => {
   }
 });
 
-test("a nested mount is not descended into unless it is asked for", async () => {
+const NAMESPACE_ARGUMENTS = ["--user", "--map-current-user", "--mount", "--keep-caps", "--fork"];
+
+function privateNamespace(context, script, environment) {
+  const probe = spawnSync("unshare", [...NAMESPACE_ARGUMENTS, "true"], { encoding: "utf8" });
+  if (probe.error?.code === "ENOENT" || (probe.status !== 0 && /operation not permitted|permission denied/i.test(probe.stderr))) {
+    context.skip("this host cannot create an unprivileged private mount namespace");
+    return undefined;
+  }
+  assert.equal(probe.error, undefined);
+  assert.equal(probe.status, 0, probe.stderr);
+  const run = spawnSync("unshare", [...NAMESPACE_ARGUMENTS, "sh", "-c", script], {
+    encoding: "utf8", timeout: 30_000, maxBuffer: 4 * 1024 * 1024, env: environment,
+  });
+  if (/^mount: [^\n]*(?:operation not permitted|permission denied|must be superuser)/im.test(run.stderr)) {
+    context.skip("this namespace cannot mount its private test filesystem");
+    return undefined;
+  }
+  assert.equal(run.error, undefined);
+  assert.ok([0, 3].includes(run.status), run.stdout + run.stderr);
+  assert.notEqual(run.stdout.trim(), "", run.stderr);
+  return run;
+}
+
+test("a nested mount is not descended into unless it is asked for", async (context) => {
   const home = await disktopHome();
   const fixture = await createLargeFixture({ entries: 8, fanOut: 8 });
   const inner = join(fixture.root, "bind-target");
@@ -139,19 +163,12 @@ test("a nested mount is not descended into unless it is asked for", async () => 
   // A bind mount needs a private mount namespace, which needs either root or
   // unprivileged user namespaces. Where the kernel refuses, the case is
   // reported as unproven rather than quietly passing.
-  const bind = spawnSync(
-    "unshare",
-    [
-      "--mount",
-      "--map-root-user",
-      "sh",
-      "-c",
+  try {
+    const bind = privateNamespace(
+      context,
       `mkdir -p '${inner}' && mount --bind '${source}' '${inner}' && ` +
         `node dist/bin/disktop.js scan '${fixture.root}' --json`,
-    ],
-    {
-      encoding: "utf8",
-      env: {
+      {
         ...process.env,
         NO_COLOR: "1",
         HOME: home,
@@ -160,17 +177,8 @@ test("a nested mount is not descended into unless it is asked for", async () => 
         XDG_CACHE_HOME: join(home, "cache"),
         XDG_STATE_HOME: join(home, "state"),
       },
-    },
-  );
-
-  try {
-    if (bind.error !== undefined || bind.status === null || bind.stdout.trim() === "") {
-      // `unshare` or user namespaces are unavailable on this host. Mount
-      // behaviour is proven in the VM job, not here, and the skip is loud
-      // rather than a silent pass.
-      process.stderr.write("skipped: this host cannot create a private mount namespace\n");
-      return;
-    }
+    );
+    if (bind === undefined) return;
     const scan = JSON.parse(bind.stdout);
     const validate = validators.get("scan");
     assert.ok(validate(scan), JSON.stringify(validate.errors));
@@ -182,11 +190,11 @@ test("a nested mount is not descended into unless it is asked for", async () => 
       `the bind mount was not reported as skipped: ${JSON.stringify(excluded)}`,
     );
   } finally {
-    await fixture.cleanup().catch(() => undefined);
+    await fixture.cleanup();
   }
 });
 
-test("another part of the scanned filesystem mounted below the root is walked; a repeat and another filesystem are not", async () => {
+test("another part of the scanned filesystem mounted below the root is walked; a repeat and another filesystem are not", async (context) => {
   // A Btrfs subvolume mounted at /home is one filesystem with / but its own
   // mount. A tmpfs with a bind mount of a sibling directory has the same
   // shape and needs no block device: the sibling is more of the filesystem
@@ -194,7 +202,7 @@ test("another part of the scanned filesystem mounted below the root is walked; a
   const home = await disktopHome();
   const top = await mkdtemp(join(tmpdir(), "disktop-samefs-"));
   const script = [
-    `mount -t tmpfs tmpfs '${top}'`,
+    `mount -t tmpfs -o uid=${process.getuid()},gid=${process.getgid()} tmpfs '${top}'`,
     `mkdir -p '${top}/root/a' '${top}/root/inner' '${top}/root/again' '${top}/root/other-fs' '${top}/elsewhere'`,
     `head -c 1048576 /dev/zero > '${top}/elsewhere/payload'`,
     `head -c 4096 /dev/zero > '${top}/root/a/small'`,
@@ -203,9 +211,8 @@ test("another part of the scanned filesystem mounted below the root is walked; a
     `mount -t tmpfs tmpfs '${top}/root/other-fs'`,
     `node dist/bin/disktop.js scan '${top}/root' --json`,
   ].join(" && ");
-  const run = spawnSync("unshare", ["--mount", "--map-root-user", "sh", "-c", script], {
-    encoding: "utf8",
-    env: {
+  try {
+    const run = privateNamespace(context, script, {
       ...process.env,
       NO_COLOR: "1",
       HOME: home,
@@ -213,13 +220,8 @@ test("another part of the scanned filesystem mounted below the root is walked; a
       XDG_DATA_HOME: join(home, "data"),
       XDG_CACHE_HOME: join(home, "cache"),
       XDG_STATE_HOME: join(home, "state"),
-    },
-  });
-  try {
-    if (run.error !== undefined || run.status === null || run.stdout.trim() === "") {
-      process.stderr.write("skipped: this host cannot create a private mount namespace\n");
-      return;
-    }
+    });
+    if (run === undefined) return;
     const scan = JSON.parse(run.stdout);
     const validate = validators.get("scan");
     assert.ok(validate(scan), JSON.stringify(validate.errors));
@@ -237,15 +239,17 @@ test("another part of the scanned filesystem mounted below the root is walked; a
 test("interrupting a scan leaves a partial result and a queryable index", async () => {
   const home = await disktopHome();
   const fixture = await createLargeFixture({ entries: 60_000, fanOut: 256 });
+  let child;
+  let closed;
+  let ended = false;
+  let stdout = "";
+  let stderr = "";
+  let failure;
   try {
-    const child = spawnSync(
-      "sh",
-      [
-        "-c",
-        `node dist/bin/disktop.js scan '${fixture.root}' --json & pid=$!; sleep 0.4; kill -INT $pid; wait $pid; echo "exit:$?"`,
-      ],
+    child = spawn(
+      process.execPath,
+      ["dist/bin/disktop.js", "scan", fixture.root, "--throttle", "1", "--json"],
       {
-        encoding: "utf8",
         env: {
           ...process.env,
           NO_COLOR: "1",
@@ -257,24 +261,49 @@ test("interrupting a scan leaves a partial result and a queryable index", async 
         },
       },
     );
-
-    const body = child.stdout.slice(0, child.stdout.lastIndexOf("}") + 1);
-    assert.notEqual(body, "", `no envelope; stderr was ${child.stderr}`);
-    const scan = JSON.parse(body);
+    child.stdout.setEncoding("utf8").on("data", (chunk) => {
+      if (stdout.length + chunk.length > 4 * 1024 * 1024) {
+        failure = new Error("the scan exceeded the test's output bound");
+        child.kill("SIGKILL");
+      } else stdout += chunk;
+    });
+    child.stderr.setEncoding("utf8").on("data", (chunk) => { stderr = (stderr + chunk).slice(-8192); });
+    child.on("error", (error) => { failure = error; });
+    closed = new Promise((resolve) => child.once("close", (status) => { ended = true; resolve(status); }));
+    const deadline = Date.now() + 15_000;
+    const indexDirectory = join(home, "cache", "disktop", "index-v3");
+    for (;;) {
+      assert.equal(failure, undefined);
+      assert.equal(ended, false, stdout + stderr);
+      assert.ok(Date.now() < deadline, `the scan never started its index: ${stderr}`);
+      let names;
+      try { names = await readdir(indexDirectory); }
+      catch (error) { if (error.code !== "ENOENT") throw error; names = []; }
+      if (names.some((name) => name.endsWith(".sqlite.partial"))) break;
+      await delay(20);
+    }
+    // The partial index proves the command installed its signal handlers and
+    // entered the helper. A fixed sleep can interrupt Node during startup.
+    assert.equal(child.kill("SIGINT"), true);
+    const timeout = setTimeout(() => child.kill("SIGKILL"), 15_000);
+    let status;
+    try { status = await closed; } finally { clearTimeout(timeout); }
+    assert.equal(failure, undefined);
+    assert.equal(status, 130, stdout + stderr);
+    assert.notEqual(stdout.trim(), "", `no envelope; stderr was ${stderr}`);
+    const scan = JSON.parse(stdout);
     const validate = validators.get("scan");
     assert.ok(validate(scan), JSON.stringify(validate.errors));
 
-    if (!scan.data.completeness.complete) {
-      // A cancelled scan is never reported as a small filesystem: it exits
-      // 130 and says it was cancelled.
-      assert.equal(scan.exitCode, 130);
-      assert.ok(scan.warnings.some((warning) => warning.code === "cancelled"));
-    }
+    assert.equal(scan.data.completeness.complete, false);
+    assert.equal(scan.exitCode, 130);
+    assert.ok(scan.warnings.some((warning) => warning.code === "cancelled"));
 
     // Whatever it managed to index is still readable, so the work is not lost.
     const page = envelope(disktop(home, ["explore", fixture.root, "--json"]), "explore");
     assert.equal(page.data.scanId, scan.data.scanId);
   } finally {
+    if (child !== undefined && !ended) { child.kill("SIGKILL"); await closed; }
     await fixture.cleanup();
   }
 });

@@ -49,6 +49,16 @@ test("both workflows check exactly the helpers the locator selects, by SHA256SUM
   assert.match(read(".github/workflows/ci.yml"), /npm run test:package/);
 });
 
+test("CI and publication both audit npm and the native lockfile without advisory suppressions", () => {
+  for (const workflow of [".github/workflows/ci.yml", ".github/workflows/publish.yml"]) {
+    const text = read(workflow);
+    assert.match(text, /npm audit\b/, workflow);
+    assert.match(text, /cargo install --locked cargo-audit --version 0\.22\.2/, workflow);
+    assert.match(text, /cargo audit --file native\/disktop-fs\/Cargo\.lock --deny warnings/, workflow);
+    assert.doesNotMatch(text, /cargo audit[^\n]*--ignore\b|npm audit[^\n]*\|\|/, workflow);
+  }
+});
+
 test("the vendor README and ADR 0003 describe the same contract", () => {
   for (const document of ["vendor/bin/README.md", "docs/adr/0003-prebuilt-binary-packaging.md"]) {
     const text = read(document);

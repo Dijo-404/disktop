@@ -1,7 +1,7 @@
 import type { VerificationCheck } from "../../../domain/actions.js";
 import { MANAGER_ACTIONS, type ManagerActionId, type ManagerItem, type ManagerScope } from "../../../domain/managers.js";
 import type { Capability, RawPath, Warning } from "../../../domain/models.js";
-import { rawPathFromUtf8, sanitizeText } from "../../../domain/paths.js";
+import { pathBytes, rawPathFromBytes, rawPathFromUtf8, sanitizeText } from "../../../domain/paths.js";
 import type { ManagerAdapter, ManagerDiscovery, ManagerProposal } from "../../../ports/managers.js";
 import type { PathProbe, ToolPort } from "../../../ports/providers.js";
 
@@ -27,8 +27,8 @@ interface CacheSpec {
   readonly action: ManagerActionId;
   readonly title: string;
   readonly spacePath: string;
-  readonly list: () => Promise<Listing>;
-  readonly select: (listing: Listing) => Promise<{ readonly items: readonly ManagerItem[]; readonly capability?: Capability; readonly evidence: readonly string[] }>;
+  readonly list: (signal?: AbortSignal) => Promise<Listing>;
+  readonly select: (listing: Listing, signal?: AbortSignal) => Promise<{ readonly items: readonly ManagerItem[]; readonly capability?: Capability; readonly evidence: readonly string[] }>;
   readonly count: "exact" | "estimated";
 }
 
@@ -45,7 +45,7 @@ export function createPackageCacheAdapters(ports: PackageCachePorts): readonly M
       title: "Package files apt downloaded",
       spacePath: apt,
       count: "exact",
-      list: () => listFiles(ports.paths, [apt], "apt.clean"),
+      list: (signal) => listFiles(ports.paths, [rawPathFromUtf8(apt)], "apt.clean", signal),
       select: async (listing) => ({
         items: listing.items,
         evidence: [
@@ -61,7 +61,7 @@ export function createPackageCacheAdapters(ports: PackageCachePorts): readonly M
       title: "Package files dnf keeps in its cache",
       spacePath: "/var/cache",
       count: "exact",
-      list: async () => listFiles(ports.paths, await packageDirectories(ports.paths, dnf), "dnf.clean-packages"),
+      list: async (signal) => listFiles(ports.paths, await packageDirectories(ports.paths, dnf, signal), "dnf.clean-packages", signal),
       select: async (listing) => ({
         items: listing.items,
         evidence: [`${listing.items.length} package file(s) in dnf's cache.`],
@@ -74,9 +74,11 @@ export function createPackageCacheAdapters(ports: PackageCachePorts): readonly M
       title: "Cached pacman packages that are not installed",
       spacePath: pacman,
       count: "estimated",
-      list: () => listFiles(ports.paths, [pacman], "pacman.clean-uninstalled"),
-      select: async (listing) => {
-        const answer = await ports.tools.run("pacman", ["-Q"]);
+      list: (signal) => listFiles(ports.paths, [rawPathFromUtf8(pacman)], "pacman.clean-uninstalled", signal),
+      select: async (listing, signal) => {
+        signal?.throwIfAborted();
+        const answer = await ports.tools.run("pacman", ["-Q"], signal);
+        signal?.throwIfAborted();
         if (answer.capability.status !== "available") {
           return { items: [], capability: answer.capability, evidence: [] };
         }
@@ -106,7 +108,8 @@ export function createPackageCacheAdapters(ports: PackageCachePorts): readonly M
 }
 
 function createAdapter(spec: CacheSpec, ports: PackageCachePorts): ManagerAdapter {
-  async function discover(): Promise<ManagerDiscovery> {
+  async function discover(signal?: AbortSignal): Promise<ManagerDiscovery> {
+    signal?.throwIfAborted();
     if (!(await ports.installed(spec.tool))) {
       return {
         adapter: spec.id,
@@ -115,8 +118,8 @@ function createAdapter(spec: CacheSpec, ports: PackageCachePorts): ManagerAdapte
         warnings: [],
       };
     }
-    const listing = await spec.list();
-    const selected = await spec.select(listing);
+    const listing = await spec.list(signal);
+    const selected = await spec.select(listing, signal);
     if (selected.capability !== undefined) {
       return { adapter: spec.id, capability: selected.capability, proposals: [], warnings: listing.warnings };
     }
@@ -141,22 +144,22 @@ function createAdapter(spec: CacheSpec, ports: PackageCachePorts): ManagerAdapte
     };
   }
 
-  async function present(): Promise<ReadonlySet<string>> {
-    return new Set((await spec.list()).items.map((item) => item.id));
+  async function present(signal?: AbortSignal): Promise<ReadonlySet<string>> {
+    return new Set((await spec.list(signal)).items.map((item) => item.id));
   }
 
   return {
     id: spec.id,
     discover,
-    async preview(action) {
-      const discovery = await discover();
+    async preview(action, _parameters, signal) {
+      const discovery = await discover(signal);
       const proposal = discovery.proposals.find((candidate) => candidate.action === action);
       return proposal === undefined
         ? { kind: "refused", message: discovery.capability.explanation, capability: discovery.capability }
         : { kind: "proposal", proposal };
     },
-    async preflight(scope) {
-      const there = await present();
+    async preflight(scope, signal) {
+      const there = await present(signal);
       const skipped = new Map<number, string>();
       scope.items.forEach((item, position) => {
         if (!there.has(item.id)) {
@@ -197,12 +200,14 @@ function cacheVerification(scope: ManagerScope, attempted: ReadonlySet<number>, 
   return { verdicts, observed: [], checks: [check] };
 }
 
-async function packageDirectories(paths: PathProbe, roots: readonly string[]): Promise<readonly string[]> {
-  const found: string[] = [];
+async function packageDirectories(paths: PathProbe, roots: readonly string[], signal?: AbortSignal): Promise<readonly RawPath[]> {
+  const found: RawPath[] = [];
   for (const root of roots) {
+    signal?.throwIfAborted();
     for (const repository of await paths.list(rawPathFromUtf8(root))) {
-      const packages = `${repository.display}/packages`;
-      if ((await paths.facts(rawPathFromUtf8(packages)))?.kind === "directory") {
+      signal?.throwIfAborted();
+      const packages = rawPathFromBytes(Buffer.concat([pathBytes(repository), Buffer.from("/packages")]));
+      if ((await paths.facts(packages))?.kind === "directory") {
         found.push(packages);
       }
     }
@@ -210,13 +215,23 @@ async function packageDirectories(paths: PathProbe, roots: readonly string[]): P
   return found;
 }
 
-async function listFiles(paths: PathProbe, directories: readonly string[], action: ManagerActionId): Promise<Listing> {
+async function listFiles(paths: PathProbe, directories: readonly RawPath[], action: ManagerActionId, signal?: AbortSignal): Promise<Listing> {
   const pattern = MANAGER_ACTIONS[action].itemPattern;
   const items: ManagerItem[] = [];
   const warnings: Warning[] = [];
   const seen = new Set<string>();
+  const limit = MANAGER_ACTIONS[action].maxItems;
+  let inspected = 0;
   for (const directory of directories) {
-    for (const entry of await paths.list(rawPathFromUtf8(directory))) {
+    signal?.throwIfAborted();
+    for (const entry of await paths.list(directory)) {
+      signal?.throwIfAborted();
+      if (inspected === limit) {
+        throw Object.assign(new Error(
+          `Package-cache discovery for ${action} encountered more than ${limit} entries across its cache directories (at ${directory.display}); it cannot report a complete count within its bound. Use 'disktop scan' and 'disktop explore' for larger caches.`,
+        ), { code: "EOVERFLOW" });
+      }
+      inspected += 1;
       const name = baseName(entry);
       if (name === undefined || name.endsWith(".sig") || !/\.(deb|rpm)$|\.pkg\.tar/.test(name)) {
         continue;
@@ -236,12 +251,12 @@ async function listFiles(paths: PathProbe, directories: readonly string[], actio
       items.push({ id: name, bytes: facts.allocatedBytes });
     }
   }
-  return { items: items.slice(0, MANAGER_ACTIONS[action].maxItems), warnings };
+  return { items, warnings };
 }
 
 function baseName(path: RawPath): string | undefined {
-  const text = path.utf8;
-  return text === undefined ? undefined : text.slice(text.lastIndexOf("/") + 1);
+  const bytes = pathBytes(path);
+  return rawPathFromBytes(bytes.subarray(bytes.lastIndexOf(0x2f) + 1)).utf8;
 }
 
 /** `name-pkgver-pkgrel` from `name-pkgver-pkgrel-arch.pkg.tar.*`. */
