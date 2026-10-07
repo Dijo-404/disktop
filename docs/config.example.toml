@@ -21,7 +21,8 @@ notify = false
 cross_filesystems = false
 # "allocated" counts st_blocks * 512; "apparent" counts st_size.
 accounting = "allocated"
-# On WSL, keep /mnt/c and friends out of scans unless selected explicitly.
+# Exclude /mnt/c and /mnt/wsl even if their path is selected explicitly.
+# Set false to scan one of those paths. The WSL diagnostic offers no cleanup.
 exclude_windows_mounts = true
 excludes = ["/proc", "/sys", "/dev", "/run"]
 # Byte budget for the helper's index, one file per scan. When the files grow

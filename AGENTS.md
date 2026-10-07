@@ -142,6 +142,13 @@ saying what was missed. `npm run bench` measures the budget in
 
 All requested Linux capabilities must pass the plan's acceptance matrix before one initial public npm release, `1.0.0`. Internal phases and CI artifacts are not public releases. The macOS adapter boundary is required; a macOS implementation is outside this Linux scope.
 
+The release owner's **2026-10-07 instruction** defers the remaining real SMART health,
+ZFS, WSL and non-cache manager mutation checks until testers run them after the
+initial publication. Keep their status unvalidated in `docs/support-matrix.md`;
+see `docs/release-readiness.md` and `docs/tester-guide.md`. All automated safety,
+CI, advisory, performance and exact-package gates, reviewed source and protected
+workflow approval remain required. This exception does not mark a deferred test passed.
+
 ## Architecture boundaries
 
 - `src/domain` is pure data and policy. `src/application` uses ports. Linux adapters, providers, storage, and the native client implement ports. CLI and TUI call application services only.
@@ -163,4 +170,4 @@ All requested Linux capabilities must pass the plan's acceptance matrix before o
 
 ## Work handoff and verification
 
-For each task, identify the owning folder, changed port/schema, feature-matrix row, fixture, and acceptance test. Keep destructive tests in temporary sandboxes and use mount namespaces or VMs for mount behavior. Update documentation with implementation changes. Run the relevant phase gate before calling work complete. Do not publish to npm until Phase 8 passes.
+For each task, identify the owning folder, changed port/schema, feature-matrix row, fixture, and acceptance test. Keep destructive tests in temporary sandboxes and use mount namespaces or VMs for mount behavior. Update documentation with implementation changes. Run the relevant phase gate before calling work complete. Publication requires Phase 8's automated release gates and protected approval, with the dated manual-test deferral above. Phase 8 is complete only after publication and registry-install/provenance verification.
