@@ -129,7 +129,11 @@ journal completion. Already-aborted requests are never submitted. Directory disc
 streams at most 4,096 raw names before sorting them. A 4,097th entry is an explicit
 `EOVERFLOW` refusal, so detectors cannot report a sampled directory as complete or a
 manager cache's sampled package count as exact. Larger directories can be scanned and
-explored through the streaming native index. Inventory capacity probes run in isolated read-only Node children
+explored through the streaming native index. Package-cache discovery also inspects at
+most 10,000 entries across all cache directories for one manager, including ignored or
+duplicate names. The next entry raises `EOVERFLOW` before its metadata is read; items,
+warnings and duplicate tracking stay bounded, and discovery and previews never turn a
+larger cache into a sampled exact count. Inventory capacity probes run in isolated read-only Node children
 so an unavailable hard network mount cannot occupy the application's libuv worker
 pool. Probes share simultaneous reads, time out, and remember unreaped children; at
 most eight can remain pending, and none can prevent the parent from exiting.

@@ -103,7 +103,9 @@ footprints unknown, and does not itself make discovery incomplete.
 
 Detectors inspect known directory structures within a 4,096-entry listing bound.
 A directory above that bound produces an explicit warning and an incomplete result,
-never a sampled count presented as exact. An affected manager preview is refused.
+never a sampled count presented as exact. Package-cache discovery also inspects at
+most 10,000 entries across all of a manager's cache directories. An affected manager
+preview is refused when either bound is exceeded.
 Use `scan` and `explore` for larger directories; their native index streams entries
 without this discovery limit.
 

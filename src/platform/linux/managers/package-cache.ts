@@ -220,10 +220,18 @@ async function listFiles(paths: PathProbe, directories: readonly RawPath[], acti
   const items: ManagerItem[] = [];
   const warnings: Warning[] = [];
   const seen = new Set<string>();
+  const limit = MANAGER_ACTIONS[action].maxItems;
+  let inspected = 0;
   for (const directory of directories) {
     signal?.throwIfAborted();
     for (const entry of await paths.list(directory)) {
       signal?.throwIfAborted();
+      if (inspected === limit) {
+        throw Object.assign(new Error(
+          `Package-cache discovery for ${action} encountered more than ${limit} entries across its cache directories (at ${directory.display}); it cannot report a complete count within its bound. Use 'disktop scan' and 'disktop explore' for larger caches.`,
+        ), { code: "EOVERFLOW" });
+      }
+      inspected += 1;
       const name = baseName(entry);
       if (name === undefined || name.endsWith(".sig") || !/\.(deb|rpm)$|\.pkg\.tar/.test(name)) {
         continue;
@@ -243,7 +251,7 @@ async function listFiles(paths: PathProbe, directories: readonly RawPath[], acti
       items.push({ id: name, bytes: facts.allocatedBytes });
     }
   }
-  return { items: items.slice(0, MANAGER_ACTIONS[action].maxItems), warnings };
+  return { items, warnings };
 }
 
 function baseName(path: RawPath): string | undefined {
