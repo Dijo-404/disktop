@@ -292,3 +292,98 @@ test("a ZFS dataset with a very long name still produces a schema-valid id", asy
   assert.ok(result.findings[0].id.length <= 256, `${result.findings[0].id.length} characters`);
   assert.match(result.findings[0].id, /^[A-Za-z0-9][A-Za-z0-9._:-]*$/);
 });
+
+test("denied ZFS discovery keeps the readable snapshots and marks the result incomplete", async () => {
+  const result = await discover(
+    createSystemSnapshotsProvider({ timeshiftRoots: [] }),
+    environmentFor({
+      tools: {
+        btrfs: { stdout: "ID 256 gen 12 top level 5 path @\n" },
+        zfs: {
+          capability: { status: "permission-denied", explanation: "zfs list could not be run by this user.\u001b[31m" },
+          stderr: "permission denied\n",
+          exitCode: 1,
+        },
+      },
+    }),
+  );
+  assert.equal(result.complete, false);
+  assert.equal(result.findings.length, 1, "another readable source is preserved");
+  assert.deepEqual(result.findings[0].availableActionIds, []);
+  assert.equal(result.warnings.length, 1);
+  assert.equal(result.warnings[0].code, "zfs-denied");
+  assert.match(result.warnings[0].message, /ZFS|read access/);
+  assert.ok(!result.warnings[0].message.includes("\u001b"));
+});
+
+test("an absent ZFS executable is benign and an empty successful query is complete", async () => {
+  for (const tools of [{}, { zfs: { stdout: "" } }]) {
+    const result = await discover(createSystemSnapshotsProvider({ timeshiftRoots: [] }), environmentFor({ tools }));
+    assert.deepEqual(result.findings, []);
+    assert.deepEqual(result.warnings, []);
+    assert.equal(result.complete, true);
+  }
+});
+
+test("failed, timed-out and unsupported ZFS queries cannot report complete empty discovery", async () => {
+  const failures = [
+    { capability: { status: "missing-tool", explanation: "zfs failed: cannot open /dev/zfs" }, stderr: "cannot open /dev/zfs", exitCode: 1 },
+    { capability: { status: "missing-tool", explanation: "/usr/sbin/zfs disappeared before it could run." }, exitCode: null },
+    { capability: { status: "missing-tool", explanation: "zfs did not finish within 10000 ms and was stopped." }, exitCode: null },
+    { capability: { status: "available", explanation: "zfs responded." }, exitCode: 1 },
+    ...["unsupported-kernel", "unsupported-filesystem", "unsupported-architecture"].map((status) => ({
+      capability: { status, explanation: `ZFS query is ${status}.` }, exitCode: null,
+    })),
+  ];
+  for (const zfs of failures) {
+    const environment = environmentFor();
+    const originalTools = environment.tools;
+    environment.tools = {
+      async run(name, argv) {
+        return name === "zfs"
+          ? { capability: zfs.capability, stdout: "", stderr: zfs.stderr ?? "", exitCode: zfs.exitCode }
+          : originalTools.run(name, argv);
+      },
+    };
+    const result = await discover(createSystemSnapshotsProvider({ timeshiftRoots: [] }), environment);
+    assert.equal(result.complete, false, zfs.capability.explanation);
+    assert.deepEqual(result.findings, []);
+    assert.equal(result.warnings.length, 1);
+    assert.equal(result.warnings[0].code, "zfs-unavailable");
+    assert.match(result.warnings[0].message, /query the pool/);
+  }
+});
+
+test("malformed ZFS rows make discovery incomplete without losing valid rows", async () => {
+  const result = await discover(
+    createSystemSnapshotsProvider({ timeshiftRoots: [] }),
+    environmentFor({ tools: { zfs: { stdout: "tank/data@good\t4096\nnot-a-snapshot\t2048\ntank/data@bad\tunknown\ntank/data@extra\t1\textra\n" } } }),
+  );
+  assert.equal(result.complete, false);
+  assert.equal(result.findings.length, 1);
+  assert.match(result.findings[0].title, /good/);
+  assert.equal(result.warnings.length, 1);
+  assert.equal(result.warnings[0].code, "zfs-output-unreadable");
+  assert.match(result.warnings[0].message, /3 ZFS snapshot rows were unreadable/);
+});
+
+test("snapshot queries receive cancellation and an aborted result is never returned as empty success", async () => {
+  for (const cancelDuring of ["btrfs", "zfs"]) {
+    const controller = new AbortController();
+    const calls = [];
+    const environment = environmentFor();
+    environment.tools = {
+      async run(name, _argv, signal) {
+        assert.equal(signal, controller.signal);
+        calls.push(name);
+        if (name === cancelDuring) controller.abort();
+        return { capability: { status: "missing-tool", explanation: `${name} is not installed.` }, stdout: "", stderr: "", exitCode: null };
+      },
+    };
+    await assert.rejects(
+      createSystemSnapshotsProvider({ timeshiftRoots: [] }).discover(environment, controller.signal),
+      { name: "AbortError" },
+    );
+    assert.deepEqual(calls, cancelDuring === "btrfs" ? ["btrfs"] : ["btrfs", "zfs"]);
+  }
+});

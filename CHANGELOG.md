@@ -17,14 +17,14 @@ release) is in progress:
   a first run on real hardware — an Arch laptop with Btrfs on LUKS, subvolume mounts, a
   Windows partition, and a locked 4 TB LUKS drive. Those hardware runs exposed
   accounting and mount-policy defects now covered by regressions. The local gate (`npm run check`,
-  the Rust format, lint, and test gates) passes: 1,076 unit and contract tests,
+  the Rust format, lint, and test gates) passes: 1,086 unit and contract tests,
   128 integration, 13 recovery, 18 PTY, and 266 helper tests. The seven ordinary
   integration skips are external-tool, namespace, second-filesystem and opt-in timer
   or disposable-manager cases; separate gates passed real cross-device/full-disk/
   full-journal/read-only actions, actual apt/DNF5/pacman cache cleanup, a real user
-  timer and SSH terminal restoration. All nine package checks
+  timer and SSH terminal restoration. All ten package checks
   passed on Node 26 glibc, Node 24 glibc and Node 24 musl. The million-entry benchmark
-  passed all six resource and latency checks. See [validation evidence](docs/release-readiness.md).
+  passed all seven resource and latency checks. See [validation evidence](docs/release-readiness.md).
 - **Publication gates:** green CI at the reviewed commit, including the ARM64 runners; the
   host and VM checks the support matrix still lists as not validated (distribution
   non-cache manager mutations under privilege, SMART health, ZFS and WSL); and,
@@ -61,6 +61,9 @@ release) is in progress:
   package-cache discovery enforces a 10,000-entry bound across repositories; an
   omitted AppImage or package cache can no longer masquerade as a complete empty result
   or an exact zero count.
+- Denied, failed or malformed ZFS snapshot readings report an incomplete result while
+  retaining readable snapshots. Missing optional tools remain benign, and snapshot
+  queries propagate cancellation without returning an empty success.
 - Private mount-namespace tests cover a full output filesystem, a read-only source and
   cross-device moves, with source bytes preserved on refusal. Dependency advisory checks
   now gate both CI and publication, and distro CI exercises read-only manager adapters.
