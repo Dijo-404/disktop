@@ -1,5 +1,4 @@
-import { mkdir, open, readdir, readFile, rename, rm } from "node:fs/promises";
-import { randomBytes } from "node:crypto";
+import { mkdir, readdir, rm } from "node:fs/promises";
 import { join } from "node:path";
 import type {
   ActionOperation,
@@ -27,9 +26,11 @@ import { rawPathFromBytes } from "../domain/paths.js";
 import { decimalBytes, parseDecimalBytes } from "../domain/sizes.js";
 import type { PlanStore } from "../ports/actions.js";
 import { PRIVATE_DIRECTORY_MODE } from "./xdg.js";
+import { readOwnFile, writeFileAtomically } from "./files.js";
 
 const PRIVATE_FILE_MODE = 0o600;
 const PLAN_SUFFIX = ".json";
+const MAX_PLAN_BYTES = 64 * 1024 * 1024;
 
 /** Bumped when the stored shape changes, so an old plan is skipped, not guessed at. */
 export const PLAN_VERSION = 2;
@@ -41,7 +42,7 @@ const MAX_EXPIRY_MILLISECONDS = 1440 * 60_000;
  * Reviewed plans on disk, one JSON file each, under `$XDG_STATE_HOME`.
  *
  * A plan is the authority an apply runs on, so two things matter here and
- * nothing else does. It is written to a temporary name and renamed into place,
+ * nothing else does. It is written to a temporary name and linked into place without overwrite,
  * so a crash mid-write leaves the previous file or none rather than a truncated
  * one that would apply half a plan. And every value round-trips exactly: paths
  * as base64 bytes, every count as a decimal string, so a plan reviewed against
@@ -55,32 +56,29 @@ export function createPlanStore(stateDirectory: string): PlanStore {
 
   return {
     async save(plan) {
+      if (!isSafePlanId(plan.id)) {
+        throw new RangeError("A plan ID names one file in the store and nothing else");
+      }
+      const encoded = `${JSON.stringify(encodePlan(plan), null, 2)}\n`;
+      if (Buffer.byteLength(encoded, "utf8") > MAX_PLAN_BYTES) {
+        throw new RangeError(`A plan cannot exceed ${MAX_PLAN_BYTES} bytes`);
+      }
       await mkdir(directory, { recursive: true, mode: PRIVATE_DIRECTORY_MODE });
       const target = join(directory, `${plan.id}${PLAN_SUFFIX}`);
-      const staging = `${target}.${randomBytes(6).toString("hex")}.partial`;
-
-      const handle = await open(staging, "wx", PRIVATE_FILE_MODE);
-      try {
-        await handle.writeFile(`${JSON.stringify(encodePlan(plan), null, 2)}\n`, "utf8");
-        // The bytes have to be on disk before the rename publishes them.
-        await handle.sync();
-      } finally {
-        await handle.close();
-      }
-      await rename(staging, target);
+      await writeFileAtomically(target, encoded, PRIVATE_FILE_MODE, { replaceExisting: false });
     },
 
     async get(id) {
       if (!isSafePlanId(id)) {
         return undefined;
       }
-      return readPlan(join(directory, `${id}${PLAN_SUFFIX}`));
+      return readPlan(join(directory, `${id}${PLAN_SUFFIX}`), id);
     },
 
     async list() {
       const plans: ActionPlan[] = [];
       for (const name of await planFiles(directory)) {
-        const plan = await readPlan(join(directory, name));
+        const plan = await readPlan(join(directory, name), name.slice(0, -PLAN_SUFFIX.length));
         if (plan !== undefined) {
           plans.push(plan);
         }
@@ -111,21 +109,23 @@ async function planFiles(directory: string): Promise<readonly string[]> {
   try {
     const names = await readdir(directory);
     return names.filter((name) => name.endsWith(PLAN_SUFFIX) && isSafePlanId(name.slice(0, -PLAN_SUFFIX.length)));
-  } catch {
-    return [];
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return [];
+    throw error;
   }
 }
 
-async function readPlan(path: string): Promise<ActionPlan | undefined> {
+async function readPlan(path: string, id: string): Promise<ActionPlan | undefined> {
   let source: string;
   try {
-    source = await readFile(path, "utf8");
+    source = await readOwnFile(path, MAX_PLAN_BYTES, { followSymlinks: false });
   } catch {
     return undefined;
   }
   try {
     const document: unknown = JSON.parse(source);
-    return decodePlan(document);
+    const plan = decodePlan(document);
+    return plan?.id === id ? plan : undefined;
   } catch {
     // A plan this build cannot read is a description it cannot act on. Guessing
     // at it would be applying an operation nobody reviewed.

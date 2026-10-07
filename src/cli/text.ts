@@ -1,6 +1,6 @@
 import type { OwnerShare } from "../application/explore.js";
 import { describeCommand, type ManagerScope } from "../domain/managers.js";
-import type { Alert, Filesystem, IndexedEntry, RawPath, StorageDevice, UnmountedVolume, Warning } from "../domain/models.js";
+import type { Alert, Filesystem, IndexedEntry, RawPath, StorageDevice, StorageVolume, UnmountedVolume, Warning } from "../domain/models.js";
 import type { DecidedGroup } from "../application/duplicates.js";
 import type { ScanSummary } from "../application/scan.js";
 import type { ElevatedOutcome } from "../application/elevated.js";
@@ -102,6 +102,24 @@ export function unmountedLines(volumes: readonly UnmountedVolume[], units: Units
     `${"Not mounted".padEnd(nameWidth)}  ${"Type".padEnd(typeWidth)}  ${"Size".padStart(10)}  ${"State".padEnd(17)}  Label`,
     ...rows.map((row) => `${row.name.padEnd(nameWidth)}  ${row.type.padEnd(typeWidth)}  ${row.size.padStart(10)}  ${row.state.padEnd(17)}  ${row.label}`.trimEnd()),
     "Their usage is unknown until they are mounted (or unlocked and mounted).",
+  ];
+}
+
+/** All partitions, including boot/recovery, swap and signatures lsblk could not read. */
+export function volumeLines(volumes: readonly StorageVolume[], units: Units): string[] {
+  const rows = volumes.map((volume) => ({
+    name: volume.devicePath,
+    type: volume.filesystemType ?? "unknown",
+    size: formatBytes(volume.sizeBytes, units),
+    state: volume.state === "unmounted" ? "not mounted" : volume.state,
+    detail: [...volume.mounts.map((mount) => mount.display), volume.label].filter((part) => part !== undefined).join(" "),
+  }));
+  const nameWidth = Math.max(6, ...rows.map((row) => row.name.length));
+  const typeWidth = Math.max(4, ...rows.map((row) => row.type.length));
+  return [
+    `${"Volume".padEnd(nameWidth)}  ${"Type".padEnd(typeWidth)}  ${"Size".padStart(10)}  ${"State".padEnd(11)}  Mounts / label`,
+    ...rows.map((row) => `${row.name.padEnd(nameWidth)}  ${row.type.padEnd(typeWidth)}  ${row.size.padStart(10)}  ${row.state.padEnd(11)}  ${row.detail}`.trimEnd()),
+    "Usage is unknown without a readable mount. An unknown signature does not mean the volume is empty.",
   ];
 }
 

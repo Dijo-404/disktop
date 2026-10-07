@@ -3,6 +3,7 @@
  * for each query shape, and what a helper refusal becomes on the Node side.
  */
 import assert from "node:assert/strict";
+import { getEventListeners } from "node:events";
 import { test } from "node:test";
 import { StaleScanIndex } from "../../dist/domain/errors.js";
 import { rawPathFromUtf8 } from "../../dist/domain/paths.js";
@@ -46,6 +47,35 @@ const PRUNED = {
 function query(filter = {}) {
   return { scanId: "scan-1790000000-0123456789abcdef", filter, sort: "allocated", order: "descending", limit: 50 };
 }
+
+test("cancelling an index page closes its dedicated read-only helper once and removes its listeners", async () => {
+  const controller = new AbortController();
+  let closes = 0;
+  let rejectRequest;
+  let submitted;
+  const ready = new Promise((resolve) => { submitted = resolve; });
+  const scanner = createNativeScanner({
+    indexDirectory: "/home/example/.cache/disktop",
+    start: async () => ({ started: true, client: {
+      request(_operation, _arguments, signal) {
+        assert.equal(signal, controller.signal);
+        submitted();
+        return new Promise((_, reject) => { rejectRequest = reject; });
+      },
+      async close() { closes += 1; rejectRequest?.(new Error("query helper closed")); },
+      diagnostics() { return ""; },
+    } }),
+  });
+  const request = scanner.query(query(), controller.signal);
+  const rejected = assert.rejects(request, { name: "AbortError" });
+  await ready;
+  controller.abort();
+  await rejected;
+  assert.equal(closes, 1);
+  assert.equal(getEventListeners(controller.signal, "abort").length, 0);
+  await assert.rejects(scanner.query(query(), controller.signal), { name: "AbortError" });
+  assert.equal(closes, 1);
+});
 
 test("a page of a scan the index has pruned is a stale index, not a failure", async () => {
   const { scanner } = scripted(() => PRUNED);

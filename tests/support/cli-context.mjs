@@ -61,6 +61,14 @@ export const FIXTURE_VIEW = {
   warnings: [],
   complete: true,
 };
+FIXTURE_VIEW.volumes = [
+  ...FIXTURE_VIEW.filesystems.map((filesystem) => ({
+    id: filesystem.source.split("/").at(-1), devicePath: filesystem.source,
+    deviceId: filesystem.deviceId, deviceIds: [filesystem.deviceId], type: "part",
+    sizeBytes: filesystem.totalBytes, filesystemType: filesystem.type, mounts: filesystem.mounts, state: "mounted",
+  })),
+  ...FIXTURE_VIEW.unmounted.map((volume) => ({ ...volume, deviceIds: [volume.deviceId], type: "part", mounts: [] })),
+];
 
 export const FIXTURE_SCAN = {
   scanId: "scan-1759190400-0a1b2c3d",

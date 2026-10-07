@@ -107,8 +107,9 @@ async function snapshotFiles(directory: string): Promise<readonly string[]> {
   try {
     const names = await readdir(directory);
     return names.filter((name) => name.endsWith(SNAPSHOT_SUFFIX) && isSafeId(name.slice(0, -SNAPSHOT_SUFFIX.length)));
-  } catch {
-    return [];
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return [];
+    throw error;
   }
 }
 
@@ -116,8 +117,9 @@ async function fileBytes(path: string): Promise<bigint> {
   try {
     const stats = await stat(path, { bigint: true });
     return stats.size;
-  } catch {
-    return 0n;
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return 0n;
+    throw error;
   }
 }
 

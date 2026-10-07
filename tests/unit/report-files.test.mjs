@@ -121,27 +121,29 @@ test("a name that is not UTF-8 is created byte for byte", async () => {
   assert.ok(names[0].equals(name));
 });
 
-test("on a filesystem without hard links the report is still published, and still never over anything", async () => {
-  const noLinks = async () => {
-    const error = new Error("Operation not permitted");
-    error.code = "EPERM";
-    throw error;
-  };
-  const files = createReportFiles({ link: noLinks });
-
+test("a filesystem without hard links refuses publication instead of risking a concurrent overwrite", async () => {
   const path = await directory();
   const target = join(path, "report.csv");
+  const files = createReportFiles({ link: async () => {
+    // Another process creates the target between preflight and publication.
+    await writeFile(target, "concurrent notes", { flag: "wx" });
+    throw Object.assign(new Error("Operation not supported"), { code: "EOPNOTSUPP" });
+  } });
+  assert.deepEqual(await files.check(rawPathFromUtf8(target)), { kind: "clear" });
   const outcome = await files.createExclusive(rawPathFromUtf8(target), content);
-  assert.equal(outcome.kind, "written");
-  assert.deepEqual(await readFile(target), content);
+  assert.equal(outcome.kind, "refused");
+  assert.equal(outcome.failure.code, "unsupported");
+  assert.match(outcome.failure.message, /hard-link support/);
+  assert.equal(await readFile(target, "utf8"), "concurrent notes");
   await assertOnly(path, ["report.csv"]);
 
-  // Something appears at the name between the check and the write.
-  const raced = await files.createExclusive(rawPathFromUtf8(target), Buffer.from("second"));
-  assert.equal(raced.kind, "refused");
-  assert.match(raced.failure.message, /already exists/);
-  assert.deepEqual(await readFile(target), content, "the first report is untouched");
-  await assertOnly(path, ["report.csv"]);
+  const empty = await directory();
+  const refused = await createReportFiles({ link: async () => {
+    throw Object.assign(new Error("Operation not permitted"), { code: "EPERM" });
+  } }).createExclusive(rawPathFromUtf8(join(empty, "new.csv")), content);
+  assert.equal(refused.kind, "refused");
+  assert.equal(refused.failure.code, "unsupported");
+  await assertOnly(empty, [], "no placeholder or stage is left behind");
 });
 
 test("a link that fails for any other reason leaves nothing behind", async () => {

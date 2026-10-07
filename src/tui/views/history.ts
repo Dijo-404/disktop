@@ -50,7 +50,7 @@ export function renderHistory(context: ViewContext, home: string | undefined): V
   if (!history.loaded) {
     return {
       lines: emptyState(
-        history.failure === undefined ? ["Reading the action journal…"] : [history.failure, "Press r to try again."],
+        history.failure === undefined ? [`Reading the action journal${theme.glyphs.ellipsis}`] : [history.failure, "Press r to try again."],
         width,
         height,
         theme,
@@ -80,15 +80,24 @@ export function renderHistory(context: ViewContext, home: string | undefined): V
 
   const lines: ScreenLine[] = [];
   const hits: HitRegion[] = [];
-  const header = new LineBuilder(width)
-    .add("  ")
-    .add(padEnd("WHEN", 12), "heading")
-    .add(padEnd("ACTION", 15), "heading")
-    .add(padEnd("RESULT", 13), "heading")
-    .add(padStart("ITEMS", 7), "heading")
-    .add(padStart("SELECTED", 11), "heading");
-  if (width >= 80) header.add(padStart("TO TRASH", 11), "heading");
-  header.add("  UNDO", "heading");
+  // Result and undo remain visible on narrow terminals; byte columns give way.
+  const columns = {
+    when: width >= 72 ? 12 : 9,
+    result: 13,
+    items: width >= 56 ? 6 : 0,
+    selected: width >= 68 ? 11 : 0,
+    trash: width >= 80 ? 11 : 0,
+    undo: 6,
+  };
+  const actionWidth = Math.max(10, width - 2 - columns.when - columns.result - columns.items - columns.selected - columns.trash - columns.undo);
+  const header = new LineBuilder(width).add("  ")
+    .add(padEnd("WHEN", columns.when), "heading")
+    .add(padEnd("ACTION", actionWidth), "heading")
+    .add(padEnd("RESULT", columns.result), "heading");
+  if (columns.items > 0) header.add(padStart("ITEMS", columns.items), "heading");
+  if (columns.selected > 0) header.add(padStart("SELECTED", columns.selected), "heading");
+  if (columns.trash > 0) header.add(padStart("TO TRASH", columns.trash), "heading");
+  header.add(padStart("UNDO", columns.undo), "heading");
   lines.push(header.build());
 
   const detailHeight = height >= 14 ? Math.min(7, Math.floor(height / 3)) : 0;
@@ -101,15 +110,13 @@ export function renderHistory(context: ViewContext, home: string | undefined): V
     const badge = stateBadge(record, theme);
     const line = new LineBuilder(width)
       .add(selected ? `${theme.glyphs.pointer} ` : "  ", "accent")
-      .add(padEnd(relativeAge(Date.parse(record.startedAt), context.now), 12), "dim")
-      .add(padEnd(OPERATION_LABELS[record.operation] ?? record.operation, 15), "strong")
-      .add(padEnd(badge.text, 13), badge.style)
-      .add(padStart(groupDigits(record.completed), 7))
-      .add(padStart(record.selectedBytes === undefined ? "unknown" : formatBytes(record.selectedBytes, state.units), 11), record.selectedBytes === undefined ? "muted" : "normal");
-    if (width >= 80) {
-      line.add(padStart(record.bytesMovedToTrash > 0n ? formatBytes(record.bytesMovedToTrash, state.units) : "-", 11), "dim");
-    }
-    line.add("  ").add(canUndo(record) ? "u" : "-", canUndo(record) ? "key" : "muted");
+      .add(padEnd(relativeAge(Date.parse(record.startedAt), context.now), columns.when), "dim")
+      .add(padEnd(OPERATION_LABELS[record.operation] ?? record.operation, actionWidth), "strong")
+      .add(padEnd(badge.text, columns.result), badge.style);
+    if (columns.items > 0) line.add(padStart(groupDigits(record.completed), columns.items));
+    if (columns.selected > 0) line.add(padStart(record.selectedBytes === undefined ? "unknown" : formatBytes(record.selectedBytes, state.units), columns.selected), record.selectedBytes === undefined ? "muted" : "normal");
+    if (columns.trash > 0) line.add(padStart(record.bytesMovedToTrash > 0n ? formatBytes(record.bytesMovedToTrash, state.units) : "-", columns.trash), "dim");
+    line.add(padStart(canUndo(record) ? "u" : "-", columns.undo - 1), canUndo(record) ? "key" : "muted");
     lines.push(line.build({ selected }));
   }
 

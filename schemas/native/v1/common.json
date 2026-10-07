@@ -1014,7 +1014,7 @@
       }
     },
     "duplicateResult": {
-      "description": "Every group of identical files one search found. `complete` is false when a cap was reached, a file could not be read, or the search was cancelled, and a warning then says what was missed.",
+      "description": "Every group of identical files one search found. `complete` is false when a group/file cap or the 8 MiB conservative output budget was reached, a file could not be read or changed during hashing, or the search was cancelled, and a warning then says what was missed.",
       "type": "object",
       "additionalProperties": false,
       "required": [

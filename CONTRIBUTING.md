@@ -22,6 +22,9 @@ npm run check
 cargo fmt --manifest-path native/disktop-fs/Cargo.toml --all -- --check
 cargo clippy --manifest-path native/disktop-fs/Cargo.toml --all-targets -- -D warnings
 cargo test --manifest-path native/disktop-fs/Cargo.toml
+npm audit
+cargo install --locked cargo-audit --version 0.22.2
+cargo audit --file native/disktop-fs/Cargo.lock --deny warnings
 ```
 
 The packed package has its own smoke test, which needs this machine's release helper in
@@ -62,6 +65,28 @@ rejecting broken-pipe errors and stack traces when an output reader exits early.
 The distro jobs copy Node from setup-node's shared tool cache into a root-owned
 container path before the administrator inventory check. Disktop requires both its
 package and its Node executable to be root-owned when running under EUID 0.
+
+Filesystem fault tests create private mount namespaces and disposable tmpfs filesystems.
+They test full destinations, full journals, read-only sources and cross-device moves
+without touching host mounts. A user namespace that hides the root-owned ancestors of
+the journal is unsupported for mutation and explicitly skipped. Dedicated CI and publish
+gates keep those identities visible in a disposable container, retain only mount
+capability for the ordinary test account, mount the checkout read-only, and require
+all fault cases without skips.
+
+For the host's systemd user instance, run
+`DISKTOP_TEST_SYSTEMD=1 node --test tests/integration/timer-host.test.mjs` after a build.
+This uses throwaway unit files and runtime links, executes a fixture alert command,
+then disables and removes its own links. It leaves an existing Disktop timer alone.
+
+`DISKTOP_TEST_SSH=1 node --test tests/pty/ssh.test.mjs` exercises a real loopback SSH
+PTY with temporary keys and a private, public-key-only sshd. It requires OpenSSH and
+an ordinary user account; it never changes the system's SSH configuration. Quit and
+SIGINT must restore every terminal setting at 80×24 with ASCII and `NO_COLOR`.
+
+CI and the publish workflow both run `npm audit` and check the native lockfile with
+the pinned Cargo advisory checker. RustSec warnings and vulnerabilities block the
+release; advisories are never suppressed just to obtain a passing gate.
 
 ## Pull requests
 

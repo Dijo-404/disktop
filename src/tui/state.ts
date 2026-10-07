@@ -7,7 +7,7 @@ import type { ActionOperation, ActionPlan, SourceDisposition } from "../domain/a
 import type { DuplicateFile } from "../domain/duplicates.js";
 import type { OperationFailure } from "../domain/errors.js";
 import type { Finding, FindingCategory } from "../domain/findings.js";
-import type { Capability, IndexedEntry, RawPath, Warning } from "../domain/models.js";
+import type { Capability, Filesystem, IndexedEntry, RawPath, StorageVolume, Warning } from "../domain/models.js";
 import type { StalenessBasis } from "../domain/staleness.js";
 import type { JournalRecord } from "../ports/actions.js";
 import type { ElevatedRecord } from "../ports/elevated.js";
@@ -46,15 +46,15 @@ export function isActionable(finding: Finding): boolean {
  * for information, each part in the size order discovery returned.
  */
 export function findingsFor(tab: FindingsTab, findings: readonly Finding[]): readonly Finding[] {
-  const shown =
-    tab === "Dev"
-      ? findings.filter((finding) => DEV_CATEGORIES.has(finding.category))
-      : tab === "Apps"
-        ? findings.filter((finding) => APP_CATEGORIES.has(finding.category))
-        : // An installed application is inventory, shown under Apps, and never
-          // a cleanup candidate in its own right.
-          findings.filter((finding) => finding.category !== "installed-app");
-  return [...shown.filter(isActionable), ...shown.filter((finding) => !isActionable(finding))];
+  const actionable: Finding[] = [];
+  const informational: Finding[] = [];
+  for (const finding of findings) {
+    const shown = tab === "Dev" ? DEV_CATEGORIES.has(finding.category)
+      : tab === "Apps" ? APP_CATEGORIES.has(finding.category)
+        : finding.category !== "installed-app";
+    if (shown) (isActionable(finding) ? actionable : informational).push(finding);
+  }
+  return [...actionable, ...informational];
 }
 
 /** Work that is running, so the screen can say what it is waiting for. */
@@ -71,6 +71,33 @@ export interface DisksState {
   readonly selected: number;
 }
 
+export type DiskRow =
+  | { readonly kind: "filesystem"; readonly filesystem: Filesystem }
+  | { readonly kind: "volume"; readonly volume: StorageVolume };
+
+/** A measured filesystem appears once; every remaining storage volume is still visible. */
+export function diskRows(view: InventoryView): readonly DiskRow[] {
+  const sources = new Set(view.filesystems.map((filesystem) => filesystem.source));
+  const mounts = new Set(view.filesystems.flatMap((filesystem) => filesystem.mounts.map((mount) => mount.bytesBase64)));
+  const volumes = view.volumes ?? (view.unmounted ?? []).map((volume): StorageVolume => ({
+    ...volume,
+    type: "part",
+    deviceIds: [volume.deviceId],
+    mounts: [],
+  }));
+  return [
+    ...view.filesystems.map((filesystem): DiskRow => ({ kind: "filesystem", filesystem })),
+    ...volumes
+      .filter((volume) => !sources.has(volume.devicePath) && !volume.mounts.some((mount) => mounts.has(mount.bytesBase64)))
+      .map((volume): DiskRow => ({ kind: "volume", volume })),
+  ];
+}
+
+export function selectedDiskMount(state: AppState): RawPath | undefined {
+  const row = diskRows(state.disks.view)[state.disks.selected];
+  return row?.kind === "filesystem" ? row.filesystem.mounts[0] : row?.volume.mounts[0];
+}
+
 export type ExploreMode = "browse" | "largest" | "duplicates" | "stale" | "empty" | "broken" | "search";
 
 export const EXPLORE_MODES: readonly ExploreMode[] = ["browse", "largest", "duplicates", "stale", "empty", "broken"];
@@ -79,7 +106,7 @@ export type ExploreRow =
   | { readonly kind: "entry"; readonly entry: IndexedEntry }
   /** What is directly inside an unreadable directory, measured as root; not in the index. */
   | { readonly kind: "measured"; readonly path: RawPath; readonly bytes: bigint }
-  | { readonly kind: "group"; readonly group: DecidedGroup; readonly index: number }
+  | { readonly kind: "group"; readonly group: DecidedGroup; readonly index: number; readonly totalFiles?: number }
   | {
       readonly kind: "member";
       readonly file: DuplicateFile;
@@ -137,6 +164,7 @@ export interface FindingsState {
   readonly loadedAt?: number;
   readonly selected: Readonly<Record<FindingsTab, number>>;
   readonly showProviders: boolean;
+  readonly selectedProvider: number;
   readonly failure?: string;
 }
 
@@ -252,7 +280,7 @@ export function initialState(view: InventoryView, units: "iec" | "si", staleDays
       growth: new Map(),
       loading: false,
     },
-    findings: { selected: { Clean: 0, Dev: 0, Apps: 0 }, showProviders: false },
+    findings: { selected: { Clean: 0, Dev: 0, Apps: 0 }, showProviders: false, selectedProvider: 0 },
     history: { records: [], reconciled: 0n, selected: 0, loaded: false },
     showHelp: false,
     tick: 0,
@@ -263,13 +291,13 @@ export function initialState(view: InventoryView, units: "iec" | "si", staleDays
 export function listLength(state: AppState): number {
   switch (state.tab) {
     case "Disks":
-      return state.disks.view.filesystems.length + state.disks.view.unmounted.length;
+      return diskRows(state.disks.view).length;
     case "Explore":
       return state.explore.rows.length;
     case "Clean":
     case "Dev":
     case "Apps":
-      return findingsFor(state.tab, state.findings.summary?.findings ?? []).length;
+      return state.findings.showProviders ? state.findings.summary?.providers.length ?? 0 : findingsFor(state.tab, state.findings.summary?.findings ?? []).length;
     case "History":
       return state.history.records.length;
   }
@@ -284,7 +312,7 @@ export function selectedIndex(state: AppState): number {
     case "Clean":
     case "Dev":
     case "Apps":
-      return state.findings.selected[state.tab];
+      return state.findings.showProviders ? state.findings.selectedProvider : state.findings.selected[state.tab];
     case "History":
       return state.history.selected;
   }
@@ -322,6 +350,7 @@ export function selectRow(state: AppState, index: number): AppState {
     case "Clean":
     case "Dev":
     case "Apps":
+      if (state.findings.showProviders) return { ...state, findings: { ...state.findings, selectedProvider: target } };
       return {
         ...state,
         findings: { ...state.findings, selected: { ...state.findings.selected, [state.tab]: target } },

@@ -95,6 +95,11 @@ jobs:
       - uses: ./.github/actions/release-toolchain
       - name: Install locked npm dependencies
         run: npm ci
+      - name: Audit locked dependencies
+        run: |
+          npm audit
+          cargo install --locked cargo-audit --version 0.22.2
+          cargo audit --file native/disktop-fs/Cargo.lock --deny warnings
       - name: Run TypeScript and contract gates
         run: |
           npm run typecheck
@@ -110,7 +115,8 @@ jobs:
           npm run test:integration
           npm run test:recovery
           npm run test:pty
-          npm run test:performance
+          cargo build --release --locked --manifest-path native/disktop-fs/Cargo.toml
+          DISKTOP_REQUIRE_RELEASE_BENCHMARK=1 node --test tests/performance/*.test.mjs
       # The same script CI runs on every push: --release --locked through
       # cargo zigbuild, each binary checked against its name, SHA256SUMS
       # written, and the x86-64 builds asked hello.
@@ -131,6 +137,18 @@ jobs:
           done
       - name: Build the application from a clean dist/
         run: npm run build
+      - name: Require full-disk, full-journal, read-only and cross-device safety
+        run: >-
+          docker run --rm --cap-add SYS_ADMIN
+          --security-opt seccomp=unconfined --security-opt apparmor=unconfined
+          --env DISKTOP_TEST_REQUIRE_FILESYSTEM_FAULTS=1 --env HOME=/tmp
+          --volume "$GITHUB_WORKSPACE:/disktop:ro" --workdir /disktop
+          node:24-bookworm sh -c
+          'chmod u-s /usr/bin/mount /usr/bin/umount;
+          unshare --mount --fork setpriv --reuid "$(stat -c %u /disktop)"
+          --regid "$(stat -c %g /disktop)" --clear-groups
+          --inh-caps +sys_admin --ambient-caps +sys_admin
+          node --test tests/integration/filesystem-failures.test.mjs'
       - name: Pack the exact artifact for review and publication
         id: pack
         run: |

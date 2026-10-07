@@ -79,34 +79,42 @@ const MANAGERS: readonly ManagerSpec[] = [
 ];
 
 /**
- * Every package manager on this machine, asked once each.
+ * Every package manager on this machine, asked once per discovery task.
  *
  * A manager that is absent, or that fails, keeps its row with the reason. A
  * count is only ever taken from a command that actually answered: inferring
  * "zero packages" from a failed command would be reporting an empty machine.
  */
 export function createPackageInventory(tools: ToolPort): PackageInventoryPort {
-  // One reading per process. A detector probes and then discovers, and asking
+  // One reading per task. A detector probes and then discovers, and asking
   // seven package managers twice doubles the slowest part of `disktop clean`
   // for an answer that cannot have changed in between.
   let reading: Promise<readonly ManagerInventory[]> | undefined;
+  const tasks = new WeakMap<AbortSignal, Promise<readonly ManagerInventory[]>>();
 
   return {
-    async list() {
-      reading ??= (async () => {
+    async list(signal) {
+      signal?.throwIfAborted();
+      const previous = signal === undefined ? reading : tasks.get(signal);
+      if (previous !== undefined) return previous;
+      const current = (async () => {
         const inventories: ManagerInventory[] = [];
         for (const spec of MANAGERS) {
-          inventories.push(await ask(tools, spec));
+          signal?.throwIfAborted();
+          inventories.push(await ask(tools, spec, signal));
         }
         return inventories;
       })();
-      return reading;
+      if (signal === undefined) reading = current;
+      else tasks.set(signal, current);
+      return current;
     },
   };
 }
 
-async function ask(tools: ToolPort, spec: ManagerSpec): Promise<ManagerInventory> {
-  const outcome = await tools.run(spec.tool, spec.commandArguments);
+async function ask(tools: ToolPort, spec: ManagerSpec, signal?: AbortSignal): Promise<ManagerInventory> {
+  const outcome = await tools.run(spec.tool, spec.commandArguments, signal);
+  signal?.throwIfAborted();
   if (outcome.capability.status !== "available") {
     return { manager: spec.manager, capability: outcome.capability, packages: [], sizeMeaning: spec.sizeMeaning };
   }

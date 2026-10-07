@@ -39,6 +39,22 @@ export interface StorageDevice {
   readonly partitions: readonly string[];
 }
 
+/** Every persistent partition and logical volume, including those with no readable signature. */
+export interface StorageVolume {
+  readonly id: string;
+  readonly devicePath: string;
+  readonly deviceId: string;
+  /** All physical parents of a shared RAID or LVM volume. */
+  readonly deviceIds: readonly string[];
+  readonly type: string;
+  readonly sizeBytes: Bytes;
+  readonly filesystemType?: string;
+  readonly label?: string;
+  readonly mounts: readonly RawPath[];
+  /** Missing signatures are unknown, never evidence that a partition contains no data. */
+  readonly state: "mounted" | "unmounted" | "locked" | "swap" | "in-use" | "unknown";
+}
+
 export interface Filesystem {
   readonly id: string;
   readonly type: string;

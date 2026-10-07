@@ -16,6 +16,7 @@ import {
 import { entryLines, ownerLines, typeTotalLines, warningLines } from "../text.js";
 import type { Warning } from "../../domain/models.js";
 import { StaleScanIndex } from "../../domain/errors.js";
+import { interruptible } from "../interrupt.js";
 
 export interface ExploreOptions {
   readonly asJson: boolean;
@@ -79,7 +80,7 @@ export async function runExplore(context: CliContext, options: ExploreOptions): 
   // That is a reason to scan again, and it is said as one.
   let outcome: Awaited<ReturnType<typeof context.storage.explore.page>>;
   try {
-    outcome = await context.storage.explore.page({
+    ({ value: outcome } = await interruptible(context, (signal) => context.storage.explore.page({
       scanId: snapshot.scanId,
       // The path narrows the listing to that subtree. Using it only to choose a
       // snapshot would answer with the largest entries in the whole scan while
@@ -91,7 +92,7 @@ export async function runExplore(context: CliContext, options: ExploreOptions): 
       ...(options.cursor === undefined ? {} : { cursor: options.cursor }),
       includeTypeTotals: options.typeTotals,
       ...(options.owners === true ? { includeOwnerTotals: true } : {}),
-    });
+    }, signal)));
   } catch (error) {
     if (error instanceof StaleScanIndex) {
       return refuse(

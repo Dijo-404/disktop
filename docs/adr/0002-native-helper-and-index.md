@@ -83,6 +83,24 @@ and Disktop includes it, so the apparent totals answer different questions.
 Numbers were taken on one developer machine with a Btrfs working tree and a
 tmpfs `/tmp`; they are a regression baseline, not a promise about every host.
 
+**Final engineering pass, 2026-10-07.** `npm run bench` passed the unchanged budgets
+on a Btrfs working tree and Btrfs `/tmp`, using the release helper:
+
+| Figure | Observed |
+| --- | --- |
+| Node peak RSS, 100,000 → 1,000,000 entries | 79.1 → 80.5 MiB |
+| Helper peak RSS and first progress | 22.2 MiB; 102 ms |
+| End-to-end index page | 102 ms |
+| 500,000-child directory pages | 1.2 ms median; 2.8 ms slowest |
+| Helper RSS over 2,000 additional pages | 9.8 → 9.8 MiB |
+| Repeated duplicate/review operations over 100,000 same-size files | 20.1 MiB peak; descriptors 3 → 3 |
+| 1,000 truecolor frames over 10,000 retained rows | 0.75 MiB retained after GC; 2.01 ms/frame |
+| 20,000 refresh keys during a blocked task | 0.15 MiB retained; two jobs executed |
+
+CI and publication now build a release helper before performance validation and set
+`DISKTOP_REQUIRE_RELEASE_BENCHMARK=1`. That gate refuses a missing or stale release
+build instead of silently running non-binding debug timings.
+
 ## Alternatives considered
 
 Pure Node with `opendir` and `Dirent` cannot use `openat2`, cannot keep byte-exact names
@@ -102,3 +120,31 @@ the host's `libsqlite3`.
 
 A regression against these numbers is investigated before release. Restating a worse
 figure as the new budget is the failure this section exists to prevent.
+
+Node retains only the latest buffered scan progress reading. Durable per-item action
+outcomes apply pipe backpressure after 64 queued events; the current pipe chunk can
+finish parsing, so the queue is bounded by that chunk in addition to the threshold.
+Returning an event iterator cancels and drains to the terminal outcome, preserving
+journal completion. Already-aborted requests are never submitted. Directory discovery
+retains at most 4,096 raw names in a heap and streams the directory instead of loading
+its full entry list. Inventory capacity probes run in isolated read-only Node children
+so an unavailable hard network mount cannot occupy the application's libuv worker
+pool. Probes share simultaneous reads, time out, and remember unreaped children; at
+most eight can remain pending, and none can prevent the parent from exiting.
+Read-only system queries receive their discovery task's abort signal and terminate
+their whole process group on cancellation, timeout or output overflow. The abort
+listener is removed when the query settles, and unrelated discovery tasks keep their
+own signals. Helper checksums are streamed from pinned regular files in 64 KiB chunks;
+checksum lists are bounded no-follow reads and malformed installations are refused.
+
+Package and manager probes share one reading for a discovery task, keyed by its abort
+signal rather than kept across TUI refreshes. Discovery, previews and manager preflight
+queries receive that signal; verification and journal completion still finish after a
+mutation. Index queries own a dedicated read-only helper. Because SQLite runs on the
+helper's protocol reader, cancelling one closes that helper with bounded shutdown
+and reaping instead of waiting for a cancel message SQLite cannot read. This shutdown
+policy is confined to index queries; scans and actions keep their cooperative journal
+completion guarantees. Account-name reads retain at most 1 MiB from a regular file.
+Missing detector paths are absent answers, while permission denials and failed reads
+make discovery incomplete. A partial size measurement keeps the measurements obtained
+and marks the result incomplete for the footprints that remain unknown.

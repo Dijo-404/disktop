@@ -1,5 +1,5 @@
 import { describeCommand, type ManagerScope } from "../domain/managers.js";
-import type { Alert, Capability, Filesystem, IndexedEntry, RawPath, ScanCompleteness, StorageDevice, UnmountedVolume, Warning } from "../domain/models.js";
+import type { Alert, Capability, Filesystem, IndexedEntry, RawPath, ScanCompleteness, StorageDevice, StorageVolume, UnmountedVolume, Warning } from "../domain/models.js";
 import type { ScanTotals, TypeTotal } from "../ports/scan.js";
 import type { SnapshotSummary } from "../ports/snapshots.js";
 import type { DirectoryChange } from "../application/snapshots.js";
@@ -161,6 +161,21 @@ export function encodeUnmountedVolume(volume: UnmountedVolume): Record<string, u
     sizeBytes: decimalBytes(volume.sizeBytes),
     filesystemType: volume.filesystemType,
     ...(volume.label === undefined ? {} : { label: volume.label }),
+    state: volume.state,
+  };
+}
+
+export function encodeStorageVolume(volume: StorageVolume): Record<string, unknown> {
+  return {
+    id: volume.id,
+    devicePath: volume.devicePath,
+    deviceId: volume.deviceId,
+    deviceIds: [...volume.deviceIds],
+    type: volume.type,
+    sizeBytes: decimalBytes(volume.sizeBytes),
+    ...(volume.filesystemType === undefined ? {} : { filesystemType: volume.filesystemType }),
+    ...(volume.label === undefined ? {} : { label: volume.label }),
+    mounts: volume.mounts.map(encodeRawPath),
     state: volume.state,
   };
 }

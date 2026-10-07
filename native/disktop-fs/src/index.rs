@@ -607,6 +607,11 @@ impl<'a> PathResolver<'a> {
     }
 
     pub fn path(&mut self, parent: Option<i64>, name: &[u8]) -> rusqlite::Result<Vec<u8>> {
+        // A caller can stream millions of rows; its path memo must not retain
+        // every directory it has ever resolved.
+        if self.cache.len() >= 4096 {
+            self.cache.clear();
+        }
         let Some(parent) = parent else {
             // A root row holds its whole absolute path as its name.
             return Ok(name.to_vec());
@@ -625,6 +630,12 @@ impl<'a> PathResolver<'a> {
         let mut chain: Vec<(i64, Option<i64>, Vec<u8>)> = Vec::new();
         let mut current = Some(id);
         while let Some(next) = current {
+            if chain.len() > crate::subtree::MAX_DEPTH + 1 {
+                return Err(sqlite_failure(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "The index contains a cyclic or excessively deep parent chain.",
+                )));
+            }
             if self.cache.contains_key(&next) {
                 break;
             }
@@ -778,29 +789,35 @@ pub fn duplicate_sizes(
     sizes.collect()
 }
 
-/// Every regular file in the range of exactly this apparent size, in the
-/// order the walk found them.
-pub fn files_of_size(
+/// Stream every regular file in this size class without collecting its rows.
+/// The visitor returns false to stop immediately on cancellation.
+pub fn visit_files_of_size(
     connection: &Connection,
     under: Option<(i64, i64)>,
     apparent_bytes: u64,
-) -> rusqlite::Result<Vec<SizeCandidate>> {
+    mut visit: impl FnMut(SizeCandidate) -> rusqlite::Result<bool>,
+) -> rusqlite::Result<()> {
     let (first, last) = under.unwrap_or((i64::MIN, i64::MAX));
     let mut statement = connection.prepare_cached(
         "SELECT parent_id, name FROM entry INDEXED BY entry_apparent
          WHERE apparent_bytes = ?1 AND kind = ?2 AND shared = 0 AND id BETWEEN ?3 AND ?4
          ORDER BY id",
     )?;
-    let members = statement.query_map(
-        params![clamp(apparent_bytes), EntryKind::File.code(), first, last],
-        |row| {
-            Ok(SizeCandidate {
-                parent_id: row.get(0)?,
-                name: row.get(1)?,
-            })
-        },
-    )?;
-    members.collect()
+    let mut rows = statement.query(params![
+        clamp(apparent_bytes),
+        EntryKind::File.code(),
+        first,
+        last
+    ])?;
+    while let Some(row) = rows.next()? {
+        if !visit(SizeCandidate {
+            parent_id: row.get(0)?,
+            name: row.get(1)?,
+        })? {
+            break;
+        }
+    }
+    Ok(())
 }
 
 fn unclamp(value: i64) -> u64 {
@@ -872,6 +889,16 @@ pub fn kind_of(code: i64) -> EntryKind {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_cyclic_parent_chain_in_a_corrupted_index_is_refused_with_bounded_work() {
+        let connection = Connection::open_in_memory().unwrap();
+        connection.execute_batch("CREATE TABLE entry (id INTEGER PRIMARY KEY, parent_id INTEGER, name BLOB NOT NULL); INSERT INTO entry VALUES (1, 1, x'6379636c65');").unwrap();
+        let mut resolver = PathResolver::new(&connection);
+        let error = resolver.path(Some(1), b"file").unwrap_err();
+        assert!(error.to_string().contains("parent chain"));
+        assert!(resolver.cache.is_empty());
+    }
 
     #[test]
     fn an_extension_is_the_last_suffix_and_a_dotfile_has_none() {

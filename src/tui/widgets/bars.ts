@@ -25,6 +25,22 @@ export function barSpans(percent: number, width: number, theme: Theme, style: St
   return spans;
 }
 
+/** Activity while the tree's extent is unknown; this never implies a percentage. */
+export function activityBarSpans(width: number, tick: number, theme: Theme): Span[] {
+  const cells = Math.max(0, Math.trunc(width));
+  if (cells === 0) return [];
+  const pulse = Math.min(6, cells);
+  const distance = cells - pulse;
+  const phase = distance === 0 ? 0 : Math.abs(Math.trunc(tick)) % (distance * 2);
+  const start = phase <= distance ? phase : distance * 2 - phase;
+  const spans: Span[] = [
+    { text: theme.glyphs.barEmpty.repeat(start), style: "barEmpty" },
+    { text: theme.glyphs.barFull.repeat(pulse), style: "barUsed" },
+    { text: theme.glyphs.barEmpty.repeat(cells - start - pulse), style: "barEmpty" },
+  ];
+  return spans.filter((span) => span.text !== "");
+}
+
 /** A share of a whole as a percentage with one decimal where it matters. */
 export function sharePercent(part: bigint, whole: bigint): number {
   if (whole <= 0n || part <= 0n) {

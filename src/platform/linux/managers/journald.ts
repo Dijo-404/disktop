@@ -11,8 +11,10 @@ export interface JournaldPorts {
 export function createJournaldAdapter(ports: JournaldPorts): ManagerAdapter {
   const before = new Map<string, bigint | undefined>();
 
-  async function usage(): Promise<{ readonly bytes?: bigint; readonly discovery?: ManagerDiscovery }> {
-    const answer = await ports.tools.run("journalctl", ["--disk-usage"]);
+  async function usage(signal?: AbortSignal): Promise<{ readonly bytes?: bigint; readonly discovery?: ManagerDiscovery }> {
+    signal?.throwIfAborted();
+    const answer = await ports.tools.run("journalctl", ["--disk-usage"], signal);
+    signal?.throwIfAborted();
     if (answer.capability.status !== "available") {
       return { discovery: { adapter: "journald", capability: answer.capability, proposals: [], warnings: [] } };
     }
@@ -20,8 +22,8 @@ export function createJournaldAdapter(ports: JournaldPorts): ManagerAdapter {
     return bytes === undefined ? {} : { bytes };
   }
 
-  async function discover(): Promise<ManagerDiscovery> {
-    const reading = await usage();
+  async function discover(signal?: AbortSignal): Promise<ManagerDiscovery> {
+    const reading = await usage(signal);
     if (reading.discovery !== undefined) {
       return reading.discovery;
     }
@@ -54,15 +56,15 @@ export function createJournaldAdapter(ports: JournaldPorts): ManagerAdapter {
   return {
     id: "journald",
     discover,
-    async preview(action) {
-      const discovery = await discover();
+    async preview(action, _parameters, signal) {
+      const discovery = await discover(signal);
       const proposal = discovery.proposals.find((candidate) => candidate.action === action);
       return proposal === undefined
         ? { kind: "refused", message: discovery.capability.explanation, capability: discovery.capability }
         : { kind: "proposal", proposal };
     },
-    async preflight(scope: ManagerScope) {
-      before.set(scope.action, (await usage()).bytes);
+    async preflight(scope: ManagerScope, signal) {
+      before.set(scope.action, (await usage(signal)).bytes);
       return { skipped: new Map() };
     },
     async verify(scope) {
