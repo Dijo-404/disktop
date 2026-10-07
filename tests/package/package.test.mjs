@@ -128,7 +128,7 @@ function filesUnder(directory, predicate) {
 
 /** What the package must contain, derived from the sources rather than restated. */
 function expectedFiles(vendorNames) {
-  const expected = new Set(["package.json", "README.md", "LICENSE", "CHANGELOG.md", "schemas/cli/v1/README.md", "vendor/bin/SHA256SUMS"]);
+  const expected = new Set(["package.json", "README.md", "LICENSE", "THIRD_PARTY_NOTICES", "CHANGELOG.md", "schemas/cli/v1/README.md", "vendor/bin/SHA256SUMS"]);
   for (const source of filesUnder(join(ROOT, "src"), (name) => name.endsWith(".ts") && !name.endsWith(".d.ts"))) {
     expected.add(`dist/${relative(join(ROOT, "src"), source).replace(/\.ts$/, ".js")}`);
   }
@@ -252,6 +252,14 @@ test("the packaged manifest is the public 1.0.0 CLI with no install-time code", 
     assert.equal(manifest.scripts?.[hook], undefined, `${hook} would run code at install time`);
   }
   assert.deepEqual(Object.keys(manifest.dependencies), ["terminal-kit"]);
+});
+
+test("the packed helpers carry the complete reviewed native third-party notices", () => {
+  assert.equal(
+    readFileSync(join(state.extracted, "THIRD_PARTY_NOTICES"), "utf8"),
+    readFileSync(join(ROOT, "THIRD_PARTY_NOTICES"), "utf8"),
+    "the tarball must retain every full licence text and attribution from its reviewed source tree",
+  );
 });
 
 test("every packaged helper matches SHA256SUMS and is the binary its name says", (context) => {

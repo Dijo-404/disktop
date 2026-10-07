@@ -1,0 +1,494 @@
+Zig 0.16.0 runtime attribution comments
+
+The following comment blocks are reproduced verbatim; identical blocks are listed once.
+No implementation code is included.
+
+Source files:
+  zig-0.16.0/lib/compiler_rt/cos.zig
+
+//! Ported from musl, which is licensed under the MIT license:
+//! https://git.musl-libc.org/cgit/musl/tree/COPYRIGHT
+//!
+//! https://git.musl-libc.org/cgit/musl/tree/src/math/cosf.c
+//! https://git.musl-libc.org/cgit/musl/tree/src/math/cos.c
+//! https://git.musl-libc.org/cgit/musl/tree/src/math/cosl.c
+
+
+Source files:
+  zig-0.16.0/lib/compiler_rt/exp.zig
+
+// Ported from musl, which is licensed under the MIT license:
+// https://git.musl-libc.org/cgit/musl/tree/COPYRIGHT
+//
+// https://git.musl-libc.org/cgit/musl/tree/src/math/expf.c
+// https://git.musl-libc.org/cgit/musl/tree/src/math/exp.c
+
+
+Source files:
+  zig-0.16.0/lib/compiler_rt/exp2.zig
+
+// Ported from musl, which is licensed under the MIT license:
+// https://git.musl-libc.org/cgit/musl/tree/COPYRIGHT
+//
+// https://git.musl-libc.org/cgit/musl/tree/src/math/exp2f.c
+// https://git.musl-libc.org/cgit/musl/tree/src/math/exp2.c
+
+
+Source files:
+  zig-0.16.0/lib/compiler_rt/floor_ceil.zig
+
+//! Ported from musl, which is MIT licensed.
+//! https://git.musl-libc.org/cgit/musl/tree/COPYRIGHT
+//!
+//! https://git.musl-libc.org/cgit/musl/tree/src/math/ceilf.c
+//! https://git.musl-libc.org/cgit/musl/tree/src/math/ceil.c
+//! https://git.musl-libc.org/cgit/musl/tree/src/math/ceill.c
+//!
+//! https://git.musl-libc.org/cgit/musl/tree/src/math/floorf.c
+//! https://git.musl-libc.org/cgit/musl/tree/src/math/floor.c
+//! https://git.musl-libc.org/cgit/musl/tree/src/math/floorl.c
+
+
+Source files:
+  zig-0.16.0/lib/compiler_rt/fma.zig
+
+//! Ported from musl, which is MIT licensed:
+//! https://git.musl-libc.org/cgit/musl/tree/COPYRIGHT
+//!
+//! https://git.musl-libc.org/cgit/musl/tree/src/math/fmal.c
+//! https://git.musl-libc.org/cgit/musl/tree/src/math/fmaf.c
+//! https://git.musl-libc.org/cgit/musl/tree/src/math/fma.c
+
+
+Source files:
+  zig-0.16.0/lib/compiler_rt/log.zig
+
+//! Ported from musl, which is licensed under the MIT license:
+//! https://git.musl-libc.org/cgit/musl/tree/COPYRIGHT
+//!
+//! https://git.musl-libc.org/cgit/musl/tree/src/math/logf.c?h=2d7d05f031e014068a61d3076c6178513395d2ae
+//! https://git.musl-libc.org/cgit/musl/tree/src/math/log.c?h=1b76ff0767d01df72f692806ee5adee13c67ef88
+
+
+Source files:
+  zig-0.16.0/lib/compiler_rt/log10.zig
+
+//! Ported from musl, which is licensed under the MIT license:
+//! https://git.musl-libc.org/cgit/musl/tree/COPYRIGHT
+//!
+//! https://git.musl-libc.org/cgit/musl/tree/src/math/log10f.c
+//! https://git.musl-libc.org/cgit/musl/tree/src/math/log10.c
+
+
+Source files:
+  zig-0.16.0/lib/compiler_rt/log2.zig
+
+//! Ported from musl, which is licensed under the MIT license:
+//! https://git.musl-libc.org/cgit/musl/tree/COPYRIGHT
+//!
+//! https://git.musl-libc.org/cgit/musl/tree/src/math/log2f.c
+//! https://git.musl-libc.org/cgit/musl/tree/src/math/log2.c
+
+
+Source files:
+  zig-0.16.0/lib/compiler_rt/rem_pio2.zig
+
+// Ported from musl, which is licensed under the MIT license:
+// https://git.musl-libc.org/cgit/musl/tree/COPYRIGHT
+//
+// https://git.musl-libc.org/cgit/musl/tree/src/math/__rem_pio2.c
+
+
+Source files:
+  zig-0.16.0/lib/compiler_rt/rem_pio2_large.zig
+
+// Ported from musl, which is licensed under the MIT license:
+// https://git.musl-libc.org/cgit/musl/tree/COPYRIGHT
+//
+// https://git.musl-libc.org/cgit/musl/tree/src/math/__rem_pio2_large.c
+
+
+Source files:
+  zig-0.16.0/lib/compiler_rt/rem_pio2f.zig
+
+// Ported from musl, which is licensed under the MIT license:
+// https://git.musl-libc.org/cgit/musl/tree/COPYRIGHT
+//
+// https://git.musl-libc.org/cgit/musl/tree/src/math/__rem_pio2f.c
+
+
+Source files:
+  zig-0.16.0/lib/compiler_rt/rem_pio2l.zig
+
+// Ported from musl, which is licensed under the MIT license:
+// https://git.musl-libc.org/cgit/musl/tree/COPYRIGHT
+//
+// https://git.musl-libc.org/cgit/musl/tree/src/math/__rem_pio2l.c
+
+
+Source files:
+  zig-0.16.0/lib/compiler_rt/round.zig
+
+//! Ported from musl, which is licensed under the MIT license:
+//! https://git.musl-libc.org/cgit/musl/tree/COPYRIGHT
+//!
+//! https://git.musl-libc.org/cgit/musl/tree/src/math/roundf.c
+//! https://git.musl-libc.org/cgit/musl/tree/src/math/round.c
+
+
+Source files:
+  zig-0.16.0/lib/compiler_rt/sin.zig
+
+//! Ported from musl, which is licensed under the MIT license:
+//! https://git.musl-libc.org/cgit/musl/tree/COPYRIGHT
+//!
+//! https://git.musl-libc.org/cgit/musl/tree/src/math/sinf.c
+//! https://git.musl-libc.org/cgit/musl/tree/src/math/sin.c
+//! https://git.musl-libc.org/cgit/musl/tree/src/math/sinl.c
+
+
+Source files:
+  zig-0.16.0/lib/compiler_rt/sqrt.zig
+
+//! Ported from musl, which is MIT licensed.
+//! https://git.musl-libc.org/cgit/musl/tree/COPYRIGHT
+//!
+//! https://git.musl-libc.org/cgit/musl/tree/src/math/sqrtf.c
+//! https://git.musl-libc.org/cgit/musl/tree/src/math/sqrt.c
+//! https://git.musl-libc.org/cgit/musl/tree/src/math/sqrtl.c
+
+
+Source files:
+  zig-0.16.0/lib/compiler_rt/tan.zig
+
+//! Ported from musl, which is licensed under the MIT license:
+//! https://git.musl-libc.org/cgit/musl/tree/COPYRIGHT
+//!
+//! https://git.musl-libc.org/cgit/musl/tree/src/math/tanf.c
+//! https://git.musl-libc.org/cgit/musl/tree/src/math/tan.c
+//! https://git.musl-libc.org/cgit/musl/tree/src/math/tanl.c
+//! https://golang.org/src/math/tan.go
+
+
+Source files:
+  zig-0.16.0/lib/compiler_rt/trig.zig
+
+// Ported from musl, which is licensed under the MIT license:
+// https://git.musl-libc.org/cgit/musl/tree/COPYRIGHT
+//
+// https://git.musl-libc.org/cgit/musl/tree/src/math/__cos.c
+// https://git.musl-libc.org/cgit/musl/tree/src/math/__cosdf.c
+// https://git.musl-libc.org/cgit/musl/tree/src/math/__sin.c
+// https://git.musl-libc.org/cgit/musl/tree/src/math/__sindf.c
+// https://git.musl-libc.org/cgit/musl/tree/src/math/__tand.c
+// https://git.musl-libc.org/cgit/musl/tree/src/math/__tandf.c
+// https://git.musl-libc.org/cgit/musl/tree/src/math/__sinl.c
+// https://git.musl-libc.org/cgit/musl/tree/src/math/__cosl.c
+// https://git.musl-libc.org/cgit/musl/tree/src/math/__tanl.c
+
+
+Source files:
+  zig-0.16.0/lib/compiler_rt/trunc.zig
+
+//! Ported from musl, which is MIT licensed.
+//! https://git.musl-libc.org/cgit/musl/tree/COPYRIGHT
+//!
+//! https://git.musl-libc.org/cgit/musl/tree/src/math/truncf.c
+//! https://git.musl-libc.org/cgit/musl/tree/src/math/trunc.c
+
+
+Source files:
+  zig-0.16.0/lib/std/math/acos.zig
+
+// Ported from musl, which is licensed under the MIT license:
+// https://git.musl-libc.org/cgit/musl/tree/COPYRIGHT
+//
+// https://git.musl-libc.org/cgit/musl/tree/src/math/acosf.c
+// https://git.musl-libc.org/cgit/musl/tree/src/math/acos.c
+// https://git.musl-libc.org/cgit/musl/tree/src/math/acosl.c
+//
+// Ported from ARM-software, which is licensed under the MIT license:
+// https://github.com/ARM-software/optimized-routines/blob/master/LICENSE
+//
+// https://github.com/ARM-software/optimized-routines/blob/master/math/aarch64/advsimd/acosf.c
+// https://github.com/ARM-software/optimized-routines/blob/master/math/aarch64/advsimd/acos.c
+
+
+Source files:
+  zig-0.16.0/lib/std/math/acosh.zig
+
+// Ported from musl, which is licensed under the MIT license:
+// https://git.musl-libc.org/cgit/musl/tree/COPYRIGHT
+//
+// https://git.musl-libc.org/cgit/musl/tree/src/math/acoshf.c
+// https://git.musl-libc.org/cgit/musl/tree/src/math/acosh.c
+
+
+Source files:
+  zig-0.16.0/lib/std/math/asin.zig
+
+// Ported from musl, which is licensed under the MIT license:
+// https://git.musl-libc.org/cgit/musl/tree/COPYRIGHT
+//
+// https://git.musl-libc.org/cgit/musl/tree/src/math/asinf.c
+// https://git.musl-libc.org/cgit/musl/tree/src/math/asin.c
+// https://git.musl-libc.org/cgit/musl/tree/src/math/asinl.c
+//
+// Ported from ARM-software, which is licensed under the MIT license:
+// https://github.com/ARM-software/optimized-routines/blob/master/LICENSE
+//
+// https://github.com/ARM-software/optimized-routines/blob/master/math/aarch64/advsimd/asinf.c
+// https://github.com/ARM-software/optimized-routines/blob/master/math/aarch64/advsimd/asin.c
+
+
+Source files:
+  zig-0.16.0/lib/std/math/asinh.zig
+
+// Ported from musl, which is licensed under the MIT license:
+// https://git.musl-libc.org/cgit/musl/tree/COPYRIGHT
+//
+// https://git.musl-libc.org/cgit/musl/tree/src/math/asinhf.c
+// https://git.musl-libc.org/cgit/musl/tree/src/math/asinh.c
+
+
+Source files:
+  zig-0.16.0/lib/std/math/atan.zig
+
+// Ported from musl, which is licensed under the MIT license:
+// https://git.musl-libc.org/cgit/musl/tree/COPYRIGHT
+//
+// https://git.musl-libc.org/cgit/musl/tree/src/math/atanf.c
+// https://git.musl-libc.org/cgit/musl/tree/src/math/atan.c
+// https://git.musl-libc.org/cgit/musl/tree/src/math/atanl.c
+//
+// Ported from ARM-software, which is licensed under the MIT license:
+// https://github.com/ARM-software/optimized-routines/blob/master/LICENSE
+//
+// https://github.com/ARM-software/optimized-routines/blob/master/math/aarch64/advsimd/atanf.c
+// https://github.com/ARM-software/optimized-routines/blob/master/math/aarch64/advsimd/atan.c
+
+
+Source files:
+  zig-0.16.0/lib/std/math/atan2.zig
+
+// Ported from musl, which is licensed under the MIT license:
+// https://git.musl-libc.org/cgit/musl/tree/COPYRIGHT
+//
+// https://git.musl-libc.org/cgit/musl/tree/src/math/atan2f.c
+// https://git.musl-libc.org/cgit/musl/tree/src/math/atan2.c
+
+
+Source files:
+  zig-0.16.0/lib/std/math/atanh.zig
+
+// Ported from musl, which is licensed under the MIT license:
+// https://git.musl-libc.org/cgit/musl/tree/COPYRIGHT
+//
+// https://git.musl-libc.org/cgit/musl/tree/src/math/atanhf.c
+// https://git.musl-libc.org/cgit/musl/tree/src/math/atanh.c
+
+
+Source files:
+  zig-0.16.0/lib/std/math/cbrt.zig
+
+// Ported from musl, which is licensed under the MIT license:
+// https://git.musl-libc.org/cgit/musl/tree/COPYRIGHT
+//
+// https://git.musl-libc.org/cgit/musl/tree/src/math/cbrtf.c
+// https://git.musl-libc.org/cgit/musl/tree/src/math/cbrt.c
+
+
+Source files:
+  zig-0.16.0/lib/std/math/complex/atan.zig
+
+// Ported from musl, which is licensed under the MIT license:
+// https://git.musl-libc.org/cgit/musl/tree/COPYRIGHT
+//
+// https://git.musl-libc.org/cgit/musl/tree/src/complex/catanf.c
+// https://git.musl-libc.org/cgit/musl/tree/src/complex/catan.c
+
+
+Source files:
+  zig-0.16.0/lib/std/math/complex/cosh.zig
+
+// Ported from musl, which is licensed under the MIT license:
+// https://git.musl-libc.org/cgit/musl/tree/COPYRIGHT
+//
+// https://git.musl-libc.org/cgit/musl/tree/src/complex/ccoshf.c
+// https://git.musl-libc.org/cgit/musl/tree/src/complex/ccosh.c
+
+
+Source files:
+  zig-0.16.0/lib/std/math/complex/exp.zig
+
+// Ported from musl, which is licensed under the MIT license:
+// https://git.musl-libc.org/cgit/musl/tree/COPYRIGHT
+//
+// https://git.musl-libc.org/cgit/musl/tree/src/complex/cexpf.c
+// https://git.musl-libc.org/cgit/musl/tree/src/complex/cexp.c
+
+
+Source files:
+  zig-0.16.0/lib/std/math/complex/ldexp.zig
+
+// Ported from musl, which is licensed under the MIT license:
+// https://git.musl-libc.org/cgit/musl/tree/COPYRIGHT
+//
+// https://git.musl-libc.org/cgit/musl/tree/src/complex/__cexpf.c
+// https://git.musl-libc.org/cgit/musl/tree/src/complex/__cexp.c
+
+
+Source files:
+  zig-0.16.0/lib/std/math/complex/sinh.zig
+
+// Ported from musl, which is licensed under the MIT license:
+// https://git.musl-libc.org/cgit/musl/tree/COPYRIGHT
+//
+// https://git.musl-libc.org/cgit/musl/tree/src/complex/csinhf.c
+// https://git.musl-libc.org/cgit/musl/tree/src/complex/csinh.c
+
+
+Source files:
+  zig-0.16.0/lib/std/math/complex/sqrt.zig
+
+// Ported from musl, which is licensed under the MIT license:
+// https://git.musl-libc.org/cgit/musl/tree/COPYRIGHT
+//
+// https://git.musl-libc.org/cgit/musl/tree/src/complex/csqrtf.c
+// https://git.musl-libc.org/cgit/musl/tree/src/complex/csqrt.c
+
+
+Source files:
+  zig-0.16.0/lib/std/math/complex/tanh.zig
+
+// Ported from musl, which is licensed under the MIT license:
+// https://git.musl-libc.org/cgit/musl/tree/COPYRIGHT
+//
+// https://git.musl-libc.org/cgit/musl/tree/src/complex/ctanhf.c
+// https://git.musl-libc.org/cgit/musl/tree/src/complex/ctanh.c
+
+
+Source files:
+  zig-0.16.0/lib/std/math/cosh.zig
+
+// Ported from musl, which is licensed under the MIT license:
+// https://git.musl-libc.org/cgit/musl/tree/COPYRIGHT
+//
+// https://git.musl-libc.org/cgit/musl/tree/src/math/coshf.c
+// https://git.musl-libc.org/cgit/musl/tree/src/math/cosh.c
+
+
+Source files:
+  zig-0.16.0/lib/std/math/expm1.zig
+
+// Ported from musl, which is licensed under the MIT license:
+// https://git.musl-libc.org/cgit/musl/tree/COPYRIGHT
+//
+// https://git.musl-libc.org/cgit/musl/tree/src/math/expmf.c
+// https://git.musl-libc.org/cgit/musl/tree/src/math/expm.c
+
+
+Source files:
+  zig-0.16.0/lib/std/math/expo2.zig
+
+// Ported from musl, which is licensed under the MIT license:
+// https://git.musl-libc.org/cgit/musl/tree/COPYRIGHT
+//
+// https://git.musl-libc.org/cgit/musl/tree/src/math/__expo2f.c
+// https://git.musl-libc.org/cgit/musl/tree/src/math/__expo2.c
+
+
+Source files:
+  zig-0.16.0/lib/std/math/gamma.zig
+
+// Ported from musl, which is licensed under the MIT license:
+// https://git.musl-libc.org/cgit/musl/tree/COPYRIGHT
+//
+// https://git.musl-libc.org/cgit/musl/tree/src/math/tgamma.c
+
+
+Source files:
+  zig-0.16.0/lib/std/math/ilogb.zig
+
+// Ported from musl, which is MIT licensed.
+// https://git.musl-libc.org/cgit/musl/tree/COPYRIGHT
+//
+// https://git.musl-libc.org/cgit/musl/tree/src/math/ilogbl.c
+// https://git.musl-libc.org/cgit/musl/tree/src/math/ilogbf.c
+// https://git.musl-libc.org/cgit/musl/tree/src/math/ilogb.c
+
+
+Source files:
+  zig-0.16.0/lib/std/math/log.zig
+
+// Ported from musl, which is licensed under the MIT license:
+// https://git.musl-libc.org/cgit/musl/tree/COPYRIGHT
+//
+// https://git.musl-libc.org/cgit/musl/tree/src/math/logf.c
+// https://git.musl-libc.org/cgit/musl/tree/src/math/log.c
+
+
+Source files:
+  zig-0.16.0/lib/std/math/log10.zig
+
+// Based on Rust, which is licensed under the MIT license.
+// https://github.com/rust-lang/rust/blob/f63ccaf25f74151a5d8ce057904cd944074b01d2/LICENSE-MIT
+//
+// https://github.com/rust-lang/rust/blob/f63ccaf25f74151a5d8ce057904cd944074b01d2/library/core/src/num/int_log10.rs
+
+
+Source files:
+  zig-0.16.0/lib/std/math/log1p.zig
+
+// Ported from musl, which is licensed under the MIT license:
+// https://git.musl-libc.org/cgit/musl/tree/COPYRIGHT
+//
+// https://git.musl-libc.org/cgit/musl/tree/src/math/log1pf.c
+// https://git.musl-libc.org/cgit/musl/tree/src/math/log1p.c
+
+
+Source files:
+  zig-0.16.0/lib/std/math/nextafter.zig
+
+// Based on nextafterf/nextafterl from mingw-w64 which are both public domain.
+// <https://github.com/mingw-w64/mingw-w64/blob/e89de847dd3e05bb8e46344378ce3e124f4e7d1c/mingw-w64-crt/math/nextafterf.c>
+// <https://github.com/mingw-w64/mingw-w64/blob/e89de847dd3e05bb8e46344378ce3e124f4e7d1c/mingw-w64-crt/math/nextafterl.c>
+
+
+Source files:
+  zig-0.16.0/lib/std/math/pow.zig
+
+// Ported from go, which is licensed under a BSD-3 license.
+// https://golang.org/LICENSE
+//
+// https://golang.org/src/math/pow.go
+
+
+Source files:
+  zig-0.16.0/lib/std/math/powi.zig
+
+// Based on Rust, which is licensed under the MIT license.
+// https://github.com/rust-lang/rust/blob/360432f1e8794de58cd94f34c9c17ad65871e5b5/LICENSE-MIT
+//
+// https://github.com/rust-lang/rust/blob/360432f1e8794de58cd94f34c9c17ad65871e5b5/src/libcore/num/mod.rs#L3423
+
+
+Source files:
+  zig-0.16.0/lib/std/math/sinh.zig
+
+// Ported from musl, which is licensed under the MIT license:
+// https://git.musl-libc.org/cgit/musl/tree/COPYRIGHT
+//
+// https://git.musl-libc.org/cgit/musl/tree/src/math/sinhf.c
+// https://git.musl-libc.org/cgit/musl/tree/src/math/sinh.c
+
+
+Source files:
+  zig-0.16.0/lib/std/math/tanh.zig
+
+// Ported from musl, which is licensed under the MIT license:
+// https://git.musl-libc.org/cgit/musl/tree/COPYRIGHT
+//
+// https://git.musl-libc.org/cgit/musl/tree/src/math/tanhf.c
+// https://git.musl-libc.org/cgit/musl/tree/src/math/tanh.c
+

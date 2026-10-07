@@ -211,3 +211,6 @@ only in temporary sandboxes. Security issues: see [SECURITY.md](SECURITY.md).
 ## License
 
 [Apache License 2.0](LICENSE).
+
+Bundled native components retain their upstream licences and copyright notices in
+[THIRD_PARTY_NOTICES](THIRD_PARTY_NOTICES), included in the npm package.

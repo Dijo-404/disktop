@@ -1,0 +1,138 @@
+{
+  "rustVersion": "1.93.0",
+  "zigVersion": "0.16.0",
+  "assets": [
+    {
+      "name": "Rust standard library copyright notices",
+      "version": "1.93.0",
+      "source": "Rust 1.93.0 distribution: share/doc/rust/COPYRIGHT-library.html",
+      "sha256": "d93d65853736bde4e8649691233a98848ba709673873aeb39487bc1ca6ee292a",
+      "file": "scripts/licenses/runtime/rust-1.93.0-COPYRIGHT-library.html"
+    },
+    {
+      "name": "Rust standard library Apache-2.0 license",
+      "version": "1.93.0",
+      "source": "Rust 1.93.0 distribution: share/doc/rust/licenses/Apache-2.0.txt",
+      "sha256": "074e6e32c86a4c0ef8b3ed25b721ca23aca83df277cd88106ef7177c354615ff",
+      "file": "scripts/licenses/runtime/rust-1.93.0-Apache-2.0.txt"
+    },
+    {
+      "name": "Rust standard library MIT license",
+      "version": "1.93.0",
+      "source": "Rust 1.93.0 distribution: share/doc/rust/licenses/MIT.txt",
+      "sha256": "b85dcd3e453d05982552c52b5fc9e0bdd6d23c6f8e844b984a88af32570b0cc0",
+      "file": "scripts/licenses/runtime/rust-1.93.0-MIT.txt"
+    },
+    {
+      "name": "Rust standard library Unicode-3.0 license",
+      "version": "1.93.0",
+      "source": "Rust 1.93.0 distribution: share/doc/rust/licenses/Unicode-3.0.txt",
+      "sha256": "f5062c9a188d81dfe66b56db4182dcf9e4b17c0d9b0d311a8e20b3a1b075c443",
+      "file": "scripts/licenses/runtime/rust-1.93.0-Unicode-3.0.txt"
+    },
+    {
+      "name": "Rust compiler-builtins license",
+      "version": "1.93.0",
+      "source": "https://raw.githubusercontent.com/rust-lang/rust/1.93.0/library/compiler-builtins/LICENSE.txt",
+      "sha256": "ab6eec6caf0fa5775e411c7a8bc6a45c4ef2956b0980b157ab74fc5cd62a928b",
+      "file": "scripts/licenses/runtime/rust-1.93.0-compiler-builtins-LICENSE.txt"
+    },
+    {
+      "name": "LLVM libunwind license",
+      "version": "Rust 1.93.0 LLVM 85a90d119deb25b518867cd37d62c7b93b575a6f",
+      "source": "https://raw.githubusercontent.com/rust-lang/llvm-project/85a90d119deb25b518867cd37d62c7b93b575a6f/libunwind/LICENSE.TXT",
+      "sha256": "b5efebcaca80879234098e52d1725e6d9eb8fb96a19fce625d39184b705f7b6d",
+      "file": "scripts/licenses/runtime/rust-1.93.0-libunwind-LICENSE.txt"
+    },
+    {
+      "name": "LLVM compiler-rt license",
+      "version": "Rust 1.93.0 LLVM 85a90d119deb25b518867cd37d62c7b93b575a6f",
+      "source": "https://raw.githubusercontent.com/rust-lang/llvm-project/85a90d119deb25b518867cd37d62c7b93b575a6f/compiler-rt/LICENSE.TXT",
+      "sha256": "1a8f1058753f1ba890de984e48f0242a3a5c29a6a8f2ed9fd813f36985387e8d",
+      "file": "scripts/licenses/runtime/rust-1.93.0-compiler-rt-LICENSE.txt"
+    },
+    {
+      "name": "LLVM compiler-rt contributor credits",
+      "version": "Rust 1.93.0 LLVM 85a90d119deb25b518867cd37d62c7b93b575a6f",
+      "source": "https://raw.githubusercontent.com/rust-lang/llvm-project/85a90d119deb25b518867cd37d62c7b93b575a6f/compiler-rt/CREDITS.TXT",
+      "sha256": "a9901f47a089da41e4690682d00ce4cedaa2baf41fedbe79beee366d43ac2461",
+      "file": "scripts/licenses/runtime/rust-1.93.0-compiler-rt-CREDITS.txt"
+    },
+    {
+      "name": "Zig runtime license",
+      "version": "0.16.0",
+      "source": "https://ziglang.org/download/0.16.0/zig-x86_64-linux-0.16.0.tar.xz : LICENSE (archive SHA256 70e49664a74374b48b51e6f3fdfbf437f6395d42509050588bd49abe52ba3d00)",
+      "sha256": "5c537d6853e005298a285d508cff9ac7192cea23576c840d485b2b586a7ff177",
+      "file": "scripts/licenses/runtime/zig-0.16.0-LICENSE.txt"
+    },
+    {
+      "name": "musl libc copyright and license",
+      "version": "1.2.5",
+      "source": "https://git.musl-libc.org/cgit/musl/tree/?id=0784374d561435f7c787a555aeab8ede699ed298 : COPYRIGHT; byte-identical to Zig 0.16.0 lib/libc/musl/COPYRIGHT",
+      "sha256": "f9bc4423732350eb0b3f7ed7e91d530298476f8fec0c6c427a1c04ade22655af",
+      "file": "scripts/licenses/runtime/musl-1.2.5-COPYRIGHT.txt"
+    },
+    {
+      "name": "musl supplemental third-party notices",
+      "version": "1.2.5 and Zig 0.16.0",
+      "source": "https://git.musl-libc.org/cgit/musl/tree/?id=0784374d561435f7c787a555aeab8ede699ed298 and https://ziglang.org/download/0.16.0/zig-x86_64-linux-0.16.0.tar.xz : license comment extraction",
+      "sha256": "8dc3e2c5b7d879e9f60dd4f1b606882e1cb7abd76eb44628360c4208e949b95a",
+      "file": "scripts/licenses/runtime/musl-1.2.5-third-party-notices.txt"
+    },
+    {
+      "name": "Zig runtime attribution comments",
+      "version": "0.16.0",
+      "source": "https://ziglang.org/download/0.16.0/zig-x86_64-linux-0.16.0.tar.xz : lib/c, lib/compiler_rt, lib/std/math license comment extraction",
+      "sha256": "3be5d3e4dafe0faf4185b9cf7463d8284c5f55290e218a20d90f6f7b97902c7c",
+      "file": "scripts/licenses/runtime/zig-0.16.0-runtime-notices.txt"
+    },
+    {
+      "name": "Go license for Zig math runtime derivatives",
+      "version": "go1.25.3 license text; derivative bundled in Zig 0.16.0",
+      "source": "https://raw.githubusercontent.com/golang/go/go1.25.3/LICENSE",
+      "sha256": "911f8f5782931320f5b8d1160a76365b83aea6447ee6c04fa6d5591467db9dad",
+      "file": "scripts/licenses/runtime/zig-runtime-Go-LICENSE.txt"
+    },
+    {
+      "name": "Arm optimized routines license for Zig math runtime derivatives",
+      "version": "v25.01 license text; derivative bundled in Zig 0.16.0",
+      "source": "https://raw.githubusercontent.com/ARM-software/optimized-routines/v25.01/LICENSE",
+      "sha256": "650afbf29f214451e02241adc42534e82c9d6ae2b38e2444b92b5a1ffcaf9346",
+      "file": "scripts/licenses/runtime/zig-runtime-Arm-LICENSE.txt"
+    },
+    {
+      "name": "Rust MIT license for Zig math runtime derivatives",
+      "version": "source revisions cited by Zig 0.16.0",
+      "source": "https://raw.githubusercontent.com/rust-lang/rust/360432f1e8794de58cd94f34c9c17ad65871e5b5/LICENSE-MIT ; https://raw.githubusercontent.com/rust-lang/rust/f63ccaf25f74151a5d8ce057904cd944074b01d2/LICENSE-MIT",
+      "sha256": "23f18e03dc49df91622fe2a76176497404e46ced8a715d9d2b67a7446571cca3",
+      "file": "scripts/licenses/runtime/zig-runtime-Rust-MIT-1.txt"
+    }
+  ],
+  "extractions": [
+    {
+      "file": "scripts/licenses/runtime/musl-1.2.5-third-party-notices.txt",
+      "sources": [
+        {
+          "url": "https://git.musl-libc.org/cgit/musl/tree/?id=0784374d561435f7c787a555aeab8ede699ed298",
+          "transport": "https://api.github.com/repos/ifduyue/musl/tarball/0784374d561435f7c787a555aeab8ede699ed298",
+          "transportArchiveSha256": "c2499f67c96f6da4dd67b852c182bfd1f093d20c2851d7224b0960cdb3e315ea"
+        },
+        {
+          "url": "https://ziglang.org/download/0.16.0/zig-x86_64-linux-0.16.0.tar.xz",
+          "archiveSha256": "70e49664a74374b48b51e6f3fdfbf437f6395d42509050588bd49abe52ba3d00"
+        }
+      ],
+      "method": "Inspect every .c/.h/.s/.S file in the musl v1.2.5 git source tree and Zig 0.16.0 lib/libc/musl. Extract complete non-greedy /* ... */ comment blocks containing copyright, SPDX-License-Identifier, redistribution and use, permission is hereby, permission to use, public domain, or licensed under (case-insensitive). Deduplicate byte-identical comments; list sorted source paths for each block; sort blocks by first source path. Preserve comment bytes verbatim including delimiters."
+    },
+    {
+      "file": "scripts/licenses/runtime/zig-0.16.0-runtime-notices.txt",
+      "sources": [
+        {
+          "url": "https://ziglang.org/download/0.16.0/zig-x86_64-linux-0.16.0.tar.xz",
+          "archiveSha256": "70e49664a74374b48b51e6f3fdfbf437f6395d42509050588bd49abe52ba3d00"
+        }
+      ],
+      "method": "Inspect every .zig file under lib/c, lib/compiler_rt and lib/std/math in the pinned Zig archive. Extract consecutive full // comment lines containing copyright, licensed under, MIT/BSD licensed, public domain or a license URL (case-insensitive). Deduplicate byte-identical blocks; list sorted source paths for each block; sort blocks by first source path. Preserve comment bytes verbatim including delimiters."
+    }
+  ]
+}
