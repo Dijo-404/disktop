@@ -76,11 +76,14 @@ The policy works on path bytes and cannot see ownership, so a root the user conf
 inside their own home but which another account can write to is not detected here; the
 helper checks ownership and parent safety against live descriptors before acting.
 
-**Edit a stored plan.** A plan carries a checksum and an expiry, which detect corruption
-and staleness. They do not defend against deliberate editing by the same user — nothing
-can, since the user owns the file — which is why revalidation against live fingerprints
-happens at apply time regardless of what the plan claims, and why the helper repeats the
-protected-path check independently.
+**Edit a stored plan.** Plans are private, bounded regular files opened without
+following symlinks. The ID inside must match the filename, expiry is validated, and
+publication refuses to replace an existing reviewed ID. Corruption or an unknown shape
+refuses the plan; there is no stored checksum that authenticates deliberate edits by
+another process running as the owner. Every operation and argument is re-derived from
+the validated data, and live fingerprints and the helper's independent protected-path
+policy remain the authority at apply time. A plan's internal ID can never direct prune
+outside the plan store.
 
 **Inject through a filename.** A name containing `\u001b[2J`, `\u009b2K`, U+202E, a
 newline, or a leading `=` reaches a terminal, a log, an HTML report, and a CSV cell.
@@ -103,7 +106,9 @@ hostile names in every format and check each property.
 file somebody did not mean to lose or a symlink planted to point at one. A report is
 staged under a fresh name and published with `link`, which refuses any existing name,
 symlinks included, so nothing is ever replaced or written through. As root, Disktop
-writes no report file at all; the person redirects stdout instead.
+writes no report file at all; the person redirects stdout instead. Filesystems without
+hard-link support refuse publication, because an exclusive placeholder followed by an
+ordinary rename could overwrite a file swapped in by another process.
 
 What this does *not* give is uniqueness: distinct byte sequences can render identically,
 and a file named `\u2400` looks like one containing a NUL byte. Two targets can therefore

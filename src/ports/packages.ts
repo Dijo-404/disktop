@@ -24,5 +24,5 @@ export interface ManagerInventory {
 }
 
 export interface PackageInventoryPort {
-  list(): Promise<readonly ManagerInventory[]>;
+  list(signal?: AbortSignal): Promise<readonly ManagerInventory[]>;
 }

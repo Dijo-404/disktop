@@ -1,11 +1,11 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { TuiController } from "../../dist/tui/controller.js";
+import { MAX_ROWS, TuiController } from "../../dist/tui/controller.js";
 import { renderScreen } from "../../dist/tui/screen.js";
-import { initialState } from "../../dist/tui/state.js";
+import { diskRows, initialState } from "../../dist/tui/state.js";
 import { ASCII_THEME } from "../../dist/tui/themes.js";
 import { FIXTURE_VIEW, rawPath } from "../support/cli-context.mjs";
-import { CHILDREN, HOME, NOW, PLAN, RECORDS, ROOT_ENTRY, SNAPSHOT, entry, fakeHooks, fakeServices } from "../support/tui-fixtures.mjs";
+import { CHILDREN, HOME, NOW, PLAN, RECORDS, ROOT_ENTRY, SNAPSHOT, SUMMARY, entry, fakeHooks, fakeServices } from "../support/tui-fixtures.mjs";
 
 async function setup(overrides = {}) {
   const services = fakeServices(overrides);
@@ -30,7 +30,7 @@ function calls(services, name) {
 test("vim keys and arrows move the selection, and it never passes either end", async () => {
   const { controller } = await setup();
   // Filesystems first, then the partitions nothing has mounted.
-  const last = FIXTURE_VIEW.filesystems.length + FIXTURE_VIEW.unmounted.length - 1;
+  const last = diskRows(FIXTURE_VIEW).length - 1;
   await press(controller, "j", "j", "j", "DOWN", "j", "j");
   assert.equal(controller.state.disks.selected, last);
   await press(controller, "k", "UP", "k", "k", "k", "k");
@@ -287,6 +287,58 @@ test("Esc stops a discovery that is taking too long", async () => {
   assert.equal(controller.state.busy, undefined);
 });
 
+test("directory lookup, listing, and distribution share the task's cancellation signal", async () => {
+  const { controller, services } = await setup();
+  const original = services.explore.page;
+  const signals = [];
+  services.explore.page = async (request, signal) => {
+    signals.push(signal);
+    return original(request);
+  };
+  await press(controller, "2");
+  assert.ok(signals.length >= 3, "the directory, children, and type totals were queried");
+  assert.ok(signals.every((signal) => signal instanceof AbortSignal));
+  assert.ok(signals.every((signal) => signal === signals[0]), "concurrent page work belongs to one cancellable task");
+});
+
+test("Esc cancels an expensive index page and preserves the previous listing", async () => {
+  const { controller, services } = await setup();
+  await press(controller, "2");
+  const previous = controller.state.explore.rows;
+  let signal;
+  services.explore.page = async (_request, taskSignal) => {
+    signal = taskSignal;
+    await new Promise((_resolve, reject) => taskSignal.addEventListener("abort", () => reject(new Error("Query cancelled")), { once: true }));
+    throw new Error("an aborted query cannot finish");
+  };
+  controller.handleKey("s");
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(controller.state.explore.loading, true);
+  controller.handleKey("ESCAPE");
+  assert.equal(signal.aborted, true);
+  await controller.idle();
+  assert.equal(controller.active, false);
+  assert.equal(controller.state.explore.loading, false);
+  assert.equal(controller.state.explore.rows, previous);
+  assert.equal(controller.state.notice.text, "Stopped.");
+});
+
+test("shutdown aborts in-flight index work before restoring the terminal", async () => {
+  const { controller, services } = await setup();
+  await press(controller, "2");
+  let signal;
+  services.explore.page = async (_request, taskSignal) => {
+    signal = taskSignal;
+    await new Promise((_resolve, reject) => taskSignal.addEventListener("abort", () => reject(new Error("Query cancelled")), { once: true }));
+    throw new Error("an aborted query cannot finish");
+  };
+  controller.handleKey("s");
+  await new Promise((resolve) => setImmediate(resolve));
+  await controller.shutdown();
+  assert.equal(signal.aborted, true);
+  assert.equal(controller.active, false);
+});
+
 test("the mouse selects rows, switches tabs, scrolls, and never reaches behind a dialog", async () => {
   const { controller } = await setup();
   const size = { columns: 80, rows: 24 };
@@ -406,4 +458,150 @@ test("A measures the directories a scan could not read as root, after saying so,
   // Opening it lists what was measured one level down.
   await press(controller, "g", "ENTER");
   assert.deepEqual(controller.state.explore.rows.map((item) => item.kind), ["measured"]);
+});
+
+test("a late read-only measurement cannot overwrite cancellation", async () => {
+  const incomplete = { ...SNAPSHOT, completeness: { ...SNAPSHOT.completeness, complete: false, inaccessibleDirectories: 1n } };
+  const { controller, services, hooks } = await setup({ snapshots: [incomplete] });
+  let release;
+  const delayed = new Promise((resolve) => { release = resolve; });
+  services.elevated.measure = async () => {
+    await delayed;
+    return {
+      kind: "measured", totalBytes: 1n, more: false, warnings: [],
+      record: { scanId: SNAPSHOT.scanId, measuredAt: new Date(NOW).toISOString(), accounting: "allocated", measurements: [{ path: ROOT_ENTRY.path, bytes: 1n, children: [] }], skipped: [] },
+    };
+  };
+  await press(controller, "2", "A");
+  controller.handleKey("y");
+  await new Promise((resolve) => setImmediate(resolve));
+  controller.handleKey("ESCAPE");
+  assert.equal(controller.state.notice.text, "Stopped.");
+  release();
+  await controller.idle();
+  assert.equal(controller.state.notice.text, "Stopped.");
+  assert.equal(controller.state.explore.elevated, undefined);
+  assert.equal(hooks.resumed, 1, "the terminal is returned after a cancelled prompt");
+});
+
+test("a burst of refreshes runs one service at a time and only starts the newest queued request", async () => {
+  let release;
+  const blocked = new Promise((resolve) => { release = resolve; });
+  let started = 0;
+  let active = 0;
+  let peak = 0;
+  const services = fakeServices();
+  services.dashboard.inventory = async () => {
+    started += 1;
+    active += 1;
+    peak = Math.max(peak, active);
+    if (started === 1) await blocked;
+    active -= 1;
+    return FIXTURE_VIEW;
+  };
+  const controller = new TuiController(services, initialState(FIXTURE_VIEW, "iec"), fakeHooks());
+  controller.start();
+  await new Promise((resolve) => setImmediate(resolve));
+  for (let index = 0; index < 100; index += 1) controller.handleKey("r");
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(started, 1, "superseded reads have not spawned additional helpers");
+  release();
+  await controller.idle();
+  assert.equal(started, 2, "only the latest refresh runs after the original drains");
+  assert.equal(peak, 1);
+  assert.equal(active, 0);
+});
+
+test("shutdown waits for a superseded read to drain and never starts its queued replacement", async () => {
+  let release;
+  let started = 0;
+  const blocked = new Promise((resolve) => { release = resolve; });
+  const services = fakeServices();
+  services.dashboard.inventory = async () => {
+    started += 1;
+    await blocked;
+    return FIXTURE_VIEW;
+  };
+  const controller = new TuiController(services, initialState(FIXTURE_VIEW, "iec"), fakeHooks());
+  controller.start();
+  await new Promise((resolve) => setImmediate(resolve));
+  controller.handleKey("r");
+  let stopped = false;
+  const shutdown = controller.shutdown(1000).then(() => { stopped = true; });
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(stopped, false);
+  release();
+  await shutdown;
+  assert.equal(started, 1);
+  assert.equal(controller.active, false);
+});
+
+test("a slow directory response cannot replace a newer duplicates finder", async () => {
+  let release;
+  const blocked = new Promise((resolve) => { release = resolve; });
+  const { controller } = await setup({
+    explorePage: async (request) => {
+      if (request.filter.atPath !== undefined) return { kind: "page", page: { entries: [ROOT_ENTRY] } };
+      if (request.filter.parentId !== undefined) {
+        await blocked;
+        return { kind: "page", page: { entries: CHILDREN } };
+      }
+      return { kind: "page", page: { entries: [] } };
+    },
+  });
+  controller.handleKey("2");
+  await new Promise((resolve) => setImmediate(resolve));
+  controller.handleKey("f");
+  controller.handleKey("f");
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(controller.state.explore.mode, "duplicates");
+  release();
+  await controller.idle();
+  assert.equal(controller.state.explore.mode, "duplicates");
+  assert.equal(controller.state.explore.rows.length, 0);
+  assert.equal(controller.state.explore.loading, false);
+});
+
+test("changing finders aborts duplicate hashing and keeps the newer finder on screen", async () => {
+  const { controller, services } = await setup();
+  await press(controller, "2");
+  let aborted = false;
+  services.find.find = async (request, signal) => {
+    if (request.kind !== "duplicates") return { kind: "found", entries: [CHILDREN[0]] };
+    await new Promise((resolve) => signal.addEventListener("abort", () => { aborted = true; resolve(); }, { once: true }));
+    return { kind: "duplicates", result: { kind: "found", groups: [], reclaimableBytes: 0n, complete: false, warnings: [], candidatesRead: 0n, filesHashed: 0n } };
+  };
+  controller.handleKey("f");
+  await controller.idle();
+  controller.handleKey("f");
+  await new Promise((resolve) => setImmediate(resolve));
+  controller.handleKey("f");
+  await controller.idle();
+  assert.equal(aborted, true);
+  assert.equal(controller.state.explore.mode, "stale");
+  assert.equal(controller.state.explore.rows.length, 1);
+  assert.equal(controller.state.busy, undefined);
+});
+
+test("a large duplicate group retains at most the TUI row bound and reports its true copy count", async () => {
+  const { controller, services } = await setup();
+  await press(controller, "2");
+  const files = Array.from({ length: MAX_ROWS + 100 }, (_, index) => ({ path: rawPath(`/home/example/projects/copy-${index}`), apparentBytes: 1048576n, allocatedBytes: 1048576n, device: 1n, inode: BigInt(index), ownerId: 1000n, modifiedNanoseconds: 1n, linkCount: 1n }));
+  services.find.find = async () => ({ kind: "duplicates", result: { kind: "found", groups: [{ group: { digest: "a".repeat(64), apparentBytes: 1048576n, files }, decision: { kind: "decided", kept: files[0], basis: "oldest" }, reclaimableBytes: 1n }], reclaimableBytes: 1n, complete: true, warnings: [], candidatesRead: BigInt(files.length), filesHashed: BigInt(files.length) } });
+  await press(controller, "f", "f");
+  assert.equal(controller.state.explore.rows.length, MAX_ROWS);
+  assert.equal(controller.state.explore.rows[0].totalFiles, files.length);
+  assert.equal(controller.state.explore.rows[0].group.group.files.length, MAX_ROWS - 1);
+  assert.match(controller.state.notice.text, /open a smaller directory/);
+});
+
+test("the detectors list scrolls independently and no hidden finding is planned", async () => {
+  const { controller, services } = await setup({ summary: { ...SUMMARY, providers: Array.from({ length: 70 }, (_, index) => ({ ...SUMMARY.providers[0], providerId: `detector-${index}` })) } });
+  await press(controller, "3", "p", "G");
+  assert.equal(controller.state.findings.selectedProvider, 69);
+  assert.equal(controller.state.findings.selected.Clean, 0);
+  await press(controller, "c", "ENTER");
+  assert.equal(calls(services, "plan").length, 0);
+  await press(controller, "p");
+  assert.equal(controller.state.findings.selected.Clean, 0);
 });

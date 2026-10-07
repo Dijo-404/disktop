@@ -78,6 +78,9 @@ const TRASH_NOTE =
 export function createApplyService(dependencies: ApplyDependencies): ApplyService {
   return {
     async apply(request, signal) {
+      if (signal.aborted) {
+        return refuse("cancelled", "The action was cancelled before it started; no files were changed.");
+      }
       const plan = await dependencies.store.get(request.planId);
       if (plan === undefined) {
         return refuse(
@@ -134,6 +137,9 @@ export function createApplyService(dependencies: ApplyDependencies): ApplyServic
       }
 
       let applied: ActionResult;
+      if (signal.aborted) {
+        return refuse("cancelled", "The action was cancelled before it started; no files were changed.");
+      }
       try {
         applied = await dependencies.actions.apply(plan, signal, {
           interactive: request.interactive ?? false,

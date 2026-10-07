@@ -19,6 +19,9 @@ export interface TimerDependencies {
 
 export function createTimerService(dependencies: TimerDependencies): TimerService {
   const settle = (outcome: TimerOutcome, warnings: readonly Warning[]): TimerResult => {
+    if (outcome.failure !== undefined) {
+      return { kind: "refused", failure: outcome.failure };
+    }
     if (outcome.capability.status !== "available") {
       return { kind: "refused", failure: { code: "unsupported", message: outcome.capability.explanation } };
     }
@@ -56,7 +59,7 @@ export function createTimerService(dependencies: TimerDependencies): TimerServic
     },
     async uninstall() {
       const outcome = await dependencies.port.uninstall();
-      if (outcome.refused) {
+      if (outcome.refused || outcome.failure !== undefined) {
         return settle(outcome, []);
       }
       return outcome.capability.status === "available" || outcome.units.some((unit) => unit.state === "removed")

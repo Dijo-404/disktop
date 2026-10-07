@@ -1,6 +1,6 @@
 import { LineBuilder, setClipMark, type Frame, type HitRegion, type ScreenLine, type ScreenSize } from "./frame.js";
 import type { AppState } from "./state.js";
-import { cellWidth, center } from "./text.js";
+import { cellWidth, center, stripControls, truncateStart } from "./text.js";
 import type { Theme } from "./themes.js";
 import { headerLine, hintLine, statusLine, tabLine } from "./widgets/chrome.js";
 import { fit, type ViewContext, type ViewOutput } from "./views/common.js";
@@ -88,13 +88,14 @@ export function renderScreen(state: AppState, size: ScreenSize, options: ScreenO
   if (state.prompt !== undefined && !state.showHelp && state.dialog === undefined) {
     const line = new LineBuilder(columns).add(" Filter ", "badgeInfo").add(" ");
     const column = line.used;
-    line.add(state.prompt.text, "input");
+    const shown = truncateStart(stripControls(state.prompt.text), Math.max(0, line.remaining - 1), theme.glyphs.ellipsis);
+    line.add(shown, "input");
     if (state.prompt.error !== undefined) {
       line.add("  ").add(`${theme.glyphs.warn} ${state.prompt.error}`, "warn");
     }
     status = line.build();
     hints = [["enter", "apply"], ["esc", "cancel"], ["^U", "clear"], ["", "words ext:log >1GiB age>30 type:dir"]];
-    cursor = { row: rows - 2, column: Math.min(columns - 1, column + cellWidth(state.prompt.text)) };
+    cursor = { row: rows - 2, column: Math.min(columns - 1, column + cellWidth(shown)) };
   }
 
   const lines: ScreenLine[] = [

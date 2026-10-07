@@ -4,6 +4,7 @@ import { renderScreen } from "./screen.js";
 import type { TuiServices } from "./services.js";
 import { initialState } from "./state.js";
 import type { Theme } from "./themes.js";
+import { stripControls } from "./text.js";
 
 export interface TuiOptions {
   readonly services: TuiServices;
@@ -36,6 +37,7 @@ export async function runTui(options: TuiOptions): Promise<number> {
   let paintTimer: NodeJS.Timeout | undefined;
   // True while the terminal is lent to a sudo or pkexec password prompt.
   let suspended = false;
+  let closed = false;
   let spinner: NodeJS.Timeout | undefined;
   let resolveExit: ((code: number) => void) | undefined;
   const exited = new Promise<number>((resolve) => {
@@ -44,6 +46,7 @@ export async function runTui(options: TuiOptions): Promise<number> {
 
   const paint = (): void => {
     paintTimer = undefined;
+    if (closed || suspended) return;
     const frame = renderScreen(controller.state, renderer.size(), {
       theme: options.theme,
       now: services.now().getTime(),
@@ -55,14 +58,14 @@ export async function runTui(options: TuiOptions): Promise<number> {
     syncSpinner();
   };
   const schedule = (): void => {
-    if (paintTimer === undefined) {
+    if (!closed && !suspended && paintTimer === undefined) {
       paintTimer = setTimeout(paint, FRAME_MILLISECONDS);
     }
   };
   // The spinner turns only while something is running, so an idle TUI wakes
   // nobody and draws nothing.
   const syncSpinner = (): void => {
-    const turning = controller.active || controller.state.explore.loading;
+    const turning = !closed && !suspended && (controller.active || controller.state.explore.loading);
     if (turning && spinner === undefined) {
       spinner = setInterval(() => controller.tick(), SPINNER_MILLISECONDS);
     } else if (!turning && spinner !== undefined) {
@@ -77,9 +80,13 @@ export async function runTui(options: TuiOptions): Promise<number> {
     size: () => renderer.size(),
     suspend: (message) => {
       suspended = true;
+      if (paintTimer !== undefined) clearTimeout(paintTimer);
+      paintTimer = undefined;
+      syncSpinner();
       renderer.suspend(message);
     },
     resume: () => {
+      if (closed) return;
       suspended = false;
       renderer.resume();
       schedule();
@@ -110,6 +117,7 @@ export async function runTui(options: TuiOptions): Promise<number> {
     exitCode = await exited;
     await controller.shutdown();
   } finally {
+    closed = true;
     if (paintTimer !== undefined) {
       clearTimeout(paintTimer);
     }
@@ -191,7 +199,7 @@ class TerminalRestoration {
       process.exitCode = 2;
       // The terminal is already restored, so the report is readable.
       const message = error instanceof Error ? error.message : String(error);
-      process.stderr.write(`Disktop stopped unexpectedly: ${message}\n`);
+      process.stderr.write(`Disktop stopped unexpectedly: ${stripControls(message)}\n`);
       process.exit(2);
     };
 

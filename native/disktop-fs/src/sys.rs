@@ -472,6 +472,67 @@ pub fn openat_create_exclusive(parent: RawFd, name: &[u8], mode: u32) -> io::Res
     Ok(result as RawFd)
 }
 
+/// Compare ACLs and all extended attributes through already-open inodes.
+/// Linux caps a list and each value at 64 KiB. Values are read one at a time,
+/// so attribute count cannot multiply the resident memory of this check.
+pub fn xattrs_equal(left: RawFd, right: RawFd) -> io::Result<bool> {
+    const MAX_XATTR_BYTES: usize = 64 * 1024;
+    fn names(descriptor: RawFd) -> io::Result<Vec<u8>> {
+        let mut names = vec![0u8; MAX_XATTR_BYTES];
+        let length =
+            unsafe { libc::flistxattr(descriptor, names.as_mut_ptr().cast(), names.len()) };
+        if length < 0 {
+            let error = io::Error::last_os_error();
+            if error.raw_os_error() == Some(libc::EOPNOTSUPP) {
+                return Ok(Vec::new());
+            }
+            return Err(error);
+        }
+        names.truncate(length as usize);
+        Ok(names)
+    }
+    let left_names = names(left)?;
+    let right_names = names(right)?;
+    let mut left_names: Vec<_> = left_names
+        .split(|byte| *byte == 0)
+        .filter(|name| !name.is_empty())
+        .collect();
+    let mut right_names: Vec<_> = right_names
+        .split(|byte| *byte == 0)
+        .filter(|name| !name.is_empty())
+        .collect();
+    left_names.sort_unstable();
+    right_names.sort_unstable();
+    if left_names != right_names {
+        return Ok(false);
+    }
+    let mut left_value = vec![0u8; MAX_XATTR_BYTES];
+    let mut right_value = vec![0u8; MAX_XATTR_BYTES];
+    for name in left_names {
+        let name = cstring(name)?;
+        let read = |descriptor, buffer: &mut Vec<u8>| -> io::Result<usize> {
+            let length = unsafe {
+                libc::fgetxattr(
+                    descriptor,
+                    name.as_ptr(),
+                    buffer.as_mut_ptr().cast(),
+                    buffer.len(),
+                )
+            };
+            if length < 0 {
+                return Err(io::Error::last_os_error());
+            }
+            Ok(length as usize)
+        };
+        let left_length = read(left, &mut left_value)?;
+        let right_length = read(right, &mut right_value)?;
+        if left_length != right_length || left_value[..left_length] != right_value[..right_length] {
+            return Ok(false);
+        }
+    }
+    Ok(true)
+}
+
 /// Space an unprivileged process can still use on the filesystem holding
 /// `path`: what `df` calls available and what a person means by free space.
 /// The blocks reserved for root are left out, because they are not space this

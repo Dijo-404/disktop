@@ -33,6 +33,7 @@ use std::thread::JoinHandle;
 
 const PROTOCOL_VERSION: u16 = 1;
 const MAX_REQUEST_BYTES: usize = 1024 * 1024;
+const MAX_WORKERS: usize = 8;
 const SUPPORTED_OPERATIONS: [&str; 18] = [
     "hello",
     "probe",
@@ -422,6 +423,27 @@ struct Server {
     workers: Mutex<Vec<JoinHandle<()>>>,
 }
 
+fn workers(server: &Server) -> std::sync::MutexGuard<'_, Vec<JoinHandle<()>>> {
+    server
+        .workers
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
+/// Join completed workers during the session, rather than retaining a handle
+/// and its thread resources until a long-running TUI eventually closes stdin.
+fn reap_workers(server: &Server) {
+    let mut workers = workers(server);
+    let mut position = 0;
+    while position < workers.len() {
+        if workers[position].is_finished() {
+            let _ = workers.swap_remove(position).join();
+        } else {
+            position += 1;
+        }
+    }
+}
+
 pub fn serve<R: BufRead, W: Write + Send + 'static>(mut input: R, output: W) -> io::Result<()> {
     let server = Arc::new(Server {
         channel: Arc::new(Channel {
@@ -431,7 +453,13 @@ pub fn serve<R: BufRead, W: Write + Send + 'static>(mut input: R, output: W) -> 
         workers: Mutex::new(Vec::new()),
     });
 
-    while let Some(line) = read_line(&mut input)? {
+    let input_result = loop {
+        let line = match read_line(&mut input) {
+            Ok(Some(line)) => line,
+            Ok(None) => break Ok(()),
+            Err(error) => break Err(error),
+        };
+        reap_workers(&server);
         match line {
             InputLine::Bytes(bytes) => handle_request(&server, &bytes),
             InputLine::TooLong => {
@@ -442,7 +470,7 @@ pub fn serve<R: BufRead, W: Write + Send + 'static>(mut input: R, output: W) -> 
                 ));
             }
         }
-    }
+    };
 
     // Stdin closing means the client is gone. Every running scan is told to
     // stop and then waited for, so each one still writes its final event and
@@ -450,11 +478,11 @@ pub fn serve<R: BufRead, W: Write + Send + 'static>(mut input: R, output: W) -> 
     for flag in registry(&server).values() {
         flag.store(true, Ordering::Relaxed);
     }
-    let workers = std::mem::take(&mut *server.workers.lock().expect("workers"));
+    let workers = std::mem::take(&mut *workers(&server));
     for worker in workers {
         let _ = worker.join();
     }
-    Ok(())
+    input_result
 }
 
 // Consume the entire oversized line, so the next request remains in sync,
@@ -527,6 +555,15 @@ fn handle_request(server: &Arc<Server>, line: &[u8]) {
             &responder,
             "unsupported-protocol-version",
             "The helper supports protocol version 1",
+        );
+        return;
+    }
+
+    if registry(server).contains_key(&request.request_id) {
+        fail(
+            &responder,
+            "invalid-request",
+            "requestId is already in use by an in-flight request; choose a unique ID.",
         );
         return;
     }
@@ -630,40 +667,22 @@ fn scan(server: &Arc<Server>, responder: Responder, arguments: Map<String, Value
     }
 
     let scan_id = new_scan_id();
-    let cancelled = Arc::new(AtomicBool::new(false));
-    registry(server).insert(responder.request_id.clone(), Arc::clone(&cancelled));
-
-    responder.emit(
-        "accepted",
-        json!({ "accepted": { "operation": "scan", "cancellable": true } }),
-    );
-
-    let owned = Arc::clone(server);
-    let worker = std::thread::spawn(move || {
-        let request_id = responder.request_id.clone();
-        // A panicking worker must still settle its request. A client waits for
-        // a terminal event and has no timeout, so a dropped one would hang it
-        // for as long as the helper lives.
-        let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+    spawn_cancellable(
+        server,
+        responder,
+        "scan",
+        "The scan failed unexpectedly and was abandoned. No file was changed.",
+        move |responder, cancelled| {
             run_scan(
-                &responder,
+                responder,
                 &scan_id,
                 &index_directory,
                 &options,
                 &limits,
-                &cancelled,
+                cancelled,
             );
-        }));
-        if outcome.is_err() {
-            fail(
-                &responder,
-                "internal-error",
-                "The scan failed unexpectedly and was abandoned. No file was changed.",
-            );
-        }
-        registry(&owned).remove(&request_id);
-    });
-    server.workers.lock().expect("workers").push(worker);
+        },
+    );
 }
 
 fn run_scan(
@@ -1034,6 +1053,19 @@ fn hash_candidates(server: &Arc<Server>, responder: Responder, arguments: Map<St
         Err(message) => return fail(&responder, "invalid-arguments", &message),
     };
 
+    if arguments
+        .maximum_groups
+        .is_some_and(|limit| !(1..=duplicates::MAX_GROUPS).contains(&limit))
+        || arguments
+            .maximum_files_per_group
+            .is_some_and(|limit| !(2..=duplicates::MAX_FILES_PER_GROUP).contains(&limit))
+    {
+        return fail(
+            &responder,
+            "invalid-arguments",
+            "maximumGroups must be 1 to 1000 and maximumFilesPerGroup must be 2 to 1000.",
+        );
+    }
     let index_directory = match decode_path(&arguments.index_directory) {
         Ok(path) => PathBuf::from(OsStr::from_bytes(&path)),
         Err(message) => return fail(&responder, "invalid-arguments", &message),
@@ -1653,6 +1685,15 @@ fn spawn_cancellable<F>(
 ) where
     F: FnOnce(&Responder, &AtomicBool) + Send + 'static,
 {
+    reap_workers(server);
+    if workers(server).len() >= MAX_WORKERS {
+        fail(
+            &responder,
+            "internal-error",
+            "The helper is busy with eight operations. Wait for one to finish, then retry.",
+        );
+        return;
+    }
     let cancelled = Arc::new(AtomicBool::new(false));
     registry(server).insert(responder.request_id.clone(), Arc::clone(&cancelled));
     responder.emit(
@@ -1660,20 +1701,30 @@ fn spawn_cancellable<F>(
         json!({ "accepted": { "operation": operation, "cancellable": true } }),
     );
 
+    let responder = Arc::new(responder);
+    let response = Arc::clone(&responder);
     let owned = Arc::clone(server);
-    let worker = std::thread::spawn(move || {
-        let request_id = responder.request_id.clone();
-        // A panicking worker still has to settle its request: a client waits
-        // for a terminal event and has no timeout.
+    let worker = std::thread::Builder::new().spawn(move || {
+        let request_id = response.request_id.clone();
         let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            work(&responder, &cancelled);
+            work(&response, &cancelled);
         }));
         if outcome.is_err() {
-            fail(&responder, "internal-error", abandoned);
+            fail(&response, "internal-error", abandoned);
         }
         registry(&owned).remove(&request_id);
     });
-    server.workers.lock().expect("workers").push(worker);
+    match worker {
+        Ok(worker) => workers(server).push(worker),
+        Err(error) => {
+            registry(server).remove(&responder.request_id);
+            fail(
+                &responder,
+                "internal-error",
+                &format!("The operation could not start a worker: {error}. Nothing was changed."),
+            );
+        }
+    }
 }
 
 /// What a client reads when a worker panicked rather than settling its own
@@ -2395,6 +2446,103 @@ mod tests {
             crate::base64::encode(index),
             crate::base64::encode(index),
         )
+    }
+
+    fn worker_server() -> (Arc<Server>, Recorder) {
+        let recorder = Recorder(Arc::new(Mutex::new(Vec::new())));
+        (
+            Arc::new(Server {
+                channel: Arc::new(Channel {
+                    output: Mutex::new(Box::new(recorder.clone())),
+                }),
+                cancellations: Mutex::new(HashMap::new()),
+                workers: Mutex::new(Vec::new()),
+            }),
+            recorder,
+        )
+    }
+
+    #[test]
+    fn duplicate_search_rejects_limits_outside_the_schema_before_opening_an_index() {
+        for (field, value) in [
+            ("maximumGroups", 0),
+            ("maximumGroups", 1001),
+            ("maximumFilesPerGroup", 0),
+            ("maximumFilesPerGroup", 1),
+            ("maximumFilesPerGroup", 1001),
+        ] {
+            let mut arguments = json!({ "scanId": "scan-test-1234", "indexDirectory": crate::base64::encode(b"/tmp/no-scan") });
+            arguments[field] = value.into();
+            let request = json!({ "protocolVersion": 1, "requestId": "invalid-limit", "operation": "hash-candidates", "arguments": arguments });
+            let events = responses(&format!("{request}\n"));
+            assert_eq!(events[0]["error"]["code"], "invalid-arguments");
+            assert!(
+                events[0]["error"]["message"]
+                    .as_str()
+                    .unwrap()
+                    .contains("maximumGroups")
+            );
+        }
+    }
+
+    #[test]
+    fn concurrent_worker_count_is_bounded_and_completed_workers_are_reaped() {
+        let (server, recorder) = worker_server();
+        let gate = Arc::new(std::sync::Barrier::new(MAX_WORKERS + 1));
+        for position in 0..MAX_WORKERS {
+            let gate = Arc::clone(&gate);
+            let responder =
+                Responder::new(Arc::clone(&server.channel), &format!("worker-{position}"));
+            spawn_cancellable(
+                &server,
+                responder,
+                "inspect",
+                SEARCH_ABANDONED,
+                move |responder, _| {
+                    gate.wait();
+                    responder.emit("complete", json!({ "result": {} }));
+                },
+            );
+        }
+        let responder = Responder::new(Arc::clone(&server.channel), "excess-worker");
+        spawn_cancellable(&server, responder, "inspect", SEARCH_ABANDONED, |_, _| {
+            panic!("must not spawn")
+        });
+        assert_eq!(workers(&server).len(), MAX_WORKERS);
+        let events = parse(&recorder.0.lock().unwrap());
+        assert!(
+            events
+                .iter()
+                .any(|event| event["requestId"] == "excess-worker" && event["event"] == "error")
+        );
+        gate.wait();
+        let finished = std::mem::take(&mut *workers(&server));
+        for worker in finished {
+            worker.join().unwrap();
+        }
+        assert!(registry(&server).is_empty());
+        // An already-finished join handle is removed during a live session.
+        let finished = std::thread::spawn(|| {});
+        while !finished.is_finished() {
+            std::thread::yield_now();
+        }
+        workers(&server).push(finished);
+        reap_workers(&server);
+        assert!(workers(&server).is_empty());
+    }
+
+    #[test]
+    fn a_reused_request_id_never_replaces_the_original_cancellation_flag() {
+        let (server, recorder) = worker_server();
+        let original = Arc::new(AtomicBool::new(false));
+        registry(&server).insert("active".to_owned(), Arc::clone(&original));
+        handle_request(
+            &server,
+            br#"{"protocolVersion":1,"requestId":"active","operation":"hello","arguments":{}}"#,
+        );
+        let events = parse(&recorder.0.lock().unwrap());
+        assert_eq!(events[0]["error"]["code"], "invalid-request");
+        assert!(Arc::ptr_eq(&registry(&server)["active"], &original));
     }
 
     #[test]

@@ -8,7 +8,7 @@ import { nextOperation, type Dialog } from "../state.js";
 import { cellWidth, groupDigits, relativeAge, truncateMiddle, truncateStart, wrap } from "../text.js";
 import { sanitizeText } from "../../domain/paths.js";
 import type { StyleName, Theme } from "../themes.js";
-import { boxInner, boxed, field } from "../widgets/box.js";
+import { boxFooterRow, boxInner, boxed, field } from "../widgets/box.js";
 import { CATEGORY_LABELS, findingSizeText } from "./findings.js";
 import type { ViewContext } from "./common.js";
 import type { Hint } from "../widgets/chrome.js";
@@ -77,7 +77,7 @@ export function renderDialog(dialog: Dialog, context: ViewContext, home: string 
         ...wrap(dialog.failure.message, inner).map((text) => new LineBuilder(inner).add(text).build()),
         ...Object.entries(dialog.failure.details ?? {}).map(([key, value]) => field(key, value, inner)),
         { spans: [] },
-        new LineBuilder(inner).add("Nothing was changed.", "dim").build(),
+        new LineBuilder(inner).add("No plan was applied.", "dim").build(),
       ];
       return {
         lines: boxed(dialog.title, content, context.width, context.height, context.theme, "danger", footer([["esc", "close"]], inner)),
@@ -287,7 +287,7 @@ function reviewDialog(dialog: Extract<Dialog, { kind: "review" }>, context: View
     footerLine = line.add("   esc cancel", "muted").build();
     const boxWidth = Math.max(20, Math.min(width - 2, 96));
     const left = Math.max(0, Math.floor((width - boxWidth) / 2));
-    cursor = { row: context.top + height - 2, column: left + 2 + column + dialog.typed.length };
+    cursor = { row: context.top + boxFooterRow(content, height), column: left + 2 + column + cellWidth(dialog.typed) };
   } else {
     footerLine = footer(
       [
@@ -354,7 +354,7 @@ function destinationDialog(dialog: Extract<Dialog, { kind: "destination" }>, con
   return {
     lines: boxed(OPERATION_NAMES[dialog.operation], content, width, height, theme, permanent ? "danger" : "accent", line.build()),
     hints,
-    cursor: { row: context.top + height - 2, column: left + 2 + column + cellWidth(shown) },
+    cursor: { row: context.top + boxFooterRow(content, height), column: left + 2 + column + cellWidth(shown) },
   };
 }
 
@@ -364,8 +364,12 @@ function appliedDialog(outcome: ApplyOutcome, context: ViewContext): DialogOutpu
   if (outcome.kind !== "applied") {
     const message = outcome.kind === "refused" ? outcome.failure.message : outcome.capability.explanation;
     const content = wrap(message, inner).map((text) => new LineBuilder(inner).add(text).build());
+    if (outcome.kind === "refused") {
+      content.push({ spans: [] });
+      content.push(...wrap("Open History to check whether any item was changed or needs recovery before trying again.", inner).map((text) => new LineBuilder(inner).add(text, "warn").build()));
+    }
     return {
-      lines: boxed("Not applied", content, width, height, theme, "danger", footer([["esc", "close"]], inner)),
+      lines: boxed(outcome.kind === "refused" ? "Apply did not complete" : "Cannot apply", content, width, height, theme, "danger", footer([["esc", "close"]], inner)),
       hints: [["esc", "close"]],
     };
   }
@@ -403,11 +407,12 @@ function appliedDialog(outcome: ApplyOutcome, context: ViewContext): DialogOutpu
       "Undo",
       result.undoAvailable
         ? [{ text: "History tab, select it, press u", style: "ok" }]
-        : [{ text: plan.reversibility === "irreversible" ? "not possible: this was irreversible" : "nothing left to restore", style: "muted" }],
+        : [{ text: result.state === "uncertain" ? "check History: the outcome is uncertain" : plan.reversibility === "irreversible" ? "not possible: this was irreversible" : "no restore is currently authorized", style: result.state === "uncertain" ? "warn" : "muted" }],
       inner,
       18,
     ),
   );
+  content.push(field("Journal", result.journalId, inner, 18));
   if (result.verification.length > 0) {
     content.push({ spans: [] });
     for (const check of result.verification) {
@@ -432,8 +437,12 @@ function undoneDialog(outcome: UndoOutcome, context: ViewContext): DialogOutput 
   const inner = boxInner(width);
   if (outcome.kind !== "restored") {
     const message = outcome.kind === "refused" ? outcome.failure.message : outcome.capability.explanation;
+    const content = wrap(message, inner).map((text) => new LineBuilder(inner).add(text).build());
+    if (outcome.kind === "refused") {
+      content.push(...wrap("Open History to check the recorded outcomes before trying again.", inner).map((text) => new LineBuilder(inner).add(text, "warn").build()));
+    }
     return {
-      lines: boxed("Not restored", wrap(message, inner).map((text) => new LineBuilder(inner).add(text).build()), width, height, theme, "danger", footer([["esc", "close"]], inner)),
+      lines: boxed(outcome.kind === "refused" ? "Restore did not complete" : "Cannot restore", content, width, height, theme, "danger", footer([["esc", "close"]], inner)),
       hints: [["esc", "close"]],
     };
   }
@@ -446,7 +455,8 @@ function undoneDialog(outcome: UndoOutcome, context: ViewContext): DialogOutput 
       .add(`${theme.glyphs.separator}${groupDigits(result.failed)} failed`, result.failed > 0n ? "danger" : "dim")
       .build(),
     { spans: [] },
-    field("Restored bytes", result.selectedBytes === undefined ? "unknown" : formatBytes(result.selectedBytes, state.units), inner, 18),
+    field("Selected bytes", result.selectedBytes === undefined ? "unknown" : formatBytes(result.selectedBytes, state.units), inner, 18),
+    field("Journal", result.journalId, inner, 18),
   ];
   for (const note of outcome.notes) {
     for (const [index, text] of wrap(note, inner - 2).entries()) {
@@ -454,7 +464,7 @@ function undoneDialog(outcome: UndoOutcome, context: ViewContext): DialogOutput 
     }
   }
   return {
-    lines: boxed("Restored", content, width, height, theme, "accent", footer([["esc", "close"]], inner)),
+    lines: boxed(result.state === "complete" ? "Restored" : result.state === "partial" ? "Partly restored" : "Restore uncertain", content, width, height, theme, result.state === "complete" ? "accent" : result.state === "partial" ? "warn" : "danger", footer([["esc", "close"]], inner)),
     hints: [["esc", "close"]],
   };
 }

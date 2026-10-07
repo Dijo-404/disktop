@@ -185,8 +185,10 @@ test("a package name cannot colour the terminal or break its finding id", async 
 
 test("each package manager is asked once per run, not once per probe and once per discovery", async () => {
   const calls = [];
+  const signal = new AbortController().signal;
   const tools = {
-    async run(name, args) {
+    async run(name, args, querySignal) {
+      assert.equal(querySignal, signal, "the probe and discovery belong to one cancellable task");
       calls.push(name);
       return {
         capability: { status: "available", explanation: "ran" },
@@ -199,8 +201,8 @@ test("each package manager is asked once per run, not once per probe and once pe
   const provider = createInstalledAppsProvider(createPackageInventory(tools));
   const environment = discoveryEnvironment(home);
 
-  await provider.probe(environment);
-  await provider.discover(environment, new AbortController().signal);
+  await provider.probe(environment, signal);
+  await provider.discover(environment, signal);
 
   const dpkg = calls.filter((name) => name === "dpkg-query").length;
   assert.equal(dpkg, 1, `dpkg-query ran ${dpkg} times for one clean`);
