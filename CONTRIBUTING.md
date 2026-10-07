@@ -6,7 +6,16 @@ Disktop is being built toward one initial public npm release, `1.0.0`. The phase
 
 Read [AGENTS.md](AGENTS.md) and [PLAN.md](PLAN.md) before changing code. The plan defines module ownership, platform boundaries, protocol and CLI contracts, and the feature acceptance matrix. For a change, identify the owning folder, affected port or schema, acceptance row, fixture, and relevant test.
 
-The Linux application uses Node.js 24 LTS as its baseline, checks Node 26 compatibility in CI, and uses a Rust helper. Use a current patched release within the supported Node lines and the pinned dependencies in `package.json`, `package-lock.json`, and `rust-toolchain.toml`. Install dependencies with `npm ci`; keep both npm and Cargo lockfiles committed. The checks are:
+The Linux application uses Node.js 24 LTS as its baseline, checks Node 26 compatibility in CI, and uses a Rust helper. Use a current patched release within the supported Node lines and the pinned dependencies in `package.json`, `package-lock.json`, and `rust-toolchain.toml`. Install dependencies with `npm ci`; keep both npm and Cargo lockfiles committed.
+
+Builds and type checks use TypeScript 7's native `tsc`. The `@typescript/native`
+npm alias supplies that executable; the `typescript` alias supplies Microsoft's
+TypeScript 6 compatibility API for `typescript-eslint`. This is the
+[supported side-by-side setup](https://devblogs.microsoft.com/typescript/announcing-typescript-7-0/#running-side-by-side-with-typescript-60).
+Keep both aliases when updating the compiler, and verify with a clean `npm ci`,
+type checking, and linting. Do not bypass incompatible peer dependencies.
+
+The checks are:
 
 ```sh
 npm run typecheck
