@@ -1,6 +1,8 @@
-# 1.0.0 release-candidate validation
+# 1.0.0 release and validation
 
-Engineering validation recorded on 2026-10-07. The package remains unpublished.
+`disktop@1.0.0` is publicly available on npm, with `latest` pointing to `1.0.0`.
+The registry records publication at **2026-10-07 18:05:58.620 UTC**.
+Engineering and independent postpublication verification passed on 2026-10-07.
 
 **Release-owner decision, 2026-10-07:** the remaining real-environment checks for
 SMART hardware health, ZFS, WSL and non-cache manager mutations are assigned to
@@ -9,10 +11,36 @@ deferred from the initial-publication prerequisites. The
 [support matrix](support-matrix.md) records their status; the
 [tester guide](tester-guide.md) describes the follow-up evidence.
 
-Automated CI, safety/recovery/performance/advisory gates, exact-artifact verification,
-reviewed source and protected workflow approval remain mandatory. Phase 8 is complete
-only after publication and registry-install/provenance verification. Neither has
-been observed yet. Follow the [publication steps](../CONTRIBUTING.md#publish-100).
+Phase 8 is **complete under that dated manual-check deferral**. All automated
+CI/safety/recovery/performance/advisory gates, exact-artifact verification and
+protected publication approval passed. Independent clean registry installation
+and cryptographic signature/provenance verification passed after the original
+publish workflow's immediate registry check failed. The read-only remote verification
+recovery also passed, without repeating publication.
+
+## Publication and verification
+
+| Evidence | Recorded result |
+| --- | --- |
+| Reviewed source | Tag [`v1.0.0`](https://github.com/Dijo-404/disktop/tree/v1.0.0), commit [`3d6448560d19d75b27fce75765819d89f36be09e`](https://github.com/Dijo-404/disktop/commit/3d6448560d19d75b27fce75765819d89f36be09e). |
+| Reviewed-source CI | [Run 37659556807](https://github.com/Dijo-404/disktop/actions/runs/37659556807): all 19 jobs passed. |
+| Protected publication | [Run 37661525351](https://github.com/Dijo-404/disktop/actions/runs/37661525351), attempt 1: build/artifact gates passed, protected approval was granted, and `npm publish` succeeded. The workflow's overall result is **failure** because its immediate registry verification returned 404. |
+| Public registry | [`disktop@1.0.0`](https://registry.npmjs.org/disktop/1.0.0) and `latest` are available. Actual publication timestamp: 2026-10-07T18:05:58.620Z. |
+| Registry tarball | [Downloaded artifact](https://registry.npmjs.org/disktop/-/disktop-1.0.0.tgz) matches the reviewed SHA-256 `a2deddd76c137e349370fb839b887baff14b3ec27c649f1ce809616bf8b39acd`; 7,925,061 compressed bytes and 192 allowed files. |
+| Clean registry consumer | Installation succeeded in a fresh prefix; CLI version is `1.0.0`. All ten package consumer checks passed with no skips, covering help/version, JSON, inventory, a real packaged-helper scan, global installation, npm execution and tamper refusal. |
+| npm signature audit | `npm audit signatures --json --include-attestations` passed with empty `invalid` and `missing` results, verifying `disktop@1.0.0` and its npm publish/SLSA v1 bundles. |
+| Independent cryptographic verification | Passed at 2026-10-07T18:15:40.150Z: both registry ECDSA signatures verified using TUF-authenticated keys; npm publish and SLSA DSSE/SCT/Rekor bundles verified. The certificate's GitHub OIDC issuer and exact `publish.yml@refs/heads/main` identity, source commit, workflow invocation and artifact digests all match. |
+| Public attestations | [Registry bundles](https://registry.npmjs.org/-/npm/v1/attestations/disktop@1.0.0): provenance Rekor entry `3133905813`, integrated at 18:01:44 UTC; npm publish entry `3133923981`, integrated at 18:05:59 UTC on 2026-10-07. Both identify the same `disktop@1.0.0` SHA-512 digest as registry integrity. |
+| Read-only remote verification recovery | [Run 37667376793](https://github.com/Dijo-404/disktop/actions/runs/37667376793) passed on PR #21: exact source/tag and tarball digest, clean registry install, npm signature audit, certified GitHub signer and source identity, help/version, all ten package checks and final unchanged-artifact checksum. The workflow has read-only permissions and no publication credential or publishing step. |
+
+The original workflow's early 404 is preserved as a failed verification attempt,
+not rewritten as a successful run. Public metadata briefly showed npm's temporary
+`0.0.0-stage` placeholder before `1.0.0` became available; that observation does not
+represent an ongoing approval requirement. The release was not republished.
+
+These are postrelease repository records. The tagged source and npm tarball retain
+their original documentation; later documentation commits neither move `v1.0.0`
+nor replace its artifact. See [the publication record and verification procedure](../CONTRIBUTING.md#publish-100).
 
 ## Executed gates
 
@@ -31,11 +59,9 @@ been observed yet. Follow the [publication steps](../CONTRIBUTING.md#publish-100
 | Dependency advisories | npm: zero vulnerabilities; RustSec: zero vulnerabilities and warnings across the locked native dependency tree. |
 | Workflow/static hygiene | actionlint, changed-script syntax and whitespace checks passed; no unfinished TODO/FIXME, credentials or debug artifacts found. |
 
-The reviewed engineering commit is on `main` as
-[`ac1dab4`](https://github.com/Dijo-404/disktop/commit/ac1dab4d248b47b8180290da20546812eee1c249).
-Its [post-merge CI run](https://github.com/Dijo-404/disktop/actions/runs/37654237622)
-passed all 19 jobs. Any subsequent documentation or source change must also pass CI
-before its commit is tagged for publication.
+The executed engineering gates above describe the reviewed `v1.0.0` source.
+Postrelease documentation and verification tooling must pass their applicable CI
+checks separately; they do not change the source or artifact already published.
 
 The ordinary integration suite explicitly skips absent apt/dnf on the Arch test host,
 second-filesystem cases and opt-in timer/namespace/disposable-manager gates. Their available environments
