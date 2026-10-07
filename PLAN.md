@@ -24,8 +24,8 @@ all 19 CI jobs, and the protected workflow passed its build/artifact gates and s
 the release. Its immediate registry check failed with 404 before the version became
 publicly available. Subsequent exact-artifact, clean registry consumer and cryptographic
 signature/provenance checks passed independently. A read-only remote verification
-recovery run is pending in the [release record](docs/release-readiness.md); it does not
-republish the release. Deferred environments remain unvalidated.
+recovery run also passed, as recorded in the [release record](docs/release-readiness.md).
+Deferred environments remain unvalidated.
 
 Phase 0 delivered the contracts, not features: normative JSON Schemas for CLI output (`schemas/cli/v1/`) and the helper protocol (`schemas/native/v1/`) with valid and invalid examples under contract test; byte-exact path handling and the protected-path refusal policy in `src/domain`; XDG locations, configuration defaults, and a strict TOML subset reader in `src/storage`; the source dependency rule enforced by `eslint.config.mjs` and proven by `tests/unit/dependency-rules.test.mjs`; the filesystem fixture generator in `tests/fixtures/generate.mjs`; the fixed kernel and architecture minimums in `docs/support-matrix.md`; the action threat model in `docs/threat-model.md`; and ADRs 0001 to 0005.
 

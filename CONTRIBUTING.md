@@ -148,8 +148,9 @@ passed its release build/artifact gates and protected approval. `npm publish`
 succeeded, but the run's immediate registry check failed with 404 before the
 version became available. The workflow remains recorded as failed. Later independent
 registry artifact, clean consumer, npm signature and cryptographic provenance checks
-passed. A read-only remote verification recovery run is pending in the
-[release record](docs/release-readiness.md); it must not invoke publication.
+passed. The
+[read-only verification recovery run](https://github.com/Dijo-404/disktop/actions/runs/37667376793)
+also passed against the existing registry release.
 
 The public release can be checked without a publish credential:
 
@@ -167,6 +168,16 @@ For a signature audit, install the pinned version into a fresh prefix and run
 an eventual registry verification failure as a reason to republish an existing version.
 Revoke the one-time publication credential after verification; never put it in a
 command, issue or pull request.
+
+The `verify-release.yml` workflow runs on changes to its verification tooling and
+can also be dispatched manually. It needs no npm publish credential. To repeat the
+complete source, signature and packaged-consumer checks:
+
+```sh
+gh workflow run verify-release.yml --ref main \
+  -f expected_commit=3d6448560d19d75b27fce75765819d89f36be09e \
+  -f expected_sha256=a2deddd76c137e349370fb839b887baff14b3ec27c649f1ce809616bf8b39acd
+```
 
 Publication records are maintained in repository documentation after release.
 They do not modify the tagged source or published package. Keep every deferred

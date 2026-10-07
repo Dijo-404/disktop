@@ -25,8 +25,9 @@ status is maintained in the
   and contains 192 allowed files. A clean registry install, all ten packaged-consumer
   checks without skips, npm signature/attestation audit and independent verification
   of both registry signatures and provenance passed. Phase 8 is complete under the
-  dated manual-check deferral. A read-only remote verification recovery run is pending;
-  its result will be recorded separately from the original failed workflow.
+  dated manual-check deferral. The
+  [read-only verification recovery run](https://github.com/Dijo-404/disktop/actions/runs/37667376793)
+  passed separately from the original failed publishing workflow.
 - These publication records update repository documentation after release. The tagged
   source and npm artifact remain unchanged; `1.0.0` is not rebuilt or republished.
 

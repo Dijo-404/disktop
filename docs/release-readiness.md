@@ -15,8 +15,8 @@ Phase 8 is **complete under that dated manual-check deferral**. All automated
 CI/safety/recovery/performance/advisory gates, exact-artifact verification and
 protected publication approval passed. Independent clean registry installation
 and cryptographic signature/provenance verification passed after the original
-publish workflow's immediate registry check failed. A read-only remote verification
-recovery run is pending; its result will be added here without repeating publication.
+publish workflow's immediate registry check failed. The read-only remote verification
+recovery also passed, without repeating publication.
 
 ## Publication and verification
 
@@ -31,7 +31,7 @@ recovery run is pending; its result will be added here without repeating publica
 | npm signature audit | `npm audit signatures --json --include-attestations` passed with empty `invalid` and `missing` results, verifying `disktop@1.0.0` and its npm publish/SLSA v1 bundles. |
 | Independent cryptographic verification | Passed at 2026-10-07T18:15:40.150Z: both registry ECDSA signatures verified using TUF-authenticated keys; npm publish and SLSA DSSE/SCT/Rekor bundles verified. The certificate's GitHub OIDC issuer and exact `publish.yml@refs/heads/main` identity, source commit, workflow invocation and artifact digests all match. |
 | Public attestations | [Registry bundles](https://registry.npmjs.org/-/npm/v1/attestations/disktop@1.0.0): provenance Rekor entry `3133905813`, integrated at 18:01:44 UTC; npm publish entry `3133923981`, integrated at 18:05:59 UTC on 2026-10-07. Both identify the same `disktop@1.0.0` SHA-512 digest as registry integrity. |
-| Read-only remote verification recovery | **Pending**: add the run link and outcome after it finishes. This check installs and verifies the existing registry release; it does not publish, change tags or rebuild the released artifact. |
+| Read-only remote verification recovery | [Run 37667376793](https://github.com/Dijo-404/disktop/actions/runs/37667376793) passed on PR #21: exact source/tag and tarball digest, clean registry install, npm signature audit, certified GitHub signer and source identity, help/version, all ten package checks and final unchanged-artifact checksum. The workflow has read-only permissions and no publication credential or publishing step. |
 
 The original workflow's early 404 is preserved as a failed verification attempt,
 not rewritten as a successful run. Public metadata briefly showed npm's temporary
