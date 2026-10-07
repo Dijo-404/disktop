@@ -94,7 +94,7 @@ set a release discovers is readable in one place.
 | `diagnostic.crash` | Crash and core dump directories; only a user-owned one is offered. |
 | `diagnostic.open-deleted` | Files deleted while a process still holds them open, which is why `du` and `df` disagree. |
 | `diagnostic.smart` | Each disk's own health report. |
-| `diagnostic.windows-subsystem` | Under WSL, what the default excludes leave out. |
+| `diagnostic.windows-subsystem` | Under WSL, what the default excludes leave out and how to opt into scanning a selected Windows path through `[scan].exclude_windows_mounts`; no cleanup is proposed. |
 | `diagnostic.per-user` | Owner totals from the stored scan index. `disktop explore PATH --owners` answers the same question for any scanned path. |
 | `managers` | What package and container managers can clean, from the adapters in `src/platform/linux/managers/`: one finding per proposal, carrying the exact command a plan would run. Spans the `package-cache`, `log`, `installed-app`, `container-data`, `old-kernel`, `temporary`, and `crash-dump` categories. A denied manager makes the result incomplete; an absent one does not. |
 

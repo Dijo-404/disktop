@@ -22,11 +22,17 @@ versioned JSON for everything the UI does.
   protected paths that no flag can override, a durable journal, and results that keep
   "selected", "moved to Trash", and "free space actually gained" apart.
 
-> **Status:** `1.0.0` release candidate. The package is published to npm only after
-> the release gate in [PLAN.md](PLAN.md#internal-implementation-phases) passes. Until
-> then, run it from a checkout (see [Development](#development)).
+> **Release information:** check [npm](https://www.npmjs.com/package/disktop) for
+> `1.0.0` availability and the
+> [release record](https://github.com/Dijo-404/disktop/blob/main/docs/release-readiness.md)
+> for publication and verification status. Remaining hardware and VM checks are
+> assigned to testers after initial publication; automated release checks and
+> protected workflow approval remain required. Before npm publication, run from a
+> checkout (see [Development](#development)).
 
 ## Install
+
+Once `1.0.0` is published to npm:
 
 ```sh
 npx disktop            # run without installing
@@ -180,6 +186,11 @@ declarative cleanup rules (data only — a rule cannot run a command). Snapshots
 the action journal under `$XDG_STATE_HOME/disktop`, with the usual `~/.config`,
 `~/.local/share`, `~/.cache`, and `~/.local/state` fallbacks.
 
+On WSL, `/mnt/c` and `/mnt/wsl` are excluded even when you select their path
+explicitly. To inspect one, set `exclude_windows_mounts = false` under `[scan]` in
+`config.toml`, then scan that path. The WSL diagnostic is informational and offers
+no cleanup.
+
 **Privacy:** Disktop makes no network requests and collects no telemetry. Everything it
 reads and writes stays on your machine; reports go only where you ask.
 
@@ -190,6 +201,11 @@ reads and writes stays on your machine; reports go only where you ask.
   fallback.
 - Sizes from package managers are their own estimates, and the free-space change after
   an action includes whatever else wrote to the filesystem meanwhile.
+- Real SMART health readings, ZFS, WSL and non-cache manager mutations still need
+  tester validation. Their automated coverage and current status are recorded in the
+  [support matrix](docs/support-matrix.md); the
+  [tester guide](https://github.com/Dijo-404/disktop/blob/main/docs/tester-guide.md)
+  explains how to contribute results.
 - See [docs/support-matrix.md](docs/support-matrix.md) for what has been checked on
   which distributions and hosts.
 

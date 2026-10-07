@@ -2,15 +2,17 @@
 
 All notable changes to Disktop are recorded here. Versions follow [Semantic Versioning](https://semver.org/).
 
-## 1.0.0 — unreleased (release candidate)
+## 1.0.0 — release notes
 
-The first public release. Everything below the Phase headings was built in internal
-phases that were never published; this is the first version anybody can install.
+Release notes for the initial public version. Everything below the Phase headings
+was built in internal phases that were never published. Publication and verification
+status is maintained in the
+[release record](https://github.com/Dijo-404/disktop/blob/main/docs/release-readiness.md).
 
-### Status, 2026-10-07
+### Prepublication validation, 2026-10-07
 
-Not published. Phases 0–7 are complete. Phase 8 (whole-product validation and the sole
-release) is in progress:
+At the time of this validation record, the package was not published. Phases 0–7
+were complete; Phase 8 (whole-product validation and the sole release) remained open:
 
 - **Done and verified locally:** the package, the four-helper release build and its
   checksums, the packed-tarball install test, the hardening audit of every mutation, and
@@ -25,10 +27,13 @@ release) is in progress:
   timer and SSH terminal restoration. All ten package checks
   passed on Node 26 glibc, Node 24 glibc and Node 24 musl. The million-entry benchmark
   passed all seven resource and latency checks. See [validation evidence](docs/release-readiness.md).
-- **Publication gates:** green CI at the reviewed commit, including the ARM64 runners; the
-  host and VM checks the support matrix still lists as not validated (distribution
-  non-cache manager mutations under privilege, SMART health, ZFS and WSL); and,
-  after publishing, provenance and a registry install verified on clean accounts.
+- **Publication prerequisites:** green CI at the reviewed commit, including the ARM64
+  runners, all automated safety and artifact gates, and protected workflow approval.
+  After publishing, provenance and a registry install must be verified on clean accounts.
+- **Tester follow-up:** the release owner deferred real SMART health, ZFS, WSL and
+  non-cache manager mutation checks until after initial publication on 2026-10-07.
+  They remain unvalidated in the [support matrix](docs/support-matrix.md), with
+  evidence requirements in the [tester guide](docs/tester-guide.md).
 - **Known limits, stated rather than hidden:** on Btrfs, reflinked and compressed files
   each report their full size, so a scan's file total can exceed what `df` reports as
   used (`uv`'s cache reflinks packages into virtualenvs); `du -x`, used for the

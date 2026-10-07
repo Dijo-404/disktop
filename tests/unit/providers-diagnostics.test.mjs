@@ -232,6 +232,12 @@ test("under WSL the excluded Windows drives are stated, with no action", async (
 
   assert.equal(result.findings.length, 1);
   assert.ok(result.findings[0].evidence.some((line) => line.includes("/mnt/c")), JSON.stringify(result.findings[0].evidence));
+  const scanAdvice = result.findings[0].evidence.find((line) => line.includes("exclude_windows_mounts"));
+  assert.equal(typeof scanAdvice, "string", "Windows scanning explains the required configuration opt-in");
+  assert.match(scanAdvice, /exclude_windows_mounts\s*=\s*false/);
+  assert.match(scanAdvice, /\[scan\].*config\.toml/);
+  assert.match(scanAdvice, /then select that path/);
+  assert.match(scanAdvice, /Nothing there is offered for cleanup/);
   assert.deepEqual(result.findings[0].availableActionIds, []);
   assert.equal(result.findings[0].size.basis, "unknown");
 });
