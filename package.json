@@ -10,20 +10,23 @@
     "tui",
     "cleanup"
   ],
-  "type": "module",
-  "license": "Apache-2.0",
+  "homepage": "https://github.com/Dijo-404/disktop#readme",
+  "bugs": {
+    "url": "https://github.com/Dijo-404/disktop/issues"
+  },
   "repository": {
     "type": "git",
     "url": "git+https://github.com/Dijo-404/disktop.git"
   },
-  "homepage": "https://github.com/Dijo-404/disktop#readme",
-  "bugs": "https://github.com/Dijo-404/disktop/issues",
-  "bin": {
-    "disktop": "./dist/bin/disktop.js"
-  },
+  "license": "Apache-2.0",
+  "author": "Dijo S Benelen",
+  "type": "module",
   "exports": {
     "./package.json": "./package.json",
     "./schemas/cli/v1/*.json": "./schemas/cli/v1/*.json"
+  },
+  "bin": {
+    "disktop": "./dist/bin/disktop.js"
   },
   "files": [
     "dist/**/*.js",
@@ -37,17 +40,6 @@
     "THIRD_PARTY_NOTICES",
     "CHANGELOG.md"
   ],
-  "engines": {
-    "node": ">=24.21.0 <25 || >=26.10.0 <27"
-  },
-  "os": [
-    "linux"
-  ],
-  "publishConfig": {
-    "access": "public",
-    "provenance": true,
-    "registry": "https://registry.npmjs.org/"
-  },
   "scripts": {
     "clean": "node scripts/clean-dist.mjs",
     "build": "node scripts/clean-dist.mjs && tsc -p tsconfig.json && node scripts/set-executable.mjs",
@@ -69,6 +61,9 @@
     "prepack": "node scripts/native-notices.mjs --check-inputs && npm run build",
     "prepublishOnly": "node scripts/prepublish-guard.mjs"
   },
+  "dependencies": {
+    "terminal-kit": "3.1.4"
+  },
   "devDependencies": {
     "@typescript/native": "npm:typescript@7.0.2",
     "@types/node": "24.19.1",
@@ -77,7 +72,15 @@
     "typescript": "npm:@typescript/typescript6@6.0.2",
     "typescript-eslint": "8.71.0"
   },
-  "dependencies": {
-    "terminal-kit": "3.1.4"
+  "engines": {
+    "node": ">=24.21.0 <25 || >=26.10.0 <27"
+  },
+  "os": [
+    "linux"
+  ],
+  "publishConfig": {
+    "access": "public",
+    "provenance": true,
+    "registry": "https://registry.npmjs.org/"
   }
 }
