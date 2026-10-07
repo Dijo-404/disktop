@@ -81,6 +81,7 @@ export interface ManagerVerification {
 
 export interface ManagerAdapter {
   readonly id: ManagerAdapterId;
+  /** A bounded discovery refuses with EOVERFLOW rather than presenting a sampled count as exact. */
   discover(signal?: AbortSignal): Promise<ManagerDiscovery>;
   preview(action: ManagerActionId, parameters: Readonly<Record<string, string>>, signal?: AbortSignal): Promise<ManagerPreviewOutcome>;
   preflight(scope: ManagerScope, signal?: AbortSignal): Promise<PreflightResult>;

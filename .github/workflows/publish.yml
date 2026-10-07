@@ -149,6 +149,11 @@ jobs:
           --regid "$(stat -c %g /disktop)" --clear-groups
           --inh-caps +sys_admin --ambient-caps +sys_admin
           node --test tests/integration/filesystem-failures.test.mjs'
+      - name: Require real reviewed package-manager cleanup in disposable containers
+        run: |
+          node tests/support/managers-disposable.mjs apt
+          node tests/support/managers-disposable.mjs dnf
+          node tests/support/managers-disposable.mjs pacman
       - name: Pack the exact artifact for review and publication
         id: pack
         run: |

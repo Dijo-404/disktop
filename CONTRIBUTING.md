@@ -55,6 +55,16 @@ Do not add `rm -rf`, shell-built cleanup commands, or direct file mutation to a 
 
 Create destructive test trees under isolated temporary directories. Never aim cleanup tests at a developer's home, the CI runner home, or a real system cache. Use mount namespaces or VMs for bind mounts, symlink races, and privileged manager behavior. Test odd byte filenames, hardlinks, sparse files, permission failures, interruptions, and journal recovery for affected code. The Ubuntu, Fedora, and Arch CI container jobs are smoke checks of the build, the terminal tests, and the packed package; they are not a substitute for the host and VM checks in the support matrix.
 
+`node tests/support/managers-disposable.mjs apt` runs the real privileged
+package-cache gate in a disposable Ubuntu/Fedora/Arch container. It mounts the repository
+read-only, extracts the supported official Node runtime, certifies a fixture-only cache
+and grants the ordinary account sudo for the one fixed command. It verifies the reviewed
+plan, durable journal, live removal and unchanged package database/sentinel. Docker is
+required. Never enable `DISKTOP_TEST_REAL_MANAGER` directly on a host; the integration
+test refuses that environment. CI and publication require all three enabled gates;
+wrapper interrupt/cleanup tests use a non-mutating Docker fixture.
+Run the same command with `dnf` and `pacman` in place of `apt` for the other managers.
+
 Keep read-only fixtures independent of host state too. Swap-provider tests restrict
 path facts to their temporary tree so `/swapfile` on a runner cannot become a fixture
 finding. The terminal scan-interruption test uses a temporary tree and `--throttle 1`
