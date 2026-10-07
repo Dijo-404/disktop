@@ -9,7 +9,7 @@ and post-publication provenance and registry-install verification.
 
 | Gate | Result |
 | --- | --- |
-| `npm run check` | Typecheck/lint/build passed; 1,068 unit/contract, 128 integration, 13 recovery and 18 PTY tests passed. |
+| `npm run check` | Typecheck/lint/build passed; 1,070 unit/contract, 128 integration, 13 recovery and 18 PTY tests passed. |
 | Rust formatting, Clippy `-D warnings`, locked tests | Passed; 266 tests, no ignored tests. |
 | `npm run bench` | Six checks passed at 1,000,000 entries; unchanged memory and latency budgets. |
 | Private filesystem faults | Full output, full journal, read-only source and cross-device moves passed without skips in an isolated container, with source bytes preserved on refusal. |
@@ -42,7 +42,7 @@ permissions and checksums, and run what is installed from it.
 | --- | --- | --- |
 | Domain/inventory, CLI and reports | Additive `volumes` in device/report JSON, lossless sizes and every physical backing drive; no automatic mounting or unlocking. | CLI schemas/examples, mixed/multiple-drive/RAID fixtures; inventory, lsblk, report and CLI contract tests. |
 | Native traversal/actions/journal | Bounded directory/inode/duplicate scratch storage; unchanged mutation authority, stronger metadata/restore/journal checks and cancellation. Duplicate output cap documented in native schema. | Rust sandbox tests, native/scan/actions integrations, crash recovery, filesystem fault and resource gates. |
-| Application/ports/adapters/storage | Optional internal abort signals, live task readings, truthful permission/measurement failures, immutable plan and report publication. Public error envelopes remain v1. | Discovery, manager/query cancellation, unreadable/invalid-byte/sparse fixtures, plan/report/locator/timer regressions. |
+| Application/ports/adapters/storage | Optional internal abort signals, live task readings, truthful permission/measurement/entry-limit failures, immutable plan and report publication. Public error envelopes remain v1. | Discovery, overflowing AppImage/package-cache directories, manager/query cancellation, unreadable/invalid-byte/sparse fixtures, plan/report/locator/timer regressions. |
 | TUI | Same application services and reviewed confirmations; Mocha truecolor and reduced-color/no-color/ASCII modes, bounded pending tasks and no stale updates. | 40×10 through 220×60 screen tests, PTY/tmux/SSH, session and long-running memory regressions. |
 | Packaging/workflows | Fixed four-helper names and allowlist, advisory gates, mandatory real filesystem faults and binding release-build performance checks. | Release contracts, helper lifecycle tests, packed clean-consumer execution and CI matrix. |
 

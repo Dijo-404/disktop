@@ -17,7 +17,7 @@ release) is in progress:
   a first run on real hardware — an Arch laptop with Btrfs on LUKS, subvolume mounts, a
   Windows partition, and a locked 4 TB LUKS drive. Those hardware runs exposed
   accounting and mount-policy defects now covered by regressions. The local gate (`npm run check`,
-  the Rust format, lint, and test gates) passes: 1,068 unit and contract tests,
+  the Rust format, lint, and test gates) passes: 1,070 unit and contract tests,
   128 integration, 13 recovery, 18 PTY, and 266 helper tests. The six ordinary
   integration skips are external-tool, namespace, second-filesystem and opt-in timer
   cases; separate gates passed real cross-device/full-disk/full-journal/read-only
@@ -56,6 +56,9 @@ release) is in progress:
 - Read-only discovery commands propagate cancellation to their process groups. User
   timer failures report the failing systemctl step and preserve units when disable fails.
   A real user-manager integration test exercises runtime timer installation and removal.
+- Directory discovery refuses listings above its 4,096-entry bound explicitly; an
+  omitted AppImage or package cache can no longer masquerade as a complete empty result
+  or an exact zero count.
 - Private mount-namespace tests cover a full output filesystem, a read-only source and
   cross-device moves, with source bytes preserved on refusal. Dependency advisory checks
   now gate both CI and publication, and distro CI exercises read-only manager adapters.
@@ -82,8 +85,8 @@ release) is in progress:
   - Vim keys, arrows, number keys, mouse (rows, tabs, wheel), and `?` help.
   - `NO_COLOR` removes colour and keeps bold and inverse; a non-UTF-8 locale, the
     kernel console, or `DISKTOP_ASCII=1` get ASCII glyphs; `TERM=dumb` gets the text
-    dashboard. The palette keeps the terminal's own foreground for text so a light
-    terminal stays legible.
+    dashboard. Mocha foreground and background colors stay paired in colored modes;
+    `NO_COLOR` uses the terminal's own colors.
 - The renderer writes only the rows that changed, in one write, and measures terminal
   cells so wide and emoji names keep columns aligned. terminal-kit read `%s` and `^r`
   in a filename as its own format and markup syntax; frames now go through `noFormat`.

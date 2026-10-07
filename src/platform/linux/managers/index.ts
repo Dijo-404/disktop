@@ -16,14 +16,15 @@ export function createManagerInventory(adapters: readonly Pick<ManagerAdapter, "
             return await adapter.discover(signal);
           } catch (error) {
             const code = typeof error === "object" && error !== null ? (error as NodeJS.ErrnoException).code : undefined;
+            const explanation = `${adapter.id} could not be read: ${sanitizeText(error instanceof Error ? error.message : String(error))}`;
             return {
               adapter: adapter.id,
               capability: {
                 status: code === "EACCES" || code === "EPERM" ? "permission-denied" : "missing-tool",
-                explanation: `${adapter.id} could not be read: ${sanitizeText(error instanceof Error ? error.message : String(error))}`,
+                explanation,
               },
               proposals: [],
-              warnings: code === "EACCES" || code === "EPERM" ? [] : [{ code: "manager-failed", message: `${adapter.id} failed while reading its state.` }],
+              warnings: code === "EACCES" || code === "EPERM" ? [] : [{ code: "manager-failed", message: explanation }],
             };
           }
         }),

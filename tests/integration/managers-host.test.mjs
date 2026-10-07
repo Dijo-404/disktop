@@ -14,6 +14,11 @@ function sudoNeedsAPassword() {
 }
 
 test("a root command with no terminal to ask for a password is denied, and nothing runs", async (t) => {
+  const { resolveTrustedExecutable } = await import("../../dist/platform/linux/process.js");
+  if (await resolveTrustedExecutable("journalctl") === undefined) {
+    t.skip("journalctl is absent here, so there is no command to ask sudo to run");
+    return;
+  }
   if (!sudoNeedsAPassword()) {
     t.skip("sudo is absent here or runs without a password, so a refusal cannot be observed");
     return;

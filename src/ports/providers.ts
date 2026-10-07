@@ -31,7 +31,11 @@ export interface PathFacts {
  */
 export interface PathProbe {
   facts(path: RawPath): Promise<PathFacts | undefined>;
-  /** One level, bounded and sorted. A non-directory lists empty. */
+  /**
+   * One level, sorted and complete within the adapter's fixed entry bound.
+   * A non-directory lists empty. Exceeding the bound throws EOVERFLOW;
+   * a sampled prefix must never be presented as the directory's whole list.
+   */
   list(path: RawPath): Promise<readonly RawPath[]>;
   readText(path: RawPath, maxBytes: number): Promise<string | undefined>;
 }
