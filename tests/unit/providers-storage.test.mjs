@@ -328,6 +328,7 @@ test("an absent ZFS executable is benign and an empty successful query is comple
 test("failed, timed-out and unsupported ZFS queries cannot report complete empty discovery", async () => {
   const failures = [
     { capability: { status: "missing-tool", explanation: "zfs failed: cannot open /dev/zfs" }, stderr: "cannot open /dev/zfs", exitCode: 1 },
+    { capability: { status: "missing-tool", explanation: "/usr/sbin/zfs disappeared before it could run." }, exitCode: null },
     { capability: { status: "missing-tool", explanation: "zfs did not finish within 10000 ms and was stopped." }, exitCode: null },
     { capability: { status: "available", explanation: "zfs responded." }, exitCode: 1 },
     ...["unsupported-kernel", "unsupported-filesystem", "unsupported-architecture"].map((status) => ({

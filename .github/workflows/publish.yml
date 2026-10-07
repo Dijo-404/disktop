@@ -1,7 +1,7 @@
 name: Publish the single initial npm release
 
 # Deliberately manual. Configure the npm-publish environment with a required
-# reviewer and the one-time granular NPM_TOKEN secret before dispatching.
+# reviewer and the one-time granular NPM_TOKEN (or DISKTOP) secret before dispatching.
 #
 # Three jobs, one artifact. `build` runs every gate on the reviewed tag, builds
 # the four helpers exactly as CI does, packs the tarball once, and runs the
@@ -303,17 +303,18 @@ jobs:
         env:
           DISKTOP_RELEASE_TAG: ${{ inputs.release_tag }}
         run: node scripts/prepublish-guard.mjs
+      # NPM_TOKEN takes precedence; DISKTOP is an accepted environment-secret alias.
       - name: Require the one-time first-publish token
         env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN || secrets.DISKTOP }}
         run: |
           if [ -z "$NODE_AUTH_TOKEN" ]; then
-            echo '::error::Missing NPM_TOKEN in the protected npm-publish environment.'
+            echo '::error::Missing NPM_TOKEN or DISKTOP in the protected npm-publish environment.'
             exit 1
           fi
       - name: Publish audited v1.0.0 with provenance
         env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN || secrets.DISKTOP }}
           ARCHIVE: ${{ runner.temp }}/release/${{ needs.build.outputs.archive }}
         run: npm publish "$ARCHIVE" --ignore-scripts --provenance --access public
       - name: Verify registry package and provenance

@@ -151,7 +151,7 @@ async function zfsFindings(
     && outcome.exitCode === null
     && outcome.stdout === ""
     && outcome.stderr === ""
-    && !/failed|could not be started|did not finish|was stopped|was terminated/i.test(outcome.capability.explanation);
+    && !/failed|disappeared before it could run|could not be started|did not finish|was stopped|was terminated/i.test(outcome.capability.explanation);
   if (absent) return { findings: [], complete: true };
   if (outcome.capability.status !== "available" || outcome.exitCode !== 0) {
     const denied = outcome.capability.status === "permission-denied";
