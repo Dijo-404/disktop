@@ -4,33 +4,42 @@ import type { ManagerAdapter, ManagerDiscovery, ManagerInventoryPort } from "../
 
 export function createManagerInventory(adapters: readonly Pick<ManagerAdapter, "id" | "discover" | "preview">[]): ManagerInventoryPort {
   let reading: Promise<readonly ManagerDiscovery[]> | undefined;
+  const tasks = new WeakMap<AbortSignal, Promise<readonly ManagerDiscovery[]>>();
   return {
-    async discover() {
-      reading ??= Promise.all(
+    async discover(signal) {
+      signal?.throwIfAborted();
+      const previous = signal === undefined ? reading : tasks.get(signal);
+      if (previous !== undefined) return previous;
+      const current = Promise.all(
         adapters.map(async (adapter): Promise<ManagerDiscovery> => {
           try {
-            return await adapter.discover();
+            return await adapter.discover(signal);
           } catch (error) {
+            const code = typeof error === "object" && error !== null ? (error as NodeJS.ErrnoException).code : undefined;
+            const explanation = `${adapter.id} could not be read: ${sanitizeText(error instanceof Error ? error.message : String(error))}`;
             return {
               adapter: adapter.id,
               capability: {
-                status: "missing-tool",
-                explanation: `${adapter.id} could not be read: ${sanitizeText(error instanceof Error ? error.message : String(error))}`,
+                status: code === "EACCES" || code === "EPERM" ? "permission-denied" : "missing-tool",
+                explanation,
               },
               proposals: [],
-              warnings: [],
+              warnings: code === "EACCES" || code === "EPERM" ? [] : [{ code: "manager-failed", message: explanation }],
             };
           }
         }),
       );
-      return reading;
+      if (signal === undefined) reading = current;
+      else tasks.set(signal, current);
+      return current;
     },
-    async preview(action, parameters) {
+    async preview(action, parameters, signal) {
+      signal?.throwIfAborted();
       const adapter = adapters.find((candidate) => candidate.id === MANAGER_ACTIONS[action].adapter);
       if (adapter === undefined) {
         return { kind: "refused", message: `Disktop has no adapter for ${action} on this machine.` };
       }
-      return adapter.preview(action, parameters);
+      return adapter.preview(action, parameters, signal);
     },
   };
 }

@@ -62,7 +62,7 @@
     "test:package": "npm run build && node --test tests/package/*.test.mjs",
     "fixtures": "node scripts/generate-fixtures.mjs",
     "check": "npm run typecheck && npm run lint && npm test && npm run test:integration && npm run test:recovery && npm run test:pty",
-    "bench": "npm run build && cargo build --release --locked --manifest-path native/disktop-fs/Cargo.toml && DISKTOP_BENCH_ENTRIES=1000000 node --test tests/performance/*.test.mjs",
+    "bench": "npm run build && cargo build --release --locked --manifest-path native/disktop-fs/Cargo.toml && DISKTOP_REQUIRE_RELEASE_BENCHMARK=1 DISKTOP_BENCH_ENTRIES=1000000 node --test tests/performance/*.test.mjs",
     "prepack": "npm run build",
     "prepublishOnly": "node scripts/prepublish-guard.mjs"
   },

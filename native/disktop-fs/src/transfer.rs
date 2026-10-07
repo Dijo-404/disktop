@@ -15,9 +15,9 @@
 //! filesystem across.
 
 use crate::content;
+use crate::directory_names::{Names, Store};
 use crate::sys::{self, EntryKind};
 use sha2::{Digest, Sha256};
-use std::collections::HashMap;
 use std::io;
 use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
 use std::os::unix::io::RawFd;
@@ -101,7 +101,7 @@ pub fn copy_file(
             // the verification reads the page cache and proves nothing about
             // the disk.
             sys::fsync(staged)?;
-            verify(staged, &written)?;
+            verify(staged, &written, cancelled)?;
             Ok(bytes)
         });
     sys::close(staged);
@@ -208,8 +208,8 @@ fn ftruncate(descriptor: RawFd, length: u64) -> io::Result<()> {
 }
 
 /// Read the staged copy back and compare it with what was read from the source.
-fn verify(staged: RawFd, written: &[u8; 32]) -> io::Result<()> {
-    if content::full_digest(staged)? != *written {
+fn verify(staged: RawFd, written: &[u8; 32], cancelled: &AtomicBool) -> io::Result<()> {
+    if content::full_digest_cancellable(staged, cancelled)? != *written {
         return Err(io::Error::new(
             io::ErrorKind::InvalidData,
             "the copy does not match what was read, so it was not published",
@@ -256,7 +256,7 @@ struct Frame {
     destination: OwnedFd,
     path: Vec<Vec<u8>>,
     permissions: u32,
-    names: Vec<Vec<u8>>,
+    names: Names,
 }
 
 impl Frame {
@@ -265,15 +265,13 @@ impl Frame {
         destination: OwnedFd,
         path: Vec<Vec<u8>>,
         permissions: u32,
+        store: &Store,
+        cancelled: &AtomicBool,
     ) -> io::Result<Frame> {
         // Names are read before anything is written, so what `readdir` returns
         // is not affected by what this is creating elsewhere.
         let mut stream = sys::Directory::from_descriptor(duplicate(source.as_raw_fd())?)?;
-        let mut names = Vec::new();
-        while let Some(name) = stream.next_name()? {
-            names.push(name);
-        }
-        names.reverse();
+        let names = Names::read(&mut stream, store, cancelled)?;
         Ok(Frame {
             source,
             destination,
@@ -286,6 +284,7 @@ impl Frame {
 
 /// The first copy made of a file that has more than one name, so its other
 /// names inside the tree become links to it rather than copies of it.
+#[derive(Clone, serde::Serialize, serde::Deserialize)]
 struct FirstCopy {
     /// The directories from the staged root down to it, one name each.
     directory: Vec<Vec<u8>>,
@@ -340,15 +339,18 @@ fn copy_children(
     cancelled: &AtomicBool,
 ) -> io::Result<()> {
     let root = owned(duplicate(destination.as_raw_fd())?);
-    let mut first_copies: HashMap<(u64, u64), FirstCopy> = HashMap::new();
+    let mut first_copies = crate::inode_map::Map::<FirstCopy>::new();
+    let store = Store::default();
     let mut stack = vec![Frame::enter(
         owned(duplicate(source)?),
         destination,
         Vec::new(),
         permissions,
+        &store,
+        cancelled,
     )?];
     while let Some(frame) = stack.last_mut() {
-        let Some(name) = frame.names.pop() else {
+        let Some(name) = frame.names.pop()? else {
             let finished = stack.pop().expect("the frame being copied is on the stack");
             // Everything inside it has arrived, so it can take its own mode
             // now, even one that would have refused the writes above.
@@ -379,14 +381,21 @@ fn copy_children(
                 sys::mkdirat_exclusive(destination, &name, WORKING_DIRECTORY_MODE)?;
                 let into = owned(sys::open_directory_no_symlinks(destination, &name)?);
                 path.push(name);
-                stack.push(Frame::enter(child, into, path, metadata.permissions)?);
+                stack.push(Frame::enter(
+                    child,
+                    into,
+                    path,
+                    metadata.permissions,
+                    &store,
+                    cancelled,
+                )?);
             }
             EntryKind::File => {
                 let key = (metadata.device, metadata.inode);
                 if metadata.link_count > 1
-                    && let Some(first) = first_copies.get(&key)
+                    && let Some(first) = first_copies.get(&key)?
                 {
-                    link_to(root.as_raw_fd(), first, destination, &name)?;
+                    link_to(root.as_raw_fd(), &first, destination, &name)?;
                     continue;
                 }
                 let descriptor = owned(sys::openat_read_no_symlinks(source, &name)?);
@@ -411,7 +420,7 @@ fn copy_children(
                             device: made.device,
                             inode: made.inode,
                         },
-                    );
+                    )?;
                 }
             }
             EntryKind::Symlink => {
@@ -496,6 +505,20 @@ fn pread(descriptor: RawFd, buffer: &mut [u8], offset: u64) -> io::Result<usize>
 mod tests {
     use super::*;
     use crate::testing::Sandbox;
+
+    #[test]
+    fn cancellation_during_read_back_keeps_the_source_and_staged_copy_intact() {
+        use std::os::fd::AsRawFd;
+        let sandbox = Sandbox::new("transfer-cancel-verify");
+        sandbox.file(b"source.bin", 4096);
+        sandbox.file(b"staged.bin", 4096);
+        let staged = std::fs::File::open(sandbox.path().join("staged.bin")).unwrap();
+        let expected = content::full_digest(staged.as_raw_fd()).unwrap();
+        let error = verify(staged.as_raw_fd(), &expected, &AtomicBool::new(true)).unwrap_err();
+        assert!(is_cancelled(&error));
+        assert!(sandbox.path().join("source.bin").exists());
+        assert!(sandbox.path().join("staged.bin").exists());
+    }
 
     #[test]
     fn the_caller_learns_what_was_created_before_a_byte_is_copied() {

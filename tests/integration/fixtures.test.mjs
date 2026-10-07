@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { lstat, readlink, rm, stat } from "node:fs/promises";
+import { lstat, readlink, stat } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { test } from "node:test";
 import { createLargeFixture, createStandardFixture } from "../fixtures/generate.mjs";
@@ -80,14 +80,37 @@ test("cleanup refuses a root it did not create", async () => {
 
 test("cleanup rejects a root that only looks like a sandbox", async (t) => {
   const fixture = await createStandardFixture();
-  t.after(() => rm(fixture.root, { recursive: true, force: true }).catch(() => undefined));
+  t.after(() => fixture.cleanup());
 
   for (const forged of [`${fixture.root}/../../etc`, `${fixture.root}/nested`, "/home/example"]) {
     const escaped = await createStandardFixture();
+    const originalRoot = escaped.root;
+    t.after(() => { escaped.root = originalRoot; return escaped.cleanup(); });
     const cleanup = escaped.cleanup;
     escaped.root = forged;
     await assert.rejects(cleanup(), /not a Disktop fixture/, forged);
-    escaped.root = fixture.root;
+    escaped.root = originalRoot;
+  }
+});
+
+test("cleanup cannot borrow another real fixture's sandbox", async (t) => {
+  const own = await createStandardFixture();
+  const other = await createStandardFixture();
+  const originalRoot = own.root;
+  t.after(() => { own.root = originalRoot; return own.cleanup(); });
+  t.after(() => other.cleanup());
+  own.root = other.root;
+  await assert.rejects(own.cleanup(), /created by this fixture/);
+  assert.equal((await stat(other.root)).isDirectory(), true);
+  own.root = originalRoot;
+});
+
+test("large fixture options reject nonprogressing and invalid trees", async () => {
+  for (const fanOut of [0, -1, 1.5, Infinity]) {
+    await assert.rejects(createLargeFixture({ entries: 1, fanOut }), /fanOut/);
+  }
+  for (const bytesPerFile of [-1, 1.5, Infinity]) {
+    await assert.rejects(createLargeFixture({ entries: 1, bytesPerFile }), /bytesPerFile/);
   }
 });
 

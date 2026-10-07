@@ -73,15 +73,15 @@ const READING: Section = [
   ],
 ];
 
-const FILTER: Section = ["Filter syntax", [["words", "name contains"], ["ext:log", "extension"], [">1GiB <5MB", "size on disk"], ["age>30", "untouched 30 days"], ["type:dir", "file dir link"]]];
+const FILTER: Section = ["Filter syntax", [["words", "name contains"], ["ext:log", "extension"], [">1GiB <5MB", "size on disk"], ["age>30", "modified >30 days ago"], ["type:dir", "file dir link"]]];
 
-const ASCII_KEYS: Readonly<Record<string, string>> = { "↑": "Up", "↓": "Dn", "←": "Left", "→": "Right", "⌫": "Bksp", "▲": "!", "●": "*", "⏎": "Enter", "…": "..." };
+const ASCII_KEYS: Readonly<Record<string, string>> = { "↑": "Up", "↓": "Dn", "←": "Left", "→": "Right", "⌫": "Bksp", "▲": "!", "●": "*", "⏎": "Enter", "…": "...", "·": "|" };
 
 function block(section: Section, width: number, keyWidth: number, theme: Theme): ScreenLine[] {
   const [title, keys] = section;
-  const ascii = (text: string): string => (theme.unicode ? text : text.replace(/[↑↓←→⌫▲●⏎…]/g, (glyph) => ASCII_KEYS[glyph] ?? glyph));
+  const ascii = (text: string): string => (theme.unicode ? text : text.replace(/[↑↓←→⌫▲●⏎…·]/g, (glyph) => ASCII_KEYS[glyph] ?? glyph));
   return [
-    new LineBuilder(width).add(title, "heading").build(),
+    new LineBuilder(width).add(ascii(title), "heading").build(),
     ...keys.map(([key, label]) =>
       new LineBuilder(width).add(padEnd(ascii(key), keyWidth, theme.glyphs.ellipsis), "key").add(ascii(label), "dim").build(),
     ),

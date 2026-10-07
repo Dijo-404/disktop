@@ -41,12 +41,12 @@ const REVIEWING = { ...CLEANING, dialog: { kind: "review", plan: PLAN, alternati
 const IRREVERSIBLE = { ...CLEANING, dialog: { kind: "review", plan: { ...PLAN, operation: "permanent", reversibility: "irreversible" }, alternatives: ["trash", "permanent"], typed: "ye", origin: "finding", findingId: "x" } };
 const HELPING = { ...EXPLORING, showHelp: true };
 
-const STATES = { Disks: BASE, Explore: EXPLORING, Clean: CLEANING, History: HISTORY, Review: REVIEWING, Irreversible: IRREVERSIBLE, Help: HELPING };
+const STATES = { Disks: BASE, Explore: EXPLORING, Clean: CLEANING, Dev: { ...CLEANING, tab: "Dev" }, Apps: { ...CLEANING, tab: "Apps" }, History: HISTORY, Review: REVIEWING, Irreversible: IRREVERSIBLE, Help: HELPING };
 
 test("every screen fills the terminal exactly and no row is wider than it, at every size and in both glyph sets", () => {
   for (const [name, state] of Object.entries(STATES)) {
     for (const size of SIZES) {
-      for (const theme of [ASCII_THEME, UNICODE]) {
+      for (const theme of [ASCII_THEME, buildTheme("16", false), buildTheme("none", true), UNICODE, buildTheme("truecolor", true)]) {
         const frame = render(state, size, theme);
         assert.equal(frame.lines.length, size.rows, `${name} at ${size.columns}x${size.rows} has the wrong number of rows`);
         for (const [row, line] of frame.lines.entries()) {
@@ -160,6 +160,14 @@ test("a directory the scan never entered shows no size and says why, rather than
   assert.doesNotMatch(privateRow, /\b0 B\b/, "an unreadable directory is never shown as empty");
 });
 
+test("opening an unreadable directory keeps its subtree size unknown in the context header", () => {
+  const unreadable = entry("/home/example/projects/private", "directory", 4096n, { childEntries: undefined });
+  const state = { ...EXPLORING, explore: { ...EXPLORING.explore, directory: { path: unreadable.path, id: unreadable.id, entry: unreadable }, rows: [], typeTotals: [], empty: "This directory could not be read." } };
+  const lines = text(state, { columns: 100, rows: 24 });
+  assert.match(lines[2], /size unknown/);
+  assert.doesNotMatch(lines[2], /4\.0 KiB/);
+});
+
 test("Explore without a scan says how to get one instead of showing an empty list", () => {
   const state = { ...BASE, tab: "Explore" };
   const joined = text(state).join("\n");
@@ -236,8 +244,123 @@ test("rows can be clicked: every listed row and every tab has a region", () => {
 
 test("the configured space threshold colours the bars, not a fixed 90", () => {
   const at = (threshold) =>
-    renderScreen(BASE, MINIMUM_SIZE, { theme: UNICODE, now: NOW, threshold, home: HOME }).lines[3].spans.map((span) => span.style);
+    renderScreen(BASE, MINIMUM_SIZE, { theme: UNICODE, now: NOW, threshold, home: HOME }).lines.find((line) => line.selected).spans.map((span) => span.style);
   // The root filesystem is 52% used: past a 50% threshold, comfortably under 90%.
   assert.ok(at(50).includes("barDanger"));
   assert.ok(!at(90).includes("barDanger"));
+});
+
+test("all six tabs remain visible and clickable at forty columns, including the selected tab's full name", () => {
+  for (const tab of ["Disks", "Explore", "Clean", "Dev", "Apps", "History"]) {
+    const frame = render({ ...BASE, tab }, { columns: 40, rows: 10 });
+    const tabs = frame.hits.filter((hit) => hit.action.kind === "tab");
+    assert.equal(tabs.length, 6);
+    assert.match(lineText(frame.lines[1]), new RegExp(tab));
+    for (const hit of tabs) assert.ok(hit.from < hit.to && hit.to <= 40);
+  }
+});
+
+test("connected partitions remain visible when no mounted filesystem can be measured", () => {
+  const view = { ...FIXTURE_VIEW, filesystems: [], volumes: FIXTURE_VIEW.volumes.filter((volume) => volume.state !== "mounted"), complete: false, warnings: [{ code: "statfs-unreadable", message: "Capacity is unreadable." }] };
+  const state = initialState(view, "iec");
+  const joined = text(state, { columns: 100, rows: 24 }, UNICODE).join("\n");
+  assert.match(joined, /Windows-SSD/);
+  assert.match(joined, /sdc2/);
+  assert.match(joined, /not mounted/);
+  assert.match(joined, /locked/);
+  assert.doesNotMatch(joined, /No filesystem could be inspected/);
+});
+
+test("swap and unsigned partitions have explicit unknown usage and never appear empty", () => {
+  const volume = { id: "sdd1", devicePath: "/dev/sdd1", deviceId: "sdd", deviceIds: ["sdd"], type: "part", sizeBytes: 1024n ** 4n, mounts: [], state: "unknown" };
+  for (const state of ["unknown", "swap", "in-use", "mounted"]) {
+    const view = { ...FIXTURE_VIEW, filesystems: [], volumes: [{ ...volume, state }], unmounted: [] };
+    const joined = text(initialState(view, "iec"), { columns: 100, rows: 24 }).join("\n");
+    assert.match(joined, /sdd1/);
+    assert.doesNotMatch(joined, /\b0 B\b/);
+    if (state === "unknown") assert.match(joined, /contents are unknown/);
+    if (state === "swap") assert.match(joined, /virtual memory/);
+    if (state === "in-use") assert.match(joined, /another storage layer/);
+  }
+});
+
+test("History preserves the result and undo column on narrow terminals", () => {
+  const lines = text(HISTORY, { columns: 40, rows: 10 });
+  assert.match(lines[2], /RESULT.*UNDO/);
+  assert.match(lines[3], /complete\s+u/);
+  assert.match(lines[4], /uncertain/);
+});
+
+test("a long filter keeps its newest characters and cursor visible without changing the query", () => {
+  const query = `${"a".repeat(140)} emoji-🎉-end`;
+  const state = { ...EXPLORING, prompt: { kind: "search", text: query } };
+  const frame = render(state, { columns: 40, rows: 10 }, UNICODE);
+  assert.match(lineText(frame.lines[8]), /emoji-🎉-end$/);
+  assert.equal(frame.cursor.column, cellWidth(lineText(frame.lines[8])));
+  assert.ok(frame.cursor.column < 40);
+  assert.equal(state.prompt.text, query);
+});
+
+test("ASCII fallback covers loading, incomplete discovery, flat trends, and every help screen", () => {
+  const states = [
+    { ...BASE, tab: "History" },
+    { ...CLEANING, findings: { ...CLEANING.findings, summary: { ...SUMMARY, complete: false } } },
+    { ...EXPLORING, explore: { ...EXPLORING.explore, trend: { ...EXPLORING.explore.trend, delta: 0n } } },
+    ...["Disks", "Explore", "Clean", "Dev", "Apps", "History"].map((tab) => ({ ...BASE, tab, showHelp: true })),
+  ];
+  for (const state of states) {
+    for (const line of text(state, { columns: 132, rows: 43 })) {
+      assert.match(line.replace(/日本語のファイル名\.txt|emoji-🎉-party/g, ""), /^[\x20-\x7e]*$/);
+    }
+  }
+});
+
+test("every detector is reachable and its explanation is readable in a narrow details panel", () => {
+  const providers = Array.from({ length: 90 }, (_, index) => ({ providerId: `detector-${String(index).padStart(2, "0")}`, version: 1, capability: { status: "missing-tool", explanation: "Install the missing system tool and press r to try again." }, findings: 0, complete: true, ran: false }));
+  const state = { ...CLEANING, findings: { ...CLEANING.findings, summary: { ...SUMMARY, providers }, showProviders: true, selectedProvider: 89 } };
+  const joined = text(state, { columns: 60, rows: 20 }).join("\n");
+  assert.match(joined, /detector-89/);
+  assert.match(joined, /Install the missing system tool/);
+  assert.match(joined, /90\/90 detectors/);
+});
+
+test("short dialogs centre at their natural height and their footer stays inside the box", () => {
+  const state = { ...BASE, dialog: { kind: "refused", title: "Plan refused", failure: { code: "changed", message: "The path changed since review." } } };
+  const lines = text(state, { columns: 100, rows: 43 }, UNICODE);
+  const top = lines.findIndex((line) => line.includes("╭"));
+  const bottom = lines.findIndex((line) => line.includes("╰"));
+  assert.ok(top > 5, "the box is vertically centred");
+  assert.ok(bottom - top < 12, "a short error has no screen-height border");
+  assert.ok(lines.slice(top, bottom).some((line) => line.includes("esc close")));
+  assert.match(lines.join("\n"), /No plan was applied/);
+});
+
+test("typing cursors follow naturally sized boxes in wide terminals", () => {
+  for (const state of [IRREVERSIBLE, { ...BASE, dialog: { kind: "destination", operation: "move", text: "/mnt/backup", disposition: "trash", alternatives: ["move"], origin: "path", path: ROOT_ENTRY.path } }]) {
+    const frame = render(state, { columns: 132, rows: 43 }, UNICODE);
+    const input = lineText(frame.lines[frame.cursor.row]);
+    assert.match(input, state.dialog.kind === "destination" ? /Into \/mnt\/backup/ : /Type yes and press Enter to apply: ye/);
+    assert.ok(frame.cursor.row < 38, "the cursor moved up with the compact dialog");
+    assert.ok(frame.cursor.column < 132);
+  }
+});
+
+test("an apply refusal directs recovery to History without claiming that nothing changed", () => {
+  const state = { ...BASE, dialog: { kind: "applied", outcome: { kind: "refused", failure: { code: "journal-failed", message: "The final journal write failed." } } } };
+  const joined = text(state).join("\n");
+  assert.match(joined, /Apply did not complete/);
+  assert.match(joined, /History/);
+  assert.doesNotMatch(joined, /Nothing was changed|No plan was applied/);
+});
+
+test("partial and uncertain undo results preserve their state and do not call selected bytes restored", () => {
+  for (const resultState of ["partial", "uncertain"]) {
+    const result = { planId: "plan-restore", completed: 1n, skipped: 2n, failed: 1n, selectedBytes: 12345n, bytesMovedToTrash: 0n, state: resultState, journalId: "journal-restore-123", undoAvailable: false, verification: [] };
+    const state = { ...BASE, dialog: { kind: "undone", outcome: { kind: "restored", record: RECORDS[0], result, notes: [] } } };
+    const joined = text(state).join("\n");
+    assert.match(joined, resultState === "partial" ? /Partly restored/ : /Restore uncertain/);
+    assert.match(joined, /Selected bytes/);
+    assert.match(joined, /journal-restore-123/);
+    assert.doesNotMatch(joined, /Restored bytes/);
+  }
 });

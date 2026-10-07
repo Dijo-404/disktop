@@ -78,6 +78,24 @@ function sources(overrides = {}) {
   };
 }
 
+test("simultaneous inventory refreshes share a healthy capacity probe instead of calling it stuck", async () => {
+  let calls = 0;
+  let finish;
+  const pending = new Promise((resolve) => { finish = resolve; });
+  const injected = sources({ mountinfo: "30 1 259:2 / / rw - ext4 /dev/nvme0n1p2 rw" });
+  injected.statfs = () => { calls += 1; return pending; };
+  const inventory = createLinuxInventory(injected, { statfsTimeoutMilliseconds: 500 });
+  const first = inventory.list();
+  const second = inventory.list();
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(calls, 1);
+  finish(READINGS.get("/"));
+  for (const result of await Promise.all([first, second])) {
+    assert.equal(result.filesystems.length, 1);
+    assert.ok(!result.warnings.some((warning) => warning.code === "statfs-timeout"));
+  }
+});
+
 test("physical disks are counted once and carry their own partitions", async () => {
   const result = await createLinuxInventory(sources()).list();
   assert.deepEqual(result.devices.map((device) => device.id), ["nvme0n1", "sdb", "sdc"]);
@@ -323,4 +341,70 @@ test("a partition holding data that nothing has mounted is listed, so its space 
 test("without lsblk's filesystem columns no partition is guessed to hold data", async () => {
   const result = await createLinuxInventory(sources()).list();
   assert.deepEqual(result.unmounted, []);
+});
+
+test("every firmware, recovery, swap and unknown-signature partition is visible across separate SSDs", async () => {
+  const result = await createLinuxInventory(sources({
+    mountinfo: DUAL_BOOT_MOUNTINFO,
+    lsblk: { capability: { status: "available", explanation: "ok" }, stdout: DUAL_BOOT_LSBLK, stderr: "", exitCode: 0 },
+    readings: new Map([["/", READINGS.get("/")], ["/boot", READINGS.get("/boot/efi")]]),
+  })).list();
+  assert.deepEqual(result.devices.map((device) => device.id), ["nvme1n1", "nvme0n1"]);
+  assert.deepEqual(result.volumes.map((volume) => volume.id), [
+    "nvme1n1p1", "nvme1n1p2", "nvme0n1p1", "nvme0n1p2", "nvme0n1p3", "nvme0n1p4", "nvme0n1p5", "nvme0n1p6", "dm-0",
+  ]);
+  assert.equal(result.volumes.find((volume) => volume.id === "nvme0n1p2").state, "unknown");
+  assert.equal(result.volumes.find((volume) => volume.id === "nvme0n1p5").state, "swap");
+  assert.equal(result.volumes.find((volume) => volume.id === "nvme1n1p2").state, "locked");
+  assert.equal(result.volumes.find((volume) => volume.id === "nvme0n1p6").state, "in-use");
+  assert.deepEqual(result.volumes.find((volume) => volume.id === "dm-0").mounts.map((mount) => mount.display), ["/", "/home"]);
+});
+
+test("a mounted partition remains visible when capacity cannot be read", async () => {
+  const readings = new Map(READINGS);
+  readings.delete("/media/usb");
+  const result = await createLinuxInventory(sources({ readings })).list();
+  const volume = result.volumes.find((volume) => volume.id === "sdb1");
+  assert.equal(volume.state, "mounted");
+  assert.deepEqual(volume.mounts.map((mount) => mount.display), ["/media/usb"]);
+  assert.equal(volume.availableBytes, undefined, "capacity is never fabricated from partition size");
+  assert.ok(result.warnings.some((warning) => warning.code === "statfs-unreadable"));
+});
+
+test("optical drives and blank whole disks remain visible without pretending they are SSDs", async () => {
+  const lsblk = JSON.stringify({ blockdevices: [
+    { name: "sr0", kname: "sr0", type: "rom", size: 0, rota: false, rm: true, tran: "sata" },
+    { name: "sdd", kname: "sdd", type: "disk", size: 1024, rota: false, rm: true, tran: "usb" },
+  ] });
+  const result = await createLinuxInventory(sources({
+    lsblk: { capability: { status: "available", explanation: "ok" }, stdout: lsblk, stderr: "", exitCode: 0 },
+  })).list();
+  assert.deepEqual(result.devices.map((device) => [device.id, device.kind]), [["sr0", "unknown"], ["sdd", "ssd"]]);
+  assert.deepEqual(result.volumes.map((volume) => [volume.id, volume.state]), [["sr0", "unknown"], ["sdd", "unknown"]]);
+});
+
+test("shared RAID and LVM topology is deduplicated and retains every backing disk", async () => {
+  const shared = { name: "archive", kname: "dm-0", path: "/dev/mapper/archive", type: "lvm", size: 2048, "maj:min": "253:0", fstype: "ext4", mountpoint: "/archive" };
+  const lsblk = JSON.stringify({ blockdevices: [
+    { name: "sda", kname: "sda", type: "disk", size: 4096, children: [{ name: "sda1", kname: "sda1", type: "part", size: 4000, children: [shared] }] },
+    { name: "sdb", kname: "sdb", type: "disk", size: 4096, children: [{ name: "sdb1", kname: "sdb1", type: "part", size: 4000, children: [shared] }] },
+  ] });
+  const result = await createLinuxInventory(sources({
+    mountinfo: "30 1 253:0 / /archive rw,relatime - ext4 /dev/mapper/archive rw",
+    lsblk: { capability: { status: "available", explanation: "ok" }, stdout: lsblk, stderr: "", exitCode: 0 },
+    readings: new Map([["/archive", READINGS.get("/")]]),
+  })).list();
+  assert.equal(result.volumes.filter((volume) => volume.id === "dm-0").length, 1);
+  assert.deepEqual(result.volumes.find((volume) => volume.id === "dm-0").deviceIds, ["sda", "sdb"]);
+  assert.equal(result.filesystems.length, 1, "a shared logical filesystem is measured once");
+});
+
+test("compressed read-only filesystems on real devices remain visible", async () => {
+  const result = await createLinuxInventory(sources({
+    mountinfo: "30 1 8:17 / /media/appliance ro - erofs /dev/sdb1 ro",
+    readings: new Map([["/media/appliance", READINGS.get("/media/usb")]]),
+  })).list();
+  assert.equal(result.filesystems[0].type, "erofs");
+  assert.equal(result.filesystems[0].deviceId, "sdb");
+  assert.equal(result.filesystems[0].readOnly, true);
 });

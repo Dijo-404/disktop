@@ -68,7 +68,7 @@ plan is only reviewed and confirmed at 60×20 or larger, where all of it fits.
 
 | Tab | What it shows |
 | --- | --- |
-| **1 Disks** | Every filesystem with a usage bar, and for the selected one a bar that separates used, root-reserved, and available space, its device, inodes, and mounts; then the partitions nothing has mounted, with how to mount or unlock them. |
+| **1 Disks** | Connected drive counts and every readable filesystem with a usage bar; the selected one separates used, root-reserved, and available space, device, inodes, and mounts. All other partitions and storage volumes stay visible, including locked, swap, RAID/LVM backing, and unknown-signature storage. |
 | **2 Explore** | A stored scan, directory by directory: size, share of the parent, growth since the previous comparable scan, a trend of the total, and a file-type breakdown. `f` cycles finders: largest files, duplicates, stale, empty directories, broken links. |
 | **3 Clean** | Everything the detectors found that a plan could act on, totalled by category, then what is there for information (swap, SMART, open-deleted files). |
 | **4 Dev** · **5 Apps** | The same findings, narrowed to developer environments and caches, or to installed applications and their data. |
@@ -91,11 +91,19 @@ Keys (also under `?`):
 | `o` (in a review) | plan the next operation instead: Trash, a move to another disk, a compression, permanent removal; a move or a compression asks for its destination first |
 | `y` / type `yes` | apply a reversible / an irreversible plan |
 | `u` | undo the selected Trash action (History) |
-| `p` | which detectors ran, and why the others could not |
+| `p` | which detectors ran, and why the others could not; `j`/`k` scroll their explanations |
 | `U` | IEC or SI units |
 | `r` | read again |
 | Esc | close, or stop what is running (a scan keeps what it read) |
 | `q`, Ctrl+C | quit; the terminal is always restored |
+
+The [Catppuccin Mocha](https://catppuccin.com/palette/#mocha) palette pairs mauve
+accents with dark surfaces, teal usage bars, yellow warnings, and soft red failures.
+Truecolor terminals get the original palette; 256- and 16-colour terminals get
+approximations. Usage, category distribution, and growth charts
+communicate measured values; the scan activity bar says its total extent is unknown.
+Short dialogs use their content's height, and all six numbered tabs remain visible at
+40 columns.
 
 The mouse selects rows, switches tabs, and scrolls. `NO_COLOR` removes colour and keeps
 bold and inverse; a non-UTF-8 locale gets ASCII glyphs (`DISKTOP_ASCII=1` forces them);
@@ -111,7 +119,7 @@ when stderr is a terminal.
 
 | Command | |
 | --- | --- |
-| `disktop devices` | Devices, filesystems, mounts, free space, inodes. |
+| `disktop devices` | All connected drives, partitions and logical volumes; mounts, free space and inodes. Unmounted, locked, swap and unknown signatures stay visible. |
 | `disktop alerts check [--threshold N] [--notify]` | Exit `1` when a filesystem passes its space or inode threshold. |
 | `disktop scan [PATH]` | Index a tree and save a snapshot. `--accounting allocated\|apparent`, `--cross-filesystems`, `--throttle 50MiB`, `--max-depth N`, `--sudo` (then measure what it could not read, as root, read-only). |
 | `disktop explore [PATH]` | Pages of a stored scan: `--sort`, `--kind`, `--min-size`, `--ext`, `--name`, `--older-than`, `--type-totals`, `--owners`. |

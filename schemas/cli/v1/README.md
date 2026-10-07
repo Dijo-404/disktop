@@ -40,3 +40,5 @@ the output it claims to describe.
 
 Commands gain their schema in the phase that implements them; a schema change that is not
 backward compatible needs a new version directory, not an edit here.
+
+`devices` includes `volumes`: every persistent partition and logical volume, including firmware/recovery, swap, optical media and unknown signatures. `deviceIds` preserves all physical parents for RAID/LVM; `mounts` carries byte-exact visible mount points. `unknown` means no readable signature, never empty. `in-use` means a backing partition has open logical children. No volume is mounted, unlocked or mutated by inventory. Missing topology or unreadable capacity remains an incomplete result with warnings. The existing `unmounted` data-volume subset remains available. Reports reuse the same volume contract.

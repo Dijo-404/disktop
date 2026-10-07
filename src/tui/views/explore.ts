@@ -1,4 +1,5 @@
 import type { IndexedEntry, RawPath } from "../../domain/models.js";
+import { isWithin, pathBytes } from "../../domain/paths.js";
 import { formatBytes } from "../../domain/sizes.js";
 import { LineBuilder, type HitRegion, type ScreenLine } from "../frame.js";
 import type { ExploreMode, ExploreRow, ExploreState } from "../state.js";
@@ -15,7 +16,7 @@ import {
   truncateStart,
 } from "../text.js";
 import { sparkline, type Theme } from "../themes.js";
-import { SERIES, barSpans, seriesGlyph, sharePercent, stackedBarSpans } from "../widgets/bars.js";
+import { SERIES, activityBarSpans, barSpans, seriesGlyph, sharePercent, stackedBarSpans } from "../widgets/bars.js";
 import { elapsed, ruleLine, spinnerFrame, type Hint } from "../widgets/chrome.js";
 import { emptyState, fit, listWindow, type ViewContext, type ViewOutput } from "./common.js";
 
@@ -245,7 +246,7 @@ function rowLine(row: ExploreRow, selected: boolean, columns: ExploreColumns, wh
 
   if (row.kind === "group") {
     const group = row.group;
-    const copies = group.group.files.length;
+    const copies = row.totalFiles ?? group.group.files.length;
     line.add(padStart(formatBytes(group.group.apparentBytes, state.units), columns.size - 1), "strong").add(" ");
     line.add(` ${copies} identical copies`, "heading");
     if (group.decision.kind === "decided") {
@@ -358,9 +359,8 @@ function measuredSize(path: RawPath, explore: ExploreState): bigint | undefined 
 
 /** Everything measured as root below `path`, which the scan's totals leave out. */
 function measuredBelow(path: RawPath, explore: ExploreState): bigint {
-  const base = path.display === "/" ? "/" : `${path.display}/`;
   return (explore.elevated?.measurements ?? [])
-    .filter((measurement) => measurement.path.display === path.display || measurement.path.display.startsWith(base))
+    .filter((measurement) => isWithin(pathBytes(path), pathBytes(measurement.path)))
     .reduce((sum, measurement) => sum + measurement.bytes, 0n);
 }
 
@@ -392,11 +392,14 @@ function contextLine(context: ViewContext, home: string | undefined): ScreenLine
   const right: string[] = [];
   const directory = explore.mode === "browse" ? explore.directory?.entry : undefined;
   if (directory !== undefined) {
-    right.push(formatBytes(entrySize(directory, explore), state.units));
+    const unentered = unenteredReason(directory, explore);
+    const measured = unentered === undefined ? undefined : measuredSize(directory.path, explore);
+    right.push(unentered === undefined ? formatBytes(entrySize(directory, explore), state.units)
+      : measured === undefined ? "size unknown" : `${formatBytes(measured, state.units)} measured as root`);
     if (directory.childEntries !== undefined) {
       right.push(`${groupDigits(directory.childEntries)} item${directory.childEntries === 1n ? "" : "s"}`);
     }
-    const asRoot = explore.directory === undefined ? 0n : measuredBelow(explore.directory.path, explore);
+    const asRoot = explore.directory === undefined || unentered !== undefined ? 0n : measuredBelow(explore.directory.path, explore);
     if (asRoot > 0n) {
       right.push(`+${formatBytes(asRoot, state.units)} unreadable, measured as root`);
     }
@@ -407,7 +410,7 @@ function contextLine(context: ViewContext, home: string | undefined): ScreenLine
   let trendText = "";
   if (trend !== undefined && trend.values.length >= 2 && width >= 70) {
     const spark = sparkline(trend.values.map((value) => Number(value)), theme);
-    const sign = trend.delta > 0n ? "+" : trend.delta < 0n ? "-" : "±";
+    const sign = trend.delta > 0n ? "+" : trend.delta < 0n ? "-" : theme.unicode ? "±" : "=";
     const magnitude = trend.delta < 0n ? -trend.delta : trend.delta;
     trendText = `${spark} ${sign}${formatBytes(magnitude, state.units)} since ${trend.since}`;
   }
@@ -585,6 +588,12 @@ function scanProgress(context: ViewContext, home: string | undefined): ScreenLin
       .build(),
   );
   lines.push({ spans: [] });
+  if (height >= 12) {
+    const activity = new LineBuilder(width).add("    ");
+    for (const span of activityBarSpans(Math.max(8, Math.min(40, width - 24)), state.tick, theme)) activity.add(span.text, span.style);
+    lines.push(activity.add("  extent unknown", "muted").build());
+    lines.push({ spans: [] });
+  }
   lines.push(label("Entries").add(groupDigits(scan.entries), "strong").add(`   ${groupDigits(Math.round(rate))}/s`, "dim").build());
   lines.push(label("Bytes read").add(formatBytes(scan.bytes, state.units), "strong").build());
   lines.push(

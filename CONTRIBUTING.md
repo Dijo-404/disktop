@@ -22,6 +22,9 @@ npm run check
 cargo fmt --manifest-path native/disktop-fs/Cargo.toml --all -- --check
 cargo clippy --manifest-path native/disktop-fs/Cargo.toml --all-targets -- -D warnings
 cargo test --manifest-path native/disktop-fs/Cargo.toml
+npm audit
+cargo install --locked cargo-audit --version 0.22.2
+cargo audit --file native/disktop-fs/Cargo.lock --deny warnings
 ```
 
 The packed package has its own smoke test, which needs this machine's release helper in
@@ -52,6 +55,16 @@ Do not add `rm -rf`, shell-built cleanup commands, or direct file mutation to a 
 
 Create destructive test trees under isolated temporary directories. Never aim cleanup tests at a developer's home, the CI runner home, or a real system cache. Use mount namespaces or VMs for bind mounts, symlink races, and privileged manager behavior. Test odd byte filenames, hardlinks, sparse files, permission failures, interruptions, and journal recovery for affected code. The Ubuntu, Fedora, and Arch CI container jobs are smoke checks of the build, the terminal tests, and the packed package; they are not a substitute for the host and VM checks in the support matrix.
 
+`node tests/support/managers-disposable.mjs apt` runs the real privileged
+package-cache gate in a disposable Ubuntu/Fedora/Arch container. It mounts the repository
+read-only, extracts the supported official Node runtime, certifies a fixture-only cache
+and grants the ordinary account sudo for the one fixed command. It verifies the reviewed
+plan, durable journal, live removal and unchanged package database/sentinel. Docker is
+required. Never enable `DISKTOP_TEST_REAL_MANAGER` directly on a host; the integration
+test refuses that environment. CI and publication require all three enabled gates;
+wrapper interrupt/cleanup tests use a non-mutating Docker fixture.
+Run the same command with `dnf` and `pacman` in place of `apt` for the other managers.
+
 Keep read-only fixtures independent of host state too. Swap-provider tests restrict
 path facts to their temporary tree so `/swapfile` on a runner cannot become a fixture
 finding. The terminal scan-interruption test uses a temporary tree and `--throttle 1`
@@ -62,6 +75,28 @@ rejecting broken-pipe errors and stack traces when an output reader exits early.
 The distro jobs copy Node from setup-node's shared tool cache into a root-owned
 container path before the administrator inventory check. Disktop requires both its
 package and its Node executable to be root-owned when running under EUID 0.
+
+Filesystem fault tests create private mount namespaces and disposable tmpfs filesystems.
+They test full destinations, full journals, read-only sources and cross-device moves
+without touching host mounts. A user namespace that hides the root-owned ancestors of
+the journal is unsupported for mutation and explicitly skipped. Dedicated CI and publish
+gates keep those identities visible in a disposable container, retain only mount
+capability for the ordinary test account, mount the checkout read-only, and require
+all fault cases without skips.
+
+For the host's systemd user instance, run
+`DISKTOP_TEST_SYSTEMD=1 node --test tests/integration/timer-host.test.mjs` after a build.
+This uses throwaway unit files and runtime links, executes a fixture alert command,
+then disables and removes its own links. It leaves an existing Disktop timer alone.
+
+`DISKTOP_TEST_SSH=1 node --test tests/pty/ssh.test.mjs` exercises a real loopback SSH
+PTY with temporary keys and a private, public-key-only sshd. It requires OpenSSH and
+an ordinary user account; it never changes the system's SSH configuration. Quit and
+SIGINT must restore every terminal setting at 80×24 with ASCII and `NO_COLOR`.
+
+CI and the publish workflow both run `npm audit` and check the native lockfile with
+the pinned Cargo advisory checker. RustSec warnings and vulnerabilities block the
+release; advisories are never suppressed just to obtain a passing gate.
 
 ## Pull requests
 

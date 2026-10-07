@@ -1,4 +1,4 @@
-import type { Alert, Capability, Filesystem, StorageDevice, UnmountedVolume, Warning } from "../domain/models.js";
+import type { Alert, Capability, Filesystem, StorageDevice, StorageVolume, UnmountedVolume, Warning } from "../domain/models.js";
 import type { InventoryPort } from "../ports/inventory.js";
 import { evaluateAlerts, type AlertThresholds } from "./alerts.js";
 
@@ -18,6 +18,7 @@ export interface DashboardView {
 
 export interface InventoryView extends DashboardView {
   readonly devices: readonly StorageDevice[];
+  readonly volumes: readonly StorageVolume[];
   /** Data partitions and locked encrypted containers nothing has mounted. */
   readonly unmounted: readonly UnmountedVolume[];
 }
@@ -45,6 +46,7 @@ export function createDashboardService(
     return {
       capability: result.capability,
       devices: result.devices,
+      volumes: result.volumes,
       unmounted: result.unmounted,
       filesystems: [...result.filesystems].sort(byMountPoint),
       alerts,

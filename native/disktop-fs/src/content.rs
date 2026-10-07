@@ -15,6 +15,7 @@
 use sha2::{Digest, Sha256};
 use std::io;
 use std::os::unix::io::RawFd;
+use std::sync::atomic::AtomicBool;
 
 /// How much of each end `edge_digest` reads. Large enough that two unrelated
 /// files of the same size almost never agree, small enough that taking it over
@@ -49,12 +50,20 @@ pub fn edge_digest(descriptor: RawFd, size: u64) -> io::Result<[u8; 32]> {
 ///
 /// The whole file never exists in memory at once; this runs against a virtual
 /// machine image as happily as against a text file.
+#[cfg(test)]
 pub fn full_digest(descriptor: RawFd) -> io::Result<[u8; 32]> {
+    full_digest_cancellable(descriptor, &AtomicBool::new(false))
+}
+
+/// The same whole-file digest, with cancellation between bounded reads.
+/// Verification must stay cancellable while the source still remains intact.
+pub fn full_digest_cancellable(descriptor: RawFd, cancelled: &AtomicBool) -> io::Result<[u8; 32]> {
     let mut hasher = Sha256::new();
     let mut buffer = vec![0u8; READ_BYTES];
     let mut offset = 0u64;
 
     loop {
+        crate::transfer::check(cancelled)?;
         let read = pread(descriptor, &mut buffer, offset)?;
         if read == 0 {
             break;
@@ -71,11 +80,16 @@ pub fn full_digest(descriptor: RawFd) -> io::Result<[u8; 32]> {
 /// This is the gate every content-equality mutation passes through. A digest
 /// never stands in for it: a digest says two files are probably the same, and
 /// "probably" is not a basis for releasing somebody's only copy of something.
-// The mutations that call this land with dedup-hardlink and copy-move; until
-// the first of them does, nothing in the binary reaches it and CI treats a
-// clippy warning as an error.
-#[allow(dead_code)]
+#[cfg(test)]
 pub fn bytes_equal(left: RawFd, right: RawFd) -> io::Result<bool> {
+    bytes_equal_cancellable(left, right, &AtomicBool::new(false))
+}
+
+pub fn bytes_equal_cancellable(
+    left: RawFd,
+    right: RawFd,
+    cancelled: &AtomicBool,
+) -> io::Result<bool> {
     if crate::sys::metadata_of(left)?.apparent_bytes
         != crate::sys::metadata_of(right)?.apparent_bytes
     {
@@ -87,6 +101,7 @@ pub fn bytes_equal(left: RawFd, right: RawFd) -> io::Result<bool> {
     let mut offset = 0u64;
 
     loop {
+        crate::transfer::check(cancelled)?;
         let read = pread(left, &mut left_buffer, offset)?;
         if read == 0 {
             // The other file was the same length a moment ago, so a short read

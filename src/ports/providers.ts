@@ -25,11 +25,17 @@ export interface PathFacts {
  *
  * There is no recursive call here on purpose: arbitrary traversal belongs to
  * the helper, and a provider that could walk a tree would be measuring rather
- * than detecting.
+ * than detecting. Missing paths and non-directories are absent answers;
+ * permission denials and failed reads throw, so the service marks the detector
+ * incomplete and explains what it could not inspect.
  */
 export interface PathProbe {
   facts(path: RawPath): Promise<PathFacts | undefined>;
-  /** One level, bounded and sorted. A non-directory lists empty. */
+  /**
+   * One level, sorted and complete within the adapter's fixed entry bound.
+   * A non-directory lists empty. Exceeding the bound throws EOVERFLOW;
+   * a sampled prefix must never be presented as the directory's whole list.
+   */
   list(path: RawPath): Promise<readonly RawPath[]>;
   readText(path: RawPath, maxBytes: number): Promise<string | undefined>;
 }
@@ -60,7 +66,7 @@ export interface ToolOutput {
 
 /** A fixed argument vector against an allowlisted system tool. Never a shell. */
 export interface ToolPort {
-  run(name: string, commandArguments: readonly string[]): Promise<ToolOutput>;
+  run(name: string, commandArguments: readonly string[], signal?: AbortSignal): Promise<ToolOutput>;
 }
 
 export interface IndexSearch {
@@ -99,8 +105,8 @@ export interface IndexEntries {
 }
 
 export interface IndexSearchPort {
-  directoriesNamed(names: readonly string[], limit: number): Promise<IndexSearch>;
-  ownerTotals(limit: number): Promise<OwnerUsageReading>;
+  directoriesNamed(names: readonly string[], limit: number, signal?: AbortSignal): Promise<IndexSearch>;
+  ownerTotals(limit: number, signal?: AbortSignal): Promise<OwnerUsageReading>;
   /**
    * Everything a stored scan recorded under one path.
    *
@@ -109,7 +115,7 @@ export interface IndexSearchPort {
    * never a traversal — a provider that could walk a tree would be measuring
    * rather than detecting.
    */
-  entriesUnder(root: RawPath, limit: number): Promise<IndexEntries>;
+  entriesUnder(root: RawPath, limit: number, signal?: AbortSignal): Promise<IndexEntries>;
 }
 
 /**
@@ -147,7 +153,7 @@ export interface FindingProvider {
   readonly id: string;
   readonly version: number;
   readonly categories: readonly FindingCategory[];
-  probe(environment: DiscoveryEnvironment): Promise<Capability>;
+  probe(environment: DiscoveryEnvironment, signal?: AbortSignal): Promise<Capability>;
   discover(environment: DiscoveryEnvironment, signal: AbortSignal): Promise<DiscoveryResult>;
 }
 

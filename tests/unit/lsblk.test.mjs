@@ -53,16 +53,32 @@ test("booleans are read whether lsblk writes them as JSON booleans or as strings
   assert.equal(deviceKindOf(devices[0]), "hdd");
 });
 
-test("a size a double cannot hold exactly is refused rather than rounded", () => {
-  const { devices, warnings } = parseLsblk(
-    JSON.stringify({ blockdevices: [{ name: "huge", type: "disk", size: 9007199254740993 }] }),
-  );
-  assert.deepEqual(devices, []);
-  assert.equal(warnings[0].code, "lsblk-unreadable-size");
+test("a SIZE numeric token above 2^53 survives before JSON rounds it", () => {
+  const { devices, warnings } = parseLsblk('{"blockdevices":[{"name":"huge","type":"disk","size":9007199254740993}]}');
+  assert.equal(devices[0].sizeBytes, 9007199254740993n);
+  assert.deepEqual(warnings, []);
+});
+
+test("exponents, negative sizes and fractional sizes are refused instead of guessed", () => {
+  for (const size of ["1e3", "-1", "1.5"]) {
+    const { devices, warnings } = parseLsblk(`{"blockdevices":[{"name":"huge","type":"disk","size":${size}}]}`);
+    assert.deepEqual(devices, []);
+    assert.equal(warnings[0].code, "lsblk-unreadable-size");
+  }
 });
 
 test("unusable output produces a warning and no invented topology", () => {
   assert.equal(parseLsblk("not json").warnings[0].code, "lsblk-invalid-json");
   assert.equal(parseLsblk("{}").warnings[0].code, "lsblk-unexpected-shape");
   assert.deepEqual(parseLsblk("not json").devices, []);
+});
+
+test("shared block nodes are emitted once with all kernel-name parents", () => {
+  const child = { name: "friendly-name", kname: "dm-0", type: "crypt", size: 1 };
+  const result = parseLsblk(JSON.stringify({ blockdevices: [
+    { name: "disk-a", kname: "sda", type: "disk", size: 2, children: [child] },
+    { name: "disk-b", kname: "sdb", type: "disk", size: 2, children: [child] },
+  ] }));
+  assert.equal(result.devices.filter((device) => device.kernelName === "dm-0").length, 1);
+  assert.deepEqual(result.devices.find((device) => device.kernelName === "dm-0").parentNames, ["sda", "sdb"]);
 });

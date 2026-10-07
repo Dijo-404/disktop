@@ -100,8 +100,16 @@ export async function runFixedCommand(
   commandArguments: readonly string[],
   limits: CommandLimits = DEFAULT_LIMITS,
   environment: Readonly<Record<string, string | undefined>> = process.env,
+  signal?: AbortSignal,
 ): Promise<CommandOutcome> {
+  const cancelled = (): CommandOutcome => ({
+    capability: { status: "missing-tool", explanation: `${name} was cancelled before it started; nothing was run.` },
+    stdout: "", stderr: "", exitCode: null,
+  });
+  const aborted = (): boolean => signal?.aborted ?? false;
+  if (aborted()) return cancelled();
   const executable = await resolveTrustedExecutable(name);
+  if (aborted()) return cancelled();
   if (executable === undefined) {
     return {
       capability: { status: "missing-tool", explanation: `${name} was not found in ${TRUSTED_DIRECTORIES.join(", ")}.` },
@@ -116,6 +124,7 @@ export async function runFixedCommand(
     try {
       child = spawn(executable, [...commandArguments], {
         shell: false,
+        detached: true,
         stdio: ["ignore", "pipe", "pipe"],
         env: toolEnvironment(environment),
       });
@@ -137,6 +146,7 @@ export async function runFixedCommand(
       settled = true;
       clearTimeout(timer);
       clearTimeout(drain);
+      signal?.removeEventListener("abort", abort);
       resolve(outcome);
     };
     const stop = (reason: string): void => {
@@ -144,10 +154,16 @@ export async function runFixedCommand(
         return;
       }
       stopped = reason;
-      child.kill("SIGKILL");
+      // Queries can fork readers of their own. Stop the group, so a timeout
+      // cannot leave those descendants running after their parent is reaped.
+      if (child.pid !== undefined) {
+        try { process.kill(-child.pid, "SIGKILL"); }
+        catch { child.kill("SIGKILL"); }
+      }
       drain = setTimeout(() => {
         child.stdout?.destroy();
         child.stderr?.destroy();
+        child.unref();
         settle(finish(executable, null, stdout.text(), stderr.text(), stopped));
       }, DRAIN_MILLISECONDS);
     };
@@ -155,6 +171,9 @@ export async function runFixedCommand(
       () => stop(`${executable} did not finish within ${limits.timeoutMilliseconds} ms and was stopped.`),
       limits.timeoutMilliseconds,
     );
+    const abort = (): void => stop(`${executable} was cancelled and stopped.`);
+    signal?.addEventListener("abort", abort, { once: true });
+    if (signal?.aborted === true) abort();
 
     child.stdout?.on("data", (chunk: Buffer) => {
       if (!stdout.add(chunk)) {
@@ -164,6 +183,8 @@ export async function runFixedCommand(
     child.stderr?.on("data", (chunk: Buffer) => {
       stderr.add(chunk);
     });
+    child.stdout?.on("error", (error) => stop(`Reading ${executable}'s output failed: ${sanitizeText(error.message)}.`));
+    child.stderr?.on("error", (error) => stop(`Reading ${executable}'s diagnostics failed: ${sanitizeText(error.message)}.`));
     child.on("error", (error) => settle(spawnFailure(executable, error)));
     child.on("close", (code, signal) =>
       settle(finish(executable, code, stdout.text(), stderr.text(), stopped ?? (signal === null ? undefined : `${executable} was terminated by ${signal}.`))),

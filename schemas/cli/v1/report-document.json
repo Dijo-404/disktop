@@ -305,6 +305,12 @@
           "items": {
             "$ref": "common.json#/$defs/unmountedVolume"
           }
+        },
+        "volumes": {
+          "type": "array",
+          "items": {
+            "$ref": "common.json#/$defs/storageVolume"
+          }
         }
       },
       "allOf": [
@@ -393,29 +399,59 @@
           "description": "Unreadable directories under the subject, measured afterwards by the system's du running read-only as root. Never added into the scan's totals; their contents are not in the index.",
           "type": "object",
           "additionalProperties": false,
-          "required": ["measuredAt", "accounting", "bytes", "items"],
+          "required": [
+            "measuredAt",
+            "accounting",
+            "bytes",
+            "items"
+          ],
           "properties": {
-            "measuredAt": { "type": "string" },
-            "accounting": { "type": "string", "enum": ["allocated", "apparent"] },
-            "bytes": { "$ref": "common.json#/$defs/decimalInteger" },
+            "measuredAt": {
+              "type": "string"
+            },
+            "accounting": {
+              "type": "string",
+              "enum": [
+                "allocated",
+                "apparent"
+              ]
+            },
+            "bytes": {
+              "$ref": "common.json#/$defs/decimalInteger"
+            },
             "items": {
               "type": "array",
               "items": {
                 "type": "object",
                 "additionalProperties": false,
-                "required": ["path", "bytes", "children"],
+                "required": [
+                  "path",
+                  "bytes",
+                  "children"
+                ],
                 "properties": {
-                  "path": { "$ref": "common.json#/$defs/rawPath" },
-                  "bytes": { "$ref": "common.json#/$defs/decimalInteger" },
+                  "path": {
+                    "$ref": "common.json#/$defs/rawPath"
+                  },
+                  "bytes": {
+                    "$ref": "common.json#/$defs/decimalInteger"
+                  },
                   "children": {
                     "type": "array",
                     "items": {
                       "type": "object",
                       "additionalProperties": false,
-                      "required": ["path", "bytes"],
+                      "required": [
+                        "path",
+                        "bytes"
+                      ],
                       "properties": {
-                        "path": { "$ref": "common.json#/$defs/rawPath" },
-                        "bytes": { "$ref": "common.json#/$defs/decimalInteger" }
+                        "path": {
+                          "$ref": "common.json#/$defs/rawPath"
+                        },
+                        "bytes": {
+                          "$ref": "common.json#/$defs/decimalInteger"
+                        }
                       }
                     }
                   }

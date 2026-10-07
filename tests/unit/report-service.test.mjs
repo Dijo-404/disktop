@@ -47,6 +47,24 @@ function service(overrides = {}) {
 
 const request = (overrides = {}) => ({ limit: 50, findings: false, generatedAt: NOW, version: "1.2.3", ...overrides });
 
+test("a failed secondary index breakdown preserves the report and makes it incomplete", async () => {
+  for (const failure of [
+    () => ({ kind: "unavailable", capability: { status: "missing-tool", explanation: "The helper could not read the index." } }),
+    () => { throw new StaleScanIndex(FIXTURE_SNAPSHOT.scanId, "The index was pruned during the report."); },
+  ]) {
+    const { report } = service({
+      explore: (query) => query.filter?.kinds?.includes("file") ? failure() : { kind: "page", page: { entries: [FIXTURE_ENTRY] } },
+    });
+    const outcome = await report.gather(request({ subject: rawPath("/home/example/projects") }), new AbortController().signal);
+    assert.equal(outcome.kind, "report");
+    assert.equal(outcome.report.complete, false);
+    assert.equal(outcome.report.scan.complete, false);
+    assert.equal(outcome.report.scan.largest.entries.length, 1);
+    assert.equal(outcome.report.scan.largestFiles, undefined);
+    assert.ok(outcome.report.scan.warnings.some((warning) => warning.code === "index-unavailable" && /largest-file/.test(warning.message)));
+  }
+});
+
 test("without a path or --findings, a report is the capacity view and says what it left out", async () => {
   const { report, asked } = service();
   const outcome = await report.gather(request(), new AbortController().signal);

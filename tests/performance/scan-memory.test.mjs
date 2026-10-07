@@ -13,7 +13,7 @@
 import assert from "node:assert/strict";
 import { spawn, spawnSync } from "node:child_process";
 import { existsSync, readFileSync, statSync } from "node:fs";
-import { mkdtemp, rm } from "node:fs/promises";
+import { mkdtemp, readdir, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { after, test } from "node:test";
@@ -41,6 +41,9 @@ const helperPath =
     : DEBUG_HELPER;
 /** A debug build is several times slower; its timings are reported, not enforced. */
 const timingsAreBinding = helperPath === RELEASE_HELPER;
+if (process.env.DISKTOP_REQUIRE_RELEASE_BENCHMARK === "1" && !timingsAreBinding) {
+  throw new Error("The required performance gate needs a release helper at least as new as the debug build; build release after debug.");
+}
 
 const homes = [];
 
@@ -434,6 +437,56 @@ test("the helper reports progress quickly and stays inside its own budget", { ti
     }
 
   } finally {
+    await fixture.cleanup();
+  }
+});
+
+/** Same-size classes can contain an entire scan, so they must partition on disk. */
+test("duplicate searches and repeated wide-directory reviews keep bounded memory and descriptors", { timeout: 30 * 60_000 }, async () => {
+  const entries = Math.min(LARGE, 100_000);
+  const fixture = await createLargeFixture({ entries, fanOut: entries, bytesPerFile: 8 });
+  const home = await disktopHome();
+  const indexDirectory = join(home, "index");
+  const helper = helperSession();
+  let peak = 0;
+  const sample = setInterval(() => {
+    peak = Math.max(peak, highWater(helper.pid) ?? 0);
+  }, 20);
+  try {
+    const scan = await helper.request("scan", {
+      roots: [base64(fixture.root)], crossFilesystems: false, excludes: [],
+      accounting: "allocated", indexDirectory: base64(indexDirectory),
+    });
+    assert.equal(scan.event, "complete", JSON.stringify(scan.error));
+    assert.equal(scan.result.complete, true);
+    const arguments_ = { scanId: scan.result.scanId, indexDirectory: base64(indexDirectory), maximumFilesPerGroup: 10 };
+    const first = await helper.request("hash-candidates", arguments_);
+    assert.equal(first.event, "complete", JSON.stringify(first.error));
+    assert.equal(first.result.groups.length, 1);
+    assert.equal(first.result.groups[0].files.length, 10);
+    assert.equal(first.result.complete, false, "the ten-file cap must report the omitted twins");
+    assert.ok(first.result.warnings.some((warning) => warning.includes("truncated")));
+    const residentAfterFirst = resident(helper.pid);
+    const initialDescriptors = (await readdir(`/proc/${helper.pid}/fd`)).length;
+    for (let repeat = 0; repeat < 3; repeat += 1) {
+      const duplicates = await helper.request("hash-candidates", arguments_);
+      assert.equal(duplicates.event, "complete", JSON.stringify(duplicates.error));
+      assert.deepEqual(duplicates.result.groups, first.result.groups);
+      const reviewed = await helper.request("inspect", { paths: [base64(fixture.root)] });
+      assert.equal(reviewed.event, "complete", JSON.stringify(reviewed.error));
+      assert.ok(reviewed.result.paths[0].subtree, JSON.stringify(reviewed.result));
+    }
+    const after = resident(helper.pid);
+    const finalDescriptors = (await readdir(`/proc/${helper.pid}/fd`)).length;
+    assert.ok(after <= residentAfterFirst + 16 * MEBIBYTE,
+      `repeated searches/reviews retained memory: ${residentAfterFirst / MEBIBYTE} -> ${after / MEBIBYTE} MiB`);
+    assert.ok(finalDescriptors <= initialDescriptors + 2,
+      `repeated searches/reviews retained descriptors: ${initialDescriptors} -> ${finalDescriptors}`);
+    assert.ok(peak < 128 * MEBIBYTE, `one ${entries}-file size class used ${peak / MEBIBYTE} MiB`);
+    process.stderr.write(`duplicate/review budget: ${entries} same-sized files; peak RSS ${(peak / MEBIBYTE).toFixed(1)} MiB; descriptors ${initialDescriptors} -> ${finalDescriptors}\n`);
+  } finally {
+    clearInterval(sample);
+    await helper.close();
     await fixture.cleanup();
   }
 });

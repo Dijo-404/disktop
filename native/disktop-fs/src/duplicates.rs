@@ -19,8 +19,7 @@ use crate::content;
 use crate::guard;
 use crate::index;
 use crate::sys::{self, EntryKind};
-use rusqlite::Connection;
-use std::collections::{HashMap, HashSet};
+use rusqlite::{Connection, OptionalExtension, params};
 use std::sync::atomic::{AtomicBool, Ordering};
 
 /// Groups a single request may report. A listing nobody can read is not a
@@ -77,9 +76,7 @@ const SIZE_BATCH: u32 = 256;
 /// Individual warnings one search reports; the rest are counted. A tree of
 /// unreadable files would otherwise grow the answer with every one of them.
 const MAX_WARNINGS: usize = 64;
-
-/// How much of a file is read between two looks at the cancel flag.
-const READ_BYTES: usize = 1024 * 1024;
+const MAX_REPORT_BYTES: usize = 8 * 1024 * 1024;
 
 /// Read one scan's index and report the groups of identical files in it.
 pub fn find(
@@ -96,6 +93,7 @@ pub fn find(
             files_hashed: 0,
         },
         suppressed: 0,
+        reported_bytes: 0,
         cancelled,
     };
     search.run(connection, request)?;
@@ -106,6 +104,7 @@ struct Search<'a> {
     report: Report,
     /// Warnings counted rather than listed once the list was full.
     suppressed: u64,
+    reported_bytes: usize,
     cancelled: &'a AtomicBool,
 }
 
@@ -113,6 +112,7 @@ struct Search<'a> {
 enum Stop {
     Cancelled,
     Truncated(u32),
+    ResultBudget,
 }
 
 impl Search<'_> {
@@ -148,11 +148,13 @@ impl Search<'_> {
                 if let Some(stop) = self.stop_before_class(maximum_groups) {
                     return self.stop(stop);
                 }
-                let paths = class_paths(connection, request.under, apparent_bytes)?;
-                self.report.candidates_read += paths.len() as u64;
-                if let Some(stop) =
-                    self.class(&paths, apparent_bytes, maximum_groups, maximum_files)
-                {
+                if let Some(stop) = self.class(
+                    connection,
+                    request.under,
+                    apparent_bytes,
+                    maximum_groups,
+                    maximum_files,
+                )? {
                     return self.stop(stop);
                 }
             }
@@ -169,56 +171,176 @@ impl Search<'_> {
         None
     }
 
-    /// Narrow one size class to its groups.
-    ///
-    /// Each stage narrows the last one's survivors, so a file alone in its
-    /// size class is never opened and a file alone after the edge digest is
-    /// never read through. One size class can hold more groups than the cap
-    /// allows, so the cap is checked where a group is added rather than only
-    /// between classes: leaving the loop without saying so would drop groups
-    /// from an answer that still called itself whole.
+    /// Partition a class on disk: a directory of a million same-sized files
+    /// must not become a million paths and candidates in memory. SQLite's
+    /// anonymous database disappears on close and has a bounded page cache.
     fn class(
         &mut self,
-        paths: &[Vec<u8>],
+        connection: &Connection,
+        under: Option<(i64, i64)>,
         apparent_bytes: u64,
         maximum_groups: u32,
         maximum_files: u32,
-    ) -> Option<Stop> {
-        let edges = self.partition(paths, apparent_bytes, Stage::Edges);
-        for (_, bucket) in edges {
+    ) -> rusqlite::Result<Option<Stop>> {
+        let scratch = Connection::open("")?;
+        scratch.execute_batch(
+            "PRAGMA cache_size = -2048; PRAGMA temp_store = FILE;
+            PRAGMA journal_mode = OFF; PRAGMA synchronous = OFF;
+            CREATE TABLE candidate (id INTEGER PRIMARY KEY, path BLOB NOT NULL,
+                device TEXT NOT NULL, inode TEXT NOT NULL, modified TEXT NOT NULL,
+                owner INTEGER NOT NULL, group_id INTEGER NOT NULL, permissions INTEGER NOT NULL,
+                edge BLOB NOT NULL, full BLOB, UNIQUE(device, inode));
+            CREATE INDEX candidate_edge ON candidate(edge);",
+        )?;
+        let mut resolver = index::PathResolver::new(connection);
+        index::visit_files_of_size(connection, under, apparent_bytes, |member| {
             if self.stopped() {
-                return Some(Stop::Cancelled);
+                return Ok(false);
             }
-            let full = self.partition(&bucket, apparent_bytes, Stage::Whole);
+            self.report.candidates_read += 1;
+            let path = resolver.path(member.parent_id, &member.name)?;
+            let Some((descriptor, candidate)) = self.open_candidate(&path, apparent_bytes) else {
+                return Ok(true);
+            };
+            let file = unsafe { std::os::fd::OwnedFd::from_raw_fd(descriptor) };
+            use std::os::fd::{AsRawFd, FromRawFd};
+            let device = candidate.device.to_string();
+            let inode = candidate.inode.to_string();
+            let exists = scratch
+                .query_row(
+                    "SELECT 1 FROM candidate WHERE device = ?1 AND inode = ?2",
+                    params![device, inode],
+                    |_| Ok(()),
+                )
+                .optional()?
+                .is_some();
+            if exists {
+                return Ok(true);
+            }
+            match content::edge_digest(file.as_raw_fd(), apparent_bytes) {
+                Ok(digest) if candidate.unchanged(file.as_raw_fd()) => {
+                    scratch.execute(
+                        "INSERT INTO candidate
+                        (path, device, inode, modified, owner, group_id, permissions, edge)
+                        VALUES (?1,?2,?3,?4,?5,?6,?7,?8)",
+                        params![
+                            candidate.path,
+                            device,
+                            inode,
+                            candidate.modified_nanoseconds.to_string(),
+                            candidate.owner_id,
+                            candidate.group_id,
+                            candidate.permissions,
+                            &digest[..]
+                        ],
+                    )?;
+                    self.report.files_hashed += 1;
+                }
+                Ok(_) => self.warn(format!(
+                    "{} changed while it was being hashed, so it was left out.",
+                    String::from_utf8_lossy(&path)
+                )),
+                Err(error) => self.warn(format!(
+                    "{} could not be read, so it was left out: {error}",
+                    String::from_utf8_lossy(&path)
+                )),
+            }
+            Ok(true)
+        })?;
+        if self.stopped() {
+            return Ok(Some(Stop::Cancelled));
+        }
+
+        let mut surviving = scratch.prepare("SELECT id, path, device, inode, modified, owner, group_id, permissions
+            FROM candidate WHERE edge IN (SELECT edge FROM candidate GROUP BY edge HAVING count(*) > 1)
+            ORDER BY id")?;
+        let mut rows = surviving.query([])?;
+        while let Some(row) = rows.next()? {
             if self.stopped() {
-                // A digest cut short groups nothing, and a bucket finished
-                // before the cancel is reported with the rest of what was
-                // found only if it was found whole.
-                return Some(Stop::Cancelled);
+                return Ok(Some(Stop::Cancelled));
             }
-            for (digest, mut group) in full {
-                group.sort_by(|left, right| left.path.cmp(&right.path));
-                if group.len() < 2 {
-                    continue;
+            let id: i64 = row.get(0)?;
+            let previous = candidate_row(row, 1, apparent_bytes)?;
+            let Some((descriptor, live)) = self.open_candidate(&previous.path, apparent_bytes)
+            else {
+                continue;
+            };
+            use std::os::fd::{AsRawFd, FromRawFd};
+            let file = unsafe { std::os::fd::OwnedFd::from_raw_fd(descriptor) };
+            if !previous.unchanged(file.as_raw_fd()) {
+                self.warn(format!(
+                    "{} changed between hashing stages, so it was left out.",
+                    String::from_utf8_lossy(&previous.path)
+                ));
+                continue;
+            }
+            match full_digest(file.as_raw_fd(), self.cancelled) {
+                Ok(Some(digest)) if live.unchanged(file.as_raw_fd()) => {
+                    scratch.execute(
+                        "UPDATE candidate SET full = ?2 WHERE id = ?1",
+                        params![id, &digest[..]],
+                    )?;
                 }
-                if self.report.groups.len() as u32 >= maximum_groups {
-                    return Some(Stop::Truncated(maximum_groups));
-                }
-                if group.len() as u32 > maximum_files {
-                    self.warn(format!(
-                        "A group of {} identical files was truncated to {maximum_files}.",
-                        group.len(),
-                    ));
-                    group.truncate(maximum_files as usize);
-                }
-                self.report.groups.push(Group {
-                    apparent_bytes,
-                    digest,
-                    files: group,
-                });
+                Ok(Some(_)) => self.warn(format!(
+                    "{} changed while it was being hashed, so it was left out.",
+                    String::from_utf8_lossy(&previous.path)
+                )),
+                Ok(None) => return Ok(Some(Stop::Cancelled)),
+                Err(error) => self.warn(format!(
+                    "{} could not be read, so it was left out: {error}",
+                    String::from_utf8_lossy(&previous.path)
+                )),
             }
         }
-        None
+        drop(rows);
+        drop(surviving);
+        scratch.execute_batch("CREATE INDEX candidate_full ON candidate(full, path)")?;
+        let mut groups = scratch.prepare("SELECT full, count(*) FROM candidate WHERE full IS NOT NULL GROUP BY full HAVING count(*) > 1 ORDER BY full")?;
+        let mut rows = groups.query([])?;
+        while let Some(row) = rows.next()? {
+            if let Some(stop) = self.stop_before_class(maximum_groups) {
+                return Ok(Some(stop));
+            }
+            let bytes: Vec<u8> = row.get(0)?;
+            let digest: [u8; 32] = bytes
+                .try_into()
+                .map_err(|_| rusqlite::Error::InvalidQuery)?;
+            let count = row.get::<_, i64>(1)? as u64;
+            if count > u64::from(maximum_files) {
+                self.warn(format!(
+                    "A group of {count} identical files was truncated to {maximum_files}."
+                ));
+            }
+            let mut members = scratch.prepare("SELECT path, device, inode, modified, owner, group_id, permissions FROM candidate WHERE full = ?1 ORDER BY path LIMIT ?2")?;
+            let mut selected = members.query(params![&digest[..], maximum_files])?;
+            let mut files = Vec::new();
+            let mut bounded = false;
+            self.reported_bytes += 256;
+            while let Some(row) = selected.next()? {
+                let candidate = candidate_row(row, 0, apparent_bytes)?;
+                // Base64 path bytes plus every decimal metadata field and
+                // object punctuation; deliberately above the wire size.
+                let bytes = candidate.path.len().saturating_mul(2).saturating_add(512);
+                if self.reported_bytes.saturating_add(bytes) > MAX_REPORT_BYTES {
+                    bounded = true;
+                    break;
+                }
+                self.reported_bytes += bytes;
+                files.push(candidate);
+            }
+            if files.len() < 2 && bounded {
+                return Ok(Some(Stop::ResultBudget));
+            }
+            self.report.groups.push(Group {
+                apparent_bytes,
+                digest,
+                files,
+            });
+            if bounded {
+                return Ok(Some(Stop::ResultBudget));
+            }
+        }
+        Ok(None)
     }
 
     /// Stop, and say that the answer is not everything there is.
@@ -233,6 +355,7 @@ impl Search<'_> {
             Stop::Cancelled => {
                 "The search was cancelled; these are the groups found so far.".to_owned()
             }
+            Stop::ResultBudget => "The duplicate listing reached its bounded output budget. Narrow the search with a path or a larger minimum size to see more groups.".to_owned(),
             Stop::Truncated(maximum_groups) => format!(
                 "Stopped after {maximum_groups} group(s); there are more identical files than \
                  this answer lists. Narrow the search with a path or a larger minimum size."
@@ -253,94 +376,38 @@ impl Search<'_> {
     }
 }
 
-/// Every candidate path in one size class.
-///
-/// Paths are rebuilt with a resolver that lives for this class alone, so its
-/// memo of directory paths is bounded by one class rather than growing with
-/// every directory the whole search passes through.
-fn class_paths(
-    connection: &Connection,
-    under: Option<(i64, i64)>,
+impl CandidateFile {
+    fn unchanged(&self, descriptor: std::os::fd::RawFd) -> bool {
+        sys::metadata_of(descriptor).is_ok_and(|live| {
+            live.device == self.device
+                && live.inode == self.inode
+                && live.kind == EntryKind::File
+                && live.apparent_bytes == self.apparent_bytes
+                && live.modified_nanoseconds == self.modified_nanoseconds
+        })
+    }
+}
+
+fn candidate_row(
+    row: &rusqlite::Row<'_>,
+    offset: usize,
     apparent_bytes: u64,
-) -> rusqlite::Result<Vec<Vec<u8>>> {
-    let members = index::files_of_size(connection, under, apparent_bytes)?;
-    let mut resolver = index::PathResolver::new(connection);
-    let mut paths = Vec::with_capacity(members.len());
-    for member in &members {
-        paths.push(resolver.path(member.parent_id, &member.name)?);
-    }
-    Ok(paths)
-}
-
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum Stage {
-    Edges,
-    Whole,
-}
-
-impl Search<'_> {
-    /// Split a set of candidates by digest, keeping only the buckets with a
-    /// twin.
-    ///
-    /// The first stage takes paths and opens them; the second takes the
-    /// candidates the first already opened and identified, so a file is
-    /// stat'd once however many stages it survives. The cancel flag is read
-    /// before every file and inside every long one; a stage that stops early
-    /// returns what it has, and the caller, seeing the flag, discards it.
-    fn partition<T: Candidate>(
-        &mut self,
-        members: &[T],
-        apparent_bytes: u64,
-        stage: Stage,
-    ) -> Vec<([u8; 32], Vec<CandidateFile>)> {
-        let mut buckets: HashMap<[u8; 32], Vec<CandidateFile>> = HashMap::new();
-        let mut seen: HashSet<(u64, u64)> = HashSet::new();
-
-        for member in members {
-            if self.stopped() {
-                break;
-            }
-            let path = member.path();
-            let Some((file, candidate)) = self.open_candidate(path, apparent_bytes) else {
-                continue;
-            };
-
-            // One inode, however many names reach it. Removing the second
-            // name frees nothing, so it is not a member of a group somebody
-            // will act on.
-            if !seen.insert((candidate.device, candidate.inode)) {
-                sys::close(file);
-                continue;
-            }
-
-            let digest = match stage {
-                Stage::Edges => content::edge_digest(file, candidate.apparent_bytes).map(Some),
-                Stage::Whole => full_digest(file, self.cancelled),
-            };
-            sys::close(file);
-
-            match digest {
-                Ok(Some(digest)) => {
-                    // Counted at the first stage only. The second stage
-                    // re-reads a subset of these files, and counting that
-                    // would make the number larger than the candidates it
-                    // came from.
-                    if stage == Stage::Edges {
-                        self.report.files_hashed += 1;
-                    }
-                    buckets.entry(digest).or_default().push(candidate);
-                }
-                Ok(None) => break,
-                Err(error) => self.warn(format!(
-                    "{} could not be read, so it was left out: {error}",
-                    String::from_utf8_lossy(path),
-                )),
-            }
-        }
-
-        buckets.retain(|_, group| group.len() > 1);
-        buckets.into_iter().collect()
-    }
+) -> rusqlite::Result<CandidateFile> {
+    let number = |column| -> rusqlite::Result<u64> {
+        row.get::<_, String>(column)?
+            .parse()
+            .map_err(|_| rusqlite::Error::InvalidQuery)
+    };
+    Ok(CandidateFile {
+        path: row.get(offset)?,
+        device: number(offset + 1)?,
+        inode: number(offset + 2)?,
+        modified_nanoseconds: number(offset + 3)?,
+        apparent_bytes,
+        owner_id: row.get(offset + 4)?,
+        group_id: row.get(offset + 5)?,
+        permissions: row.get(offset + 6)?,
+    })
 }
 
 /// A SHA-256 of every byte of the file, streamed, or `None` when the search
@@ -355,34 +422,10 @@ fn full_digest(
     descriptor: std::os::unix::io::RawFd,
     cancelled: &AtomicBool,
 ) -> std::io::Result<Option<[u8; 32]>> {
-    use sha2::{Digest, Sha256};
-    let mut hasher = Sha256::new();
-    let mut buffer = vec![0u8; READ_BYTES];
-    let mut offset = 0u64;
-    loop {
-        if cancelled.load(Ordering::Relaxed) {
-            return Ok(None);
-        }
-        let read = unsafe {
-            libc::pread(
-                descriptor,
-                buffer.as_mut_ptr() as *mut libc::c_void,
-                buffer.len(),
-                offset as libc::off_t,
-            )
-        };
-        if read < 0 {
-            let error = std::io::Error::last_os_error();
-            if error.kind() == std::io::ErrorKind::Interrupted {
-                continue;
-            }
-            return Err(error);
-        }
-        if read == 0 {
-            return Ok(Some(hasher.finalize().into()));
-        }
-        hasher.update(&buffer[..read as usize]);
-        offset += read as u64;
+    match content::full_digest_cancellable(descriptor, cancelled) {
+        Ok(digest) => Ok(Some(digest)),
+        Err(error) if crate::transfer::is_cancelled(&error) => Ok(None),
+        Err(error) => Err(error),
     }
 }
 
@@ -455,23 +498,6 @@ impl Search<'_> {
                 permissions: opened.permissions,
             },
         ))
-    }
-}
-
-/// Something with a path, so the two stages can share one partitioner.
-trait Candidate {
-    fn path(&self) -> &[u8];
-}
-
-impl Candidate for Vec<u8> {
-    fn path(&self) -> &[u8] {
-        self
-    }
-}
-
-impl Candidate for CandidateFile {
-    fn path(&self) -> &[u8] {
-        &self.path
     }
 }
 
