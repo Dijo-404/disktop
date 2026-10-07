@@ -84,18 +84,21 @@ scan, and findings with formula-safe CSV and script-free escaped HTML, and `disk
 completion bash|zsh|fish` is generated from the command table. The README carries a demo
 rendered from the TUI's own frames (`scripts/demo-svg.mjs`).
 
-Phase 8 is under way. Done and verified locally: the package is `disktop@1.0.0` with a
-minimal file list and no install script; four helpers (x86-64 and ARM64, glibc 2.28+ and
-static musl) are built by `scripts/build-release.mjs` and verified against `SHA256SUMS` by
-the locator; `npm run test:package` packs the tarball, audits it, installs it into a clean
-prefix, and runs it, including a tampered-helper refusal; every mutation, the scanner and
-index, the Node runtime, and the TUI were audited and hardened, each fix with a test that
-failed first; `npm run check`, the Rust gates, the performance budget, and `npm audit`
-(0 vulnerabilities) pass. Still required before the one publication: the CI workflows
-green on GitHub, including the ARM64 runners (the ARM64 helpers were built but could not
-be run here); the host and VM checks the support matrix lists (distribution managers,
-systemd, scoped privilege, SMART, mount topology, SSH); and, after publishing, provenance
-and a registry install verified on clean accounts.
+Phase 8's engineering pass is implemented and locally validated. Connected drives and
+every persistent partition are visible, and the TUI uses Catppuccin Mocha with truecolor
+and terminal fallbacks. Every mutation, scan/index, resource-sensitive adapter and
+surface was reviewed and hardened with regression coverage. `npm run check` passes
+1,076 unit/contract, 128 integration, 13 recovery and 18 PTY checks; Rust format, Clippy
+and 266 helper tests pass. Separate gates prove real filesystem faults, the systemd
+user timer, SSH restoration and actual reviewed apt/DNF5/pacman cleanup in disposable
+containers. All four release helpers build with verified checksums;
+the packed artifact passes clean installation on Node 24/26 and glibc/musl. The
+million-entry resource/latency gate and both dependency advisory checks pass. See
+[the validation record](docs/release-readiness.md) and [support matrix](docs/support-matrix.md).
+Publication still requires green CI at the reviewed commit, the remaining hardware/VM
+checks explicitly listed in that matrix, and approval through the guarded workflow.
+Phase 8 includes publication and subsequent provenance/registry-install verification,
+so it is not marked complete before those happen.
 
 ## Supported environment and packaging
 
@@ -323,8 +326,8 @@ The operations are `hello`, `probe`, `scan`, `query-index`, `hash-candidates`, `
 | Permanent erase and empty Trash | Explicit irreversible operation fixed in the plan, separate confirmation, protected-root checks inside Node and the helper, fd-relative recursive removal, no symlink traversal or nested mounts. Check each directory entry against the reviewed manifest and stop on additions or identity changes; record partial results per item. |
 | Duplicate removal | Group by size, then hash first/last chunks, then stream a full hash; exclude identical inodes and byte-compare before mutation. Keep-oldest, keep-newest, and keep-in-path rules expose their timestamp basis. Default resolution is Trash. |
 | Replace with hardlink | Same mount and identical bytes only; require compatible ownership, mode, ACL/xattrs, and explicit warning that later writes are shared. Use a staged link and audited replacement with recovery journal; refuse when atomic semantics are unavailable. Mark the space-saving replacement irreversible after its old inode is released. |
-| Move to another disk | Stage an exclusive destination, stream-copy, verify checksum and metadata, fsync, publish without overwrite, then Trash the source by default. A separate permanent-source plan is required to free source space immediately. On failure, preserve the source and report the destination state. Undo restores a trashed source and retires the destination through a reviewed Trash action only if its recorded identity/content are unchanged; otherwise refuse. |
-| Compress | Stage `.zst` for eligible regular files or `.tar.zst` for directories, treating symlinks as link objects and rejecting nested mounts. Verify decompression/checksum, fsync, publish without overwrite, then Trash source by default. Skip active logs, changing files, incompatible hardlinks, and targets without temporary free space. Undo restores the original and retires output through a reviewed Trash action only when unchanged. |
+| Move to another disk | Stage an exclusive destination, stream-copy, verify checksum and metadata, fsync, publish without overwrite, then Trash the source by default. A separate permanent-source plan is required to free source space immediately. On failure, preserve the source and report the destination state. Undo restores a trashed source and leaves the published destination in place; removing that output requires a separate reviewed plan. |
+| Compress | Stage `.zst` for eligible regular files or `.tar.zst` for directories, treating symlinks as link objects and rejecting nested mounts. Verify decompression/checksum, fsync, publish without overwrite, then Trash source by default. Skip active logs, changing files, incompatible hardlinks, and targets without temporary free space. Undo restores the original and leaves the published archive in place; removing it requires a separate reviewed plan. |
 | Declarative rules | TOML-only allowlisted roots, globs, types, minimum age/size, excludes, and max count/bytes. No shell commands in rules. Store a rule hash in plans and require preview and confirmation like built-in findings. |
 | Manager cleanup | Fixed argv to apt/dnf/pacman, journalctl, Snap, Flatpak, Docker/Podman, systemd-tmpfiles, and supported old-kernel managers. Each adapter has probe, discover, bounded selection, preview if supported, live preflight, apply, verify, privilege scope, and error mapping. A manager action may report estimated or unknown counts; verify with manager output and before/after capacity without claiming perfect attribution. Never `rm -rf` manager-owned state directly. Manager actions may be irreversible and must say so. |
 
@@ -381,7 +384,7 @@ disktop explore [PATH] --sort allocated --min-size 1GiB --ext log --json
 disktop find duplicates|stale|empty|broken [PATH] --json
 disktop snapshots list|diff --json
 disktop clean --dry-run --json       list available findings/actions
-disktop clean plan FINDING_ID --operation trash|erase|move|compress|hardlink --json
+disktop clean plan FINDING_ID --operation trash|permanent|move|compress|hardlink --json
 disktop clean apply PLAN_ID --yes --json
 disktop clean apply PLAN_ID --yes --permanent --json
 disktop history --json
@@ -418,7 +421,7 @@ This matrix is the release checklist. “Available” means the feature is imple
 
 | Requested capability | Phase | Acceptance evidence |
 | --- | --- | --- |
-| Count SSD/HDD/other devices and show free space, filesystem and mount details | 1 | Mixed block/network/loop fixture counts physical devices once and reports user-available bytes. |
+| Count SSD/HDD/other devices and show free space, filesystem and mount details | 1 | Mixed block/network/loop and multi-drive fixtures count physical devices once, include every persistent partition (mounted, locked, swap, firmware/recovery or unknown signature), preserve shared RAID/LVM parents and report user-available bytes only from readable mounts. |
 | Low-space and inode alerts | 1, 6 | Threshold banner and CLI exit `1`; optional notification/timer runs alerts only. |
 | Largest files/directories, type totals, apparent/allocated toggle | 2 | Results sort correctly and match fixture block accounting. |
 | Mount-safe, low-impact scans; progress, cancel, cache, WSL default | 2 | Bind mount and WSL fixtures; partial scan and bounded-memory benchmark. |
@@ -437,7 +440,7 @@ This matrix is the release checklist. “Available” means the feature is imple
 | Keep rules and hardlink replacement | 5 | Same-mount/content/metadata gates and shared-write warning tested. |
 | Move, compress, and custom cleanup rules | 5 | Source preserved on failure; staged output verified; rule max limits enforced. |
 | Per-user breakdown and scoped privilege | 3, 6 | Selected filesystem owner totals plus incomplete/denied labels; no whole-app root requirement. |
-| TUI themes, vim/mouse, help, units, terminal fallback | 1, 7 | PTY tests at 80×24, tmux, SSH, NO_COLOR, and signal restoration pass. |
+| TUI themes, vim/mouse, help, units, terminal fallback | 1, 7, 8 | Catppuccin Mocha with truecolor and 256/16-colour fallback; all six tabs, dialogs and result/undo columns tested at 40×10 through 220×60 in five colour/glyph combinations; repeated-session resource and cancellation regressions; PTY at 80×24, tmux, SSH, NO_COLOR and signal restoration. |
 | Non-interactive CLI, JSON/CSV/HTML, exit codes | 1, 7 | Schemas validate; CSV/HTML injection fixtures and piping tests pass. |
 | Completion, README/demo, no telemetry, provenance | 7, 8 | Completion smoke tests, tarball audit, registry install and provenance verification pass. |
 

@@ -12,11 +12,17 @@
     {
       "code": "network-mount-not-scanned",
       "message": "NFS mount is listed but excluded from scans until explicitly selected.",
-      "path": { "bytesBase64": "L21udC9kYXRh", "display": "/mnt/data" }
+      "path": {
+        "bytesBase64": "L21udC9kYXRh",
+        "display": "/mnt/data"
+      }
     }
   ],
   "data": {
-    "capability": { "status": "available", "explanation": "lsblk, mountinfo, and statfs all responded." },
+    "capability": {
+      "status": "available",
+      "explanation": "lsblk, mountinfo, and statfs all responded."
+    },
     "devices": [
       {
         "id": "nvme0n1",
@@ -26,7 +32,10 @@
         "sizeBytes": "1000204886016",
         "model": "Example NVMe 1TB",
         "transport": "nvme",
-        "partitions": ["nvme0n1p1", "nvme0n1p2"]
+        "partitions": [
+          "nvme0n1p1",
+          "nvme0n1p2"
+        ]
       },
       {
         "id": "sda",
@@ -35,7 +44,9 @@
         "removable": false,
         "sizeBytes": "4000787030016",
         "transport": "sata",
-        "partitions": ["sda1"]
+        "partitions": [
+          "sda1"
+        ]
       },
       {
         "id": "sdb",
@@ -44,7 +55,9 @@
         "removable": true,
         "sizeBytes": "31029460992",
         "transport": "usb",
-        "partitions": ["sdb1"]
+        "partitions": [
+          "sdb1"
+        ]
       }
     ],
     "filesystems": [
@@ -52,7 +65,12 @@
         "id": "fs-259-2",
         "type": "ext4",
         "source": "/dev/nvme0n1p2",
-        "mounts": [{ "bytesBase64": "Lw==", "display": "/" }],
+        "mounts": [
+          {
+            "bytesBase64": "Lw==",
+            "display": "/"
+          }
+        ],
         "totalBytes": "981450162176",
         "freeBytes": "121332867072",
         "availableBytes": "71341047808",
@@ -67,7 +85,12 @@
         "id": "fs-259-1",
         "type": "vfat",
         "source": "/dev/nvme0n1p1",
-        "mounts": [{ "bytesBase64": "L2Jvb3QvZWZp", "display": "/boot/efi" }],
+        "mounts": [
+          {
+            "bytesBase64": "L2Jvb3QvZWZp",
+            "display": "/boot/efi"
+          }
+        ],
         "totalBytes": "535805952",
         "freeBytes": "459505664",
         "availableBytes": "459505664",
@@ -80,7 +103,12 @@
         "id": "fs-8-17",
         "type": "exfat",
         "source": "/dev/sdb1",
-        "mounts": [{ "bytesBase64": "L21lZGlhL3VzYg==", "display": "/media/usb" }],
+        "mounts": [
+          {
+            "bytesBase64": "L21lZGlhL3VzYg==",
+            "display": "/media/usb"
+          }
+        ],
         "totalBytes": "31020023808",
         "freeBytes": "9932111872",
         "availableBytes": "9932111872",
@@ -107,6 +135,89 @@
         "sizeBytes": "1073741824",
         "filesystemType": "crypto_LUKS",
         "state": "locked"
+      }
+    ],
+    "volumes": [
+      {
+        "id": "nvme0n1p3",
+        "devicePath": "/dev/nvme0n1p3",
+        "deviceId": "nvme0n1",
+        "sizeBytes": "547094528000",
+        "filesystemType": "ntfs",
+        "label": "Windows-SSD",
+        "state": "unmounted",
+        "deviceIds": [
+          "nvme0n1"
+        ],
+        "type": "part",
+        "mounts": []
+      },
+      {
+        "id": "sdb2",
+        "devicePath": "/dev/sdb2",
+        "deviceId": "sdb",
+        "sizeBytes": "1073741824",
+        "filesystemType": "crypto_LUKS",
+        "state": "locked",
+        "deviceIds": [
+          "sdb"
+        ],
+        "type": "part",
+        "mounts": []
+      },
+      {
+        "id": "nvme0n1p2",
+        "devicePath": "/dev/nvme0n1p2",
+        "deviceId": "nvme0n1",
+        "deviceIds": [
+          "nvme0n1"
+        ],
+        "type": "part",
+        "sizeBytes": "981450162176",
+        "filesystemType": "ext4",
+        "mounts": [
+          {
+            "bytesBase64": "Lw==",
+            "display": "/"
+          }
+        ],
+        "state": "mounted"
+      },
+      {
+        "id": "nvme0n1p1",
+        "devicePath": "/dev/nvme0n1p1",
+        "deviceId": "nvme0n1",
+        "deviceIds": [
+          "nvme0n1"
+        ],
+        "type": "part",
+        "sizeBytes": "535805952",
+        "filesystemType": "vfat",
+        "mounts": [
+          {
+            "bytesBase64": "L2Jvb3QvZWZp",
+            "display": "/boot/efi"
+          }
+        ],
+        "state": "mounted"
+      },
+      {
+        "id": "sdb1",
+        "devicePath": "/dev/sdb1",
+        "deviceId": "sdb",
+        "deviceIds": [
+          "sdb"
+        ],
+        "type": "part",
+        "sizeBytes": "31020023808",
+        "filesystemType": "exfat",
+        "mounts": [
+          {
+            "bytesBase64": "L21lZGlhL3VzYg==",
+            "display": "/media/usb"
+          }
+        ],
+        "state": "mounted"
       }
     ]
   }

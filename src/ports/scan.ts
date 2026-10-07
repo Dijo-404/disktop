@@ -113,5 +113,5 @@ export interface EntryPage {
 }
 
 export interface FileIndexPort {
-  query(query: EntryQuery): Promise<EntryPage>;
+  query(query: EntryQuery, signal?: AbortSignal): Promise<EntryPage>;
 }

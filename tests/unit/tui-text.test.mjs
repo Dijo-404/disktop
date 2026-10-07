@@ -62,6 +62,11 @@ test("prose wraps at spaces and never overflows, even a word longer than the lin
   assert.ok(lines.join(" ").includes("original"));
 });
 
+test("a one-cell line consumes whole wide graphemes instead of looping forever", () => {
+  assert.deepEqual(wrap("日本 🎉 👩‍💻", 1), ["?", "?", "?", "?"]);
+  assert.deepEqual(wrap("a日本b", 1), ["a", "?", "?", "b"]);
+});
+
 test("counts and ages read the way a person reads them", () => {
   assert.equal(groupDigits(1234567n), "1,234,567");
   assert.equal(groupDigits(12), "12");

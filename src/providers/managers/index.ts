@@ -35,12 +35,13 @@ export function createManagerProvider(inventory: ManagerInventoryPort): FindingP
       return { status: "available", explanation: "Manager adapters are asked during discovery." };
     },
 
-    async discover() {
+    async discover(_environment, signal) {
       const findings: Finding[] = [];
       const warnings: Warning[] = [];
       let complete = true;
-      for (const discovery of await inventory.discover()) {
+      for (const discovery of await inventory.discover(signal)) {
         warnings.push(...discovery.warnings);
+        if (discovery.warnings.some((warning) => warning.code === "manager-failed")) complete = false;
         if (discovery.capability.status === "permission-denied") {
           complete = false;
           warnings.push({

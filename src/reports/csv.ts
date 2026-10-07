@@ -148,6 +148,19 @@ export function renderCsvReport(report: Report): string {
       detail: [`device ${volume.deviceId}`, ...(volume.label === undefined ? [] : [`label ${volume.label}`]), "usage unknown until mounted"].join("; "),
     });
   }
+  for (const volume of capacity.volumes) {
+    add({
+      section: "volume",
+      id: volume.id,
+      kind: volume.filesystemType ?? "unknown",
+      path_display: volume.devicePath,
+      total_bytes: volume.sizeBytes.toString(10),
+      status: volume.state,
+      detail: [`devices ${volume.deviceIds.join(" ")}`, `type ${volume.type}`,
+        ...volume.mounts.map((mount) => `mount ${mount.display}`),
+        ...(volume.label === undefined ? [] : [`label ${volume.label}`])].join("; "),
+    });
+  }
   for (const alert of capacity.alerts) {
     add({
       section: "alert",

@@ -34,6 +34,18 @@ function inventory(discoveries) {
 const environment = {};
 const SIGNAL = new AbortController().signal;
 
+test("a cache permission failure remains a denied manager and an incomplete discovery", async () => {
+  const managers = createManagerInventory([{
+    id: "dnf",
+    async discover() { throw Object.assign(new Error("The cache is unreadable"), { code: "EACCES" }); },
+  }]);
+  const discoveries = await managers.discover();
+  assert.equal(discoveries[0].capability.status, "permission-denied");
+  const result = await createManagerProvider(managers).discover(environment, SIGNAL);
+  assert.equal(result.complete, false);
+  assert.ok(result.warnings.some((warning) => warning.code === "manager-denied"));
+});
+
 test("an offered proposal becomes a finding that offers a manager action and shows its command", async () => {
   const provider = createManagerProvider(
     inventory([{ adapter: "docker", capability: { status: "available", explanation: "ok" }, proposals: [proposal()], warnings: [] }]),
