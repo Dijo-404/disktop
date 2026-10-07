@@ -69,7 +69,8 @@ Compare the SMART finding with the same device's read-only `smartctl -H -A -j`
 health output. Record the drive type, smartctl version, permissions and exit codes.
 Check both a readable health result and a denied reading. A denied device must
 remain explicitly unavailable/incomplete, never appear healthy or contribute a
-made-up zero. A drive reporting failed health should produce a corresponding warning.
+made-up zero. A drive reporting failed health should produce a FAILED health
+finding; readable failed-health readings can still be complete.
 Do not run `sudo npx disktop` or grant broad device access for this test; privileged
 read-only Disktop execution requires a root-owned runtime and installation as
 described in [safety](safety.md).
@@ -137,7 +138,8 @@ Follow the [manager CLI contract](cli.md#manager-actions).
 
 Capture the reviewed plan, apply result, history, manager state before and after,
 and preserved sentinels. A successful run requires actual fixture removal, passed
-live verification and finished journal commands. Also record denied authorization
-and cancellation: either must leave a legible incomplete/uncertain journal rather
-than claim success. Limit a support-matrix update to the action and environment
-you actually tested.
+live verification and finished journal commands. Denied authorization or
+cancellation must not claim success. Once execution begins, retain the finished
+or incomplete/uncertain journal; cancellation or refusal during preflight may
+produce an error without starting an action. Limit a support-matrix update to the
+action and environment you actually tested.
