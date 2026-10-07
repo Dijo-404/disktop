@@ -1,9 +1,18 @@
 # 1.0.0 release-candidate validation
 
 Engineering validation recorded on 2026-10-07. The package remains unpublished.
-Phase 8 also requires the outstanding environment checks in the
-[support matrix](support-matrix.md), reviewed-commit CI, protected release approval,
-and post-publication provenance and registry-install verification.
+
+**Release-owner decision, 2026-10-07:** the remaining real-environment checks for
+SMART hardware health, ZFS, WSL and non-cache manager mutations are assigned to
+testers after the initial publication. These checks remain unvalidated and are
+deferred from the initial-publication prerequisites. The
+[support matrix](support-matrix.md) records their status; the
+[tester guide](tester-guide.md) describes the follow-up evidence.
+
+Automated CI, safety/recovery/performance/advisory gates, exact-artifact verification,
+reviewed source and protected workflow approval remain mandatory. Phase 8 is complete
+only after publication and registry-install/provenance verification. Neither has
+been observed yet. Follow the [publication steps](../CONTRIBUTING.md#publish-100).
 
 ## Executed gates
 
@@ -21,6 +30,12 @@ and post-publication provenance and registry-install verification.
 | Exact packed artifact, installed into clean homes/prefixes | Ten checks passed on Node 26.10 glibc, Node 24.21 glibc and Node 24.21 musl; global CLI and npm exec, help/version, JSON, devices, scans and tamper refusal worked. |
 | Dependency advisories | npm: zero vulnerabilities; RustSec: zero vulnerabilities and warnings across the locked native dependency tree. |
 | Workflow/static hygiene | actionlint, changed-script syntax and whitespace checks passed; no unfinished TODO/FIXME, credentials or debug artifacts found. |
+
+The reviewed engineering commit is on `main` as
+[`ac1dab4`](https://github.com/Dijo-404/disktop/commit/ac1dab4d248b47b8180290da20546812eee1c249).
+Its [post-merge CI run](https://github.com/Dijo-404/disktop/actions/runs/37654237622)
+passed all 19 jobs. Any subsequent documentation or source change must also pass CI
+before its commit is tagged for publication.
 
 The ordinary integration suite explicitly skips absent apt/dnf on the Arch test host,
 second-filesystem cases and opt-in timer/namespace/disposable-manager gates. Their available environments

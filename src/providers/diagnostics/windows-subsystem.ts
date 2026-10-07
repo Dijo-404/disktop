@@ -57,7 +57,7 @@ export function createWindowsSubsystemProvider(options: WindowsSubsystemOptions 
             ? `Nothing is mounted under ${mountRoot.display} right now.`
             : `Mounted under ${mountRoot.display}: ${mounts.join(", ")}.`,
           "Disktop's default excludes skip /mnt/c and /mnt/wsl, so any total you see leaves out what is on the Windows side.",
-          "Scanning them is possible by naming the path, but nothing there is offered for cleanup.",
+          "To scan a Windows path, set exclude_windows_mounts = false in the [scan] section of config.toml, then select that path. Nothing there is offered for cleanup.",
         ],
         size: findingSize(undefined, "unknown", "Excluded paths are not measured, which is the point of excluding them."),
         confidence: "observed",

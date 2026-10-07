@@ -2,8 +2,10 @@
 
 Status: **release-candidate validation matrix**. Rows distinguish automated coverage,
 actual host checks and remaining unproven environments. The [validation record](release-readiness.md)
-contains the final local engineering evidence. Hardware/VM gaps below and protected
-release approval remain publication gates for the single `1.0.0` release.
+contains the local engineering evidence and the release owner's 2026-10-07 decision
+to defer the remaining hardware/VM checks to testers after the initial publication.
+Deferred checks are still unvalidated. Automated release gates and protected
+workflow approval remain required for the single `1.0.0` release.
 
 ## Fixed minimums
 
@@ -61,7 +63,7 @@ Node 24 remains the [LTS baseline](https://nodejs.org/en/about/previous-releases
 | Fedora | rpm/dnf adapters and Linux integration tests in container or VM. | CI container (`fedora:latest`): the same checks, including dnf cache discovery and kernel preview. Actual DNF5 cache cleanup passed through the real reviewed pipeline on Fedora 44; old-kernel removal remains unproven. |
 | Arch | pacman adapter and Linux integration tests in container or VM. | CI container (`archlinux:latest`): the same checks, including pacman cache discovery. Actual pacman cache cleanup passed through the real reviewed pipeline in a disposable Arch container. |
 | Host or VM with systemd and representative mounts | User timer, scoped privilege, mount topology, SMART where hardware permits, Btrfs/ZFS where available. | Partly, on one Arch host (kernel 6.18, util-linux 2.42): Btrfs on LUKS with six subvolume mounts scanned as one filesystem (291 GiB of 331 GiB used found, the rest unreadable to the user or shared between files), a FAT `/boot` and the pseudo filesystems refused, an unmounted NTFS partition and a locked LUKS drive listed, and the read-only measurement as root through pkexec's desktop dialog (583 unreadable directories, 55.9 GiB). The current timer and mount-fault checks are recorded below. Non-cache privileged manager cleanup, SMART health and ZFS remain unvalidated. |
-| WSL | Detect Windows mounts and exclude `/mnt/c` by default; explicit selection behavior. | Not validated. |
+| WSL | Detect Windows mounts and exclude `/mnt/c` by default; explicit path selection after setting `exclude_windows_mounts = false` in the `[scan]` section of `config.toml`. | Not validated. |
 | tmux and SSH terminal | 80×24 layout, mouse fallback, `NO_COLOR`, ASCII rendering, and terminal restoration. | tmux drew at 80×24, handled resize and below-minimum states, and restored the shell screen. A real rootless loopback SSH server passed ASCII/NO_COLOR output and quit/SIGINT restoration, including exact stty state. Mouse input is exercised by PTY tests; mouse through a remote SSH/tmux chain remains unproven. |
 
 Containers cannot prove hardware health, real mount behavior, privilege prompts, or terminal behavior for every host. Those cases need a host or VM check before a support claim is made. Linux distribution names above describe the CI targets, not a complete compatibility list.
@@ -96,7 +98,9 @@ isolated container fault gate proved full output, full journal, read-only source
 cross-device actions without skips. The real user timer and SSH checks are now
 validated, as are actual apt/DNF5/pacman cache mutations in disposable containers.
 Non-cache manager mutations, SMART hardware health, ZFS and WSL remain the outstanding
-environment checks. The packed CLI's actual SMART queries under read-only NVMe device
+environment checks, assigned to testers after initial publication. See the
+[tester guide](tester-guide.md) for checks and evidence to attach to a result PR.
+The packed CLI's actual SMART queries under read-only NVMe device
 mappings reported permission denial and incomplete discovery safely, without claiming
 health or widening privileges. Earlier read-only scoped `du`/pkexec and Btrfs
 host results above remain evidence for those narrower behaviors.

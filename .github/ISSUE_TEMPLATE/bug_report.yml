@@ -6,6 +6,7 @@ body:
     attributes:
       value: |
         If this may expose data or allow unintended deletion, protected-path bypass, restore corruption, or command injection, stop and report it privately using [SECURITY.md](https://github.com/Dijo-404/disktop/blob/main/SECURITY.md). Do not post exploitable steps, real paths, or personal data in a public issue.
+        For passed or blocked acceptance checks, use the Test result form and follow the [tester guide](https://github.com/Dijo-404/disktop/blob/main/docs/tester-guide.md).
   - type: dropdown
     id: area
     attributes:
@@ -23,24 +24,24 @@ body:
   - type: input
     id: version
     attributes:
-      label: Version or source commit
-      description: Before 1.0.0, give the commit SHA if you built from source.
-      placeholder: "Example: commit 0123456"
+      label: Version and artifact identity
+      description: Include disktop --version and the installation method. For source or CI builds give the exact commit; for a tarball give its SHA-256.
+      placeholder: "Version, npm or tarball or source install, commit or tarball SHA-256"
     validations:
       required: true
   - type: textarea
     id: environment
     attributes:
       label: Linux environment
-      description: Include distribution, kernel, architecture, filesystem or mount type when relevant, and terminal details for display bugs. Omit private hostnames and paths.
-      placeholder: "Example: Fedora, Linux 6.x, x86-64, ext4, tmux at 80x24"
+      description: Include distribution, kernel, architecture, libc, node --version, and relevant tool versions. Add filesystem or mount type, WSL version, and terminal details where relevant. Omit private hostnames and paths.
+      placeholder: "Distribution, kernel, architecture/libc, Node, manager/tool versions, filesystem, WSL or terminal details"
     validations:
       required: true
   - type: textarea
     id: reproduction
     attributes:
       label: Reproduction steps
-      description: Use a temporary fixture or harmless command. Do not run cleanup against real data to reproduce a bug.
+      description: Use a temporary fixture or harmless command. Name any tester-guide check or manager action involved. Do not run cleanup against real data to reproduce a bug.
       placeholder: |
         1. Create a small fixture under a temporary directory.
         2. Run the command or open the view.
@@ -65,7 +66,7 @@ body:
     id: diagnostics
     attributes:
       label: Sanitized diagnostics
-      description: Optional CLI output, error text, or screenshot. Remove usernames, paths, filenames, tokens, and hostnames before posting.
+      description: Include commands, stdout/stderr, exit codes or screenshots when available. Remove usernames, private paths and filenames (including bytesBase64), tokens and hostnames before posting. Keep exploitable details private.
     validations:
       required: false
   - type: checkboxes

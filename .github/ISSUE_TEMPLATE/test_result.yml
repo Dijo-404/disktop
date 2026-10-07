@@ -1,0 +1,91 @@
+name: Test result
+description: Record a passed, failed or blocked acceptance check from the tester guide.
+title: "Test result: "
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Follow the [tester guide](https://github.com/Dijo-404/disktop/blob/main/docs/tester-guide.md). Record what actually ran; a missing tool, denied permission or absent fixture does not prove the corresponding live feature worked.
+        Use read-only checks on real hardware and run cleanup only in disposable VMs or temporary fixtures. If a result suggests unintended deletion, protected-path bypass, restore corruption, command injection or exposed data, stop and report it privately using [SECURITY.md](https://github.com/Dijo-404/disktop/blob/main/SECURITY.md). Do not post exploitable steps or personal data here.
+  - type: dropdown
+    id: result
+    attributes:
+      label: Result
+      description: Mark a check blocked when the environment or fixture prevented it from running.
+      options:
+        - Passed
+        - Failed
+        - Blocked
+    validations:
+      required: true
+  - type: dropdown
+    id: area
+    attributes:
+      label: Check area
+      options:
+        - SMART hardware health
+        - ZFS snapshot discovery
+        - WSL Windows mounts and scan opt-in
+        - Manager cleanup
+        - CLI, TUI or packaging
+        - Other
+    validations:
+      required: true
+  - type: textarea
+    id: version
+    attributes:
+      label: Version and artifact identity
+      description: Include disktop --version and the installation method. For source or CI builds give the exact commit; for a tarball give its SHA-256. Identify the npm package version when installed from the registry.
+    validations:
+      required: true
+  - type: textarea
+    id: environment
+    attributes:
+      label: Test environment
+      description: Include distribution, kernel, architecture, libc, node --version, relevant manager/tool versions and filesystem or mount type. Add WSL version, hardware model or terminal details where relevant; omit serial numbers, private hostnames and paths.
+    validations:
+      required: true
+  - type: textarea
+    id: checks
+    attributes:
+      label: Exact checks and commands
+      description: Name the tester-guide checks or manager action IDs. Describe the harmless fixture and list the exact commands or TUI steps, with sensitive details removed. Say which checks did not run.
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected result
+      description: Describe expected readings, counts, bytes, exclusions, action scope or preserved data. For cleanup, distinguish the selected fixture from everything that must remain.
+    validations:
+      required: true
+  - type: textarea
+    id: actual
+    attributes:
+      label: Actual result or blocker
+      description: Describe what happened and how it compares with the expected result. For a blocked check, state the missing hardware, tool, permission or fixture; do not record it as passed.
+    validations:
+      required: true
+  - type: textarea
+    id: diagnostics
+    attributes:
+      label: Sanitized output and exit codes
+      description: Include commands, stdout/stderr, exit codes and relevant before/after readings or screenshots. If nothing ran, say so. Redact private paths and filenames in both display text and bytesBase64, usernames, serial numbers, hostnames, tokens and personal data.
+    validations:
+      required: true
+  - type: textarea
+    id: manager-evidence
+    attributes:
+      label: Manager cleanup evidence
+      description: For manager checks, identify the disposable VM, snapshot and fixture, ordinary test account and scoped elevation. Include the action ID, reviewed plan/commands, apply verification, journal/history outcome, undo refusal and before/after evidence that the fixture was removed while sentinel and nonselected data survived. Otherwise leave this blank.
+    validations:
+      required: false
+  - type: checkboxes
+    id: public-report
+    attributes:
+      label: Safety and public report check
+      options:
+        - label: I used read-only checks on real hardware and confined cleanup to disposable VMs or temporary fixtures.
+          required: true
+        - label: I read SECURITY.md and removed private data and exploitable security details from this report.
+          required: true
