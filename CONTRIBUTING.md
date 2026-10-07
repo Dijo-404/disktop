@@ -2,6 +2,11 @@
 
 Disktop is being built toward one initial public npm release, `1.0.0`. The phases in [PLAN.md](PLAN.md) are internal gates. No partial npm versions should be published while features or safety checks remain unfinished.
 
+The release owner assigned the remaining manual SMART, ZFS, WSL and non-cache
+manager checks to testers after initial publication on 2026-10-07. Automated safety
+and release gates still apply. See the [release record](docs/release-readiness.md),
+[support matrix](docs/support-matrix.md) and [tester guide](docs/tester-guide.md).
+
 ## Start here
 
 Read [AGENTS.md](AGENTS.md) and [PLAN.md](PLAN.md) before changing code. The plan defines module ownership, platform boundaries, protocol and CLI contracts, and the feature acceptance matrix. For a change, identify the owning folder, affected port or schema, acceptance row, fixture, and relevant test.
@@ -113,20 +118,64 @@ Keep a change focused on an owning module and its contracts. Include the relevan
 
 ## One initial publication
 
-`package.json` is the public `disktop@1.0.0` package: version `1.0.0`, `private: false`, and `files` limited to the compiled JavaScript, the four helpers and their `SHA256SUMS`, the CLI JSON schemas, `README.md`, `LICENSE`, `THIRD_PARTY_NOTICES`, and `CHANGELOG.md`. `tests/package/` holds the exact allowlist and fails on anything else. `1.0.0` must contain the complete Linux scope and pass the full Phase 8 checklist before publication. Create a reviewed `v1.0.0` tag only after the full acceptance matrix has evidence.
+`package.json` is the public `disktop@1.0.0` package: version `1.0.0`, `private: false`, and `files` limited to the compiled JavaScript, the four helpers and their `SHA256SUMS`, the CLI JSON schemas, `README.md`, `LICENSE`, `THIRD_PARTY_NOTICES`, and `CHANGELOG.md`. `tests/package/` holds the exact allowlist and fails on anything else. `1.0.0` must contain the complete Linux scope and pass Phase 8's automated publication prerequisites. Create the reviewed `v1.0.0` tag only after CI passes on that exact commit and the deferred manual environments are recorded accurately.
 
 After a native dependency or release toolchain update, run `npm run licenses:native`
 and review the full upstream attributions. `npm run licenses:check` verifies them
 against the locked dependency graphs. Release builds run that gate; `npm pack`
 also refuses stale or incomplete notices without needing a Rust toolchain.
 
-Being publishable is not the same as being published. `prepublishOnly` runs `scripts/prepublish-guard.mjs`, which refuses `npm publish` anywhere but `.github/workflows/publish.yml` dispatched on the default branch for the tag matching the version. It is a seatbelt against an accidental publish from a checkout, not a control: environment variables can be set by anyone and `--ignore-scripts` skips it. What controls publication is that the only token able to publish lives in the protected environment below. The workflow publishes the exact tarball it tested with `npm publish <tarball> --ignore-scripts`, and npm runs no lifecycle scripts for a tarball anyway, so the workflow runs the guard as an explicit step instead.
+Being publishable is not the same as being published. `prepublishOnly` runs `scripts/prepublish-guard.mjs`, which refuses `npm publish` anywhere but `.github/workflows/publish.yml` dispatched on the default branch for the tag matching the version. It is a seatbelt against an accidental publish from a checkout, not a control: environment variables can be set by anyone and `--ignore-scripts` skips it. The workflow's publishing token lives only in the protected environment below, so its build and verification jobs cannot access it. The workflow publishes the exact tarball it tested with `npm publish <tarball> --ignore-scripts`, and npm runs no lifecycle scripts for a tarball anyway, so the workflow runs the guard as an explicit step instead.
 
 Configure a GitHub `npm-publish` environment with required reviewer approval, restrict it to the release branch, and put a one-time granular npm publish token in its `NPM_TOKEN` secret or the accepted `DISKTOP` alias. `NPM_TOKEN` takes precedence when both are configured; both the presence check and publication use that same choice. The token needs **Read and write (publish and stage)** and **Bypass two-factor authentication** for non-interactive CI publishing; give it the shortest practical expiration and revoke it after publication. [npm's token setup guide](https://docs.npmjs.com/creating-and-viewing-access-tokens/) explains these controls. Dispatch `.github/workflows/publish.yml` from the default branch while its tip is still the exact tagged commit, supplying that full SHA and the confirmation text. The workflow checks the workflow event SHA against the tag so provenance identifies the reviewed source.
 
-The workflow has three jobs and one artifact. `build` checks the tag and package metadata, runs every gate, builds the four helpers with `scripts/build-release.mjs` exactly as CI does, packs the tarball once, records its SHA-256, and runs the package smoke test against that file. `verify` runs the same smoke test on the same file, checked by that SHA-256, on ARM64 glibc and on x86-64 and ARM64 musl. Only then does `publish` start; it is the only job in the `npm-publish` environment and the only one with `id-token: write`, it installs and builds nothing, and it publishes the file with the recorded SHA-256 with `--provenance --access public`. The token is supplied only to the publication step and its presence check.
+The workflow has three jobs and one artifact. `build` checks the tag and package metadata, runs every gate, builds the four helpers with `scripts/build-release.mjs` exactly as CI does, packs the tarball once, records its SHA-256, and runs the package smoke test against that file. `verify` runs the same smoke test on the same file, checked by that SHA-256, on ARM64 glibc and on x86-64 and ARM64 musl. Only then does `publish` start; it is the only job in the `npm-publish` environment and the only one with `id-token: write`, it builds nothing and installs no project dependencies before publishing, and it publishes the file with the recorded SHA-256 with `--provenance --access public`. The token is supplied only to the publication step and its presence check.
 
 This one-time token is necessary because npm currently [requires the package to exist](https://github.com/npm/cli/issues/8544) before a trusted publisher can be registered. [npm's first-publication guidance](https://docs.npmjs.com/generating-provenance-statements/) supports token-backed GitHub Actions publishing with provenance. A placeholder public package would violate the one-release contract. After `1.0.0` exists, configure npm trusted publishing for `publish.yml` and restrict token publishing for any later maintenance release; no second public release is planned here.
+
+### Publish 1.0.0
+
+An npm login on your laptop does not publish this release. Use the guarded GitHub
+workflow so the reviewed artifact and provenance are preserved:
+
+1. Merge the release changes, wait for green CI on `main`, and review its full SHA.
+   Keep `main` at that commit until the workflow has been dispatched.
+2. From a checkout of this repository, tag that reviewed commit and dispatch:
+
+   ```sh
+   git fetch origin main
+   release_commit=$(git rev-parse origin/main)
+   git show --no-patch --format=fuller "$release_commit"
+   git tag -a v1.0.0 "$release_commit" -m "Disktop 1.0.0"
+   git push origin refs/tags/v1.0.0
+   gh workflow run publish.yml --ref main \
+     -f release_tag=v1.0.0 \
+     -f expected_commit="$release_commit" \
+     -f confirmation='PUBLISH v1.0.0'
+   ```
+
+   The tag is created once. If it already exists, check which commit it names before
+   proceeding. In the [Actions page](https://github.com/Dijo-404/disktop/actions/workflows/publish.yml),
+   **Run workflow** provides the same three inputs: `v1.0.0`, the full SHA and
+   `PUBLISH v1.0.0`, with branch `main` selected.
+3. Wait for the build and artifact verification jobs to pass. Open the run's
+   **Review deployments** prompt and approve `npm-publish` as its required reviewer.
+   The token must already be saved directly in that environment as `NPM_TOKEN` or
+   `DISKTOP`; do not put it in a command, issue or pull request.
+4. Confirm the publish job and its registry/provenance verification step succeed.
+   If publication succeeds but the verification step fails, investigate that step;
+   the same npm version cannot be published again.
+5. Verify normal consumer execution and revoke the one-time publish token:
+
+   ```sh
+   npm view disktop@1.0.0 version dist.attestations --json
+   npm exec --yes --package=disktop@1.0.0 -- disktop --version
+   npm exec --yes --package=disktop@1.0.0 -- disktop --help
+   ```
+
+After the registry checks pass, record the publication date and workflow in the
+changelog and release record, and update the README status. Keep each deferred
+environment unvalidated until a tester supplies the evidence described in the guide.
 
 ## Tests that need a second filesystem
 

@@ -1,6 +1,6 @@
 # CLI contract
 
-Status: planned `1.0.0` command surface. Every command the parser declares is implemented: `devices`, the `--json` dashboard, `alerts check`, `scan`, `explore`, `snapshots list|diff`, `clean`, `clean plan`, `clean apply`, `history`, `undo`, `find duplicates|stale|empty|broken`, `timer install|uninstall`, `report`, and `completion bash|zsh|fish`. The JSON output contract in [`schemas/cli/v1/`](../schemas/cli/v1/) is normative and is validated by `tests/contract/cli-schema.test.mjs` against examples and by `tests/integration/cli-output.test.mjs` against what the CLI actually writes on a running host. The parser, the generated help, and the generated completions are normative. See [PLAN.md](../PLAN.md#cli-and-outputs).
+Status: implemented `1.0.0` command surface. Every command the parser declares is implemented: `devices`, the `--json` dashboard, `alerts check`, `scan`, `explore`, `snapshots list|diff`, `clean`, `clean plan`, `clean apply`, `history`, `undo`, `find duplicates|stale|empty|broken`, `timer install|uninstall`, `report`, and `completion bash|zsh|fish`. The JSON output contract in [`schemas/cli/v1/`](../schemas/cli/v1/) is normative and is validated by `tests/contract/cli-schema.test.mjs` against examples and by `tests/integration/cli-output.test.mjs` against what the CLI actually writes on a running host. The parser, the generated help, and the generated completions are normative. See [PLAN.md](../PLAN.md#cli-and-outputs).
 
 ## What works today
 
@@ -13,7 +13,7 @@ Status: planned `1.0.0` command surface. Every command the parser declares is im
 | `disktop scan [PATH] [--json]` | Walks `PATH` (the working directory by default) through the helper, writes the detailed index, and saves a snapshot. `--accounting allocated\|apparent`, `--cross-filesystems`, `--throttle RATE`, `--max-depth DEPTH`, `--sudo`. Ctrl+C stops it at a directory boundary and still reports what was measured. |
 | `disktop explore [PATH] [--json]` | One page of `PATH` and everything below it, from the most recent scan covering it. `--sort`, `--order`, `--kind`, `--min-size`, `--max-size`, `--ext`, `--name`, `--older-than DAYS`, `--limit`, `--cursor`, `--type-totals`, `--owners`. |
 | `disktop snapshots list\|diff [--json]` | Lists saved snapshots, or compares two of them (`--from`, `--to`; the two most recent by default). |
-| `disktop clean [--json]` | Lists what every detector found, and changes nothing. `--dry-run` is accepted and redundant. `--category CATEGORY` narrows the list, `--limit COUNT` shortens it, and `--no-sizes` skips measurement so every size stays unknown. |
+| `disktop clean [--json]` | Lists what every detector found, and changes nothing. `--dry-run` is accepted and redundant. `--category CATEGORY` narrows the list, `--limit COUNT` shortens it, and `--no-sizes` skips footprint measurement; known stat or manager-reported sizes remain available. |
 | `disktop clean plan [FINDING_ID] [--path PATH] [--operation trash\|permanent\|empty-trash\|move\|compress\|hardlink\|manager] [--json]` | Reviews one finding or path into a stored, expiring plan. Changes nothing. `--operation empty-trash` needs no subject and can name only this user's own Trash. A `managers:` finding is planned as a manager action without naming the operation. |
 | `disktop clean apply PLAN_ID --yes [--permanent] [--json]` | Applies an already-reviewed plan, revalidating every item against the identity the plan recorded. |
 | `disktop history [--cursor CURSOR] [--limit COUNT] [--json]` | The durable action journal, newest first, with interrupted records resolved as it is read. A cursor the journal did not issue is an input error. A record lists at most 1000 of its items and says how many it left out in `itemsOmitted`; its counts still cover every item, and `undo` reads the whole record. |
@@ -33,7 +33,21 @@ A command declared in the table before it is built is marked `[planned]` in the 
 
 `scan` does not delete or move anything. It walks the tree through the Rust helper, which opens every directory with `openat2` containment: it never follows a symlink, and without `--cross-filesystems` it stays on the filesystem the root is on. That filesystem includes its other mounts below the root that show a part of it nothing else in the scan reaches — Btrfs subvolumes mounted at `/home`, `/var/log`, or `/.snapshots` are the common case, and a scan of `/` that stopped at them would account for a fraction of what `df` reports as used. A mount of a different filesystem (`/boot`, `/proc`, a USB disk) is refused, and so is a bind mount repeating a tree the scan already reaches, so nothing is counted twice; each refused mount is listed in `excludedMounts` with a warning saying which of the two it was. A directory it cannot open is counted and named, never treated as empty, and any scan that missed something reports `complete: false` with at least one warning.
 
-`--sudo` then measures the directories the scan could not read, with administrator rights: the system's own root-owned `du` runs read-only through `pkexec` (a desktop password dialog) or `sudo` (a password prompt on the terminal), with fixed flags and the absolute paths as its only arguments. Nothing Disktop ships runs as root. The sizes are kept beside the scan, one level deep, and are never added into its totals; the scan stays `incomplete` because the index still cannot browse inside those directories. `scan --json` reports them under `elevated` (`common.json#/$defs/elevatedMeasurement`); a refused or cancelled password prompt is `status: "denied"`, and a machine where nothing can ask for administrator rights is `unavailable`. `explore` and `report` show the measured sizes where they apply, and the TUI does the same from Explore with `A`.
+`--sudo` then measures the directories the scan could not read, with administrator rights: the system's own root-owned `du` runs read-only through `pkexec` (a desktop password dialog) or `sudo` (a password prompt on the terminal), with fixed flags and the absolute paths as its only arguments. This `--sudo` step elevates only the system `du`; the normal CLI and helper stay unprivileged. The sizes are kept beside the scan, one level deep, and are never added into its totals; the scan stays `incomplete` because the index still cannot browse inside those directories. `scan --json` reports them under `elevated` (`common.json#/$defs/elevatedMeasurement`); a refused or cancelled password prompt is `status: "denied"`, and a machine where nothing can ask for administrator rights is `unavailable`. `explore` and `report` show the measured sizes where they apply, and the TUI does the same from Explore with `A`.
+
+On WSL, `/mnt/c` and `/mnt/wsl` are excluded by default, even when named as the scan
+root. Naming a path or adding `--cross-filesystems` does not override excludes.
+To scan a selected Windows directory, set this in
+`$XDG_CONFIG_HOME/disktop/config.toml` (normally `~/.config/disktop/config.toml`):
+
+```toml
+[scan]
+exclude_windows_mounts = false
+```
+
+Then use `disktop scan /mnt/c/path/to/test-directory --json`. Other configured
+excludes still apply. The WSL diagnostic offers no Windows cleanup; actual WSL
+validation remains [tester follow-up](tester-guide.md#wsl).
 
 Bytes are counted once per inode. A second hardlink to an inode the scan already counted is listed with `shared: true`, and its bytes are reported as `sharedBytes` rather than added to the totals, because deleting that path frees nothing.
 
@@ -61,7 +75,7 @@ disktop --json                               Dashboard without a TTY
 disktop devices --json
 disktop scan [PATH] --accounting allocated|apparent --cross-filesystems --sudo --json
 disktop explore [PATH] --sort allocated --min-size 1GiB --ext log --json
-disktop find duplicates|stale|empty|broken [PATH] --json
+disktop find duplicates|stale|empty|broken [--path PATH] --json
 disktop snapshots list|diff --json
 disktop clean --dry-run --json
 disktop clean plan FINDING_ID --operation trash|permanent|move|compress|hardlink --json
@@ -498,7 +512,7 @@ An alert threshold is an expected monitoring outcome, so `1` is reserved for tha
 
 An inventory is incomplete whenever anything could not be read: a mount whose `statfs` was denied, a missing `lsblk`, an unparsable `mountinfo` line, or a configuration file that could not be applied. Each one adds a warning naming what was missed, and no missing reading is ever reported as a zero.
 
-A `statfs` that does not answer within five seconds — a hard NFS mount whose server has gone does this — is a `statfs-timeout` warning and that filesystem is left out. The kernel call cannot be cancelled and keeps one Node worker thread until it returns, so a mount still stuck is not asked again by the same process, and a finished command exits even while the call is pending. Device models, transports, and filesystem types are sanitized where they are read: a USB device chooses its own model string and any user who can mount FUSE chooses a filesystem subtype that every other user's dashboard prints.
+A `statfs` that does not answer within five seconds — a hard NFS mount whose server has gone does this — is a `statfs-timeout` warning and that filesystem is left out. Capacity probes run in bounded isolated subprocesses, so an unreachable mount cannot exhaust the main Node worker pool. A timed-out probe is killed and detached; if kernel I/O prevents it from exiting immediately, its path is remembered until it is reaped and repeated refreshes do not start more probes for that path. A finished command can exit while such a probe is pending. Unavailable usage is omitted with a warning, never reported as zero. Device models, transports, and filesystem types are sanitized where they are read: a USB device chooses its own model string and any user who can mount FUSE chooses a filesystem subtype that every other user's dashboard prints.
 
 ## Manager actions
 

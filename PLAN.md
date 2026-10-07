@@ -6,11 +6,22 @@ Status: the blueprint the `1.0.0` release candidate was built from. Every featur
 
 There will be **one initial public npm release, `1.0.0`**. Phases in this document are internal build gates, not separate public versions or an MVP release. Every requested Linux feature must be implemented, documented, and tested before publishing. Local builds and CI artifacts are allowed. Missing external tools, hardware, or privileges must produce an explicit capability state; they cannot crash the app or silently pretend a feature succeeded. The platform abstraction ships in `1.0.0`; macOS implementation is outside this Linux release.
 
+On **2026-10-07 the release owner deferred** the remaining real SMART health, ZFS,
+WSL and non-cache manager mutation checks to testers after initial publication.
+Those environments remain unvalidated in the [support matrix](docs/support-matrix.md).
+This exception changes only the timing of those manual checks. All implementation,
+automated safety/CI/artifact gates and protected publication approval still apply;
+the [release record](docs/release-readiness.md) and
+[tester guide](docs/tester-guide.md) track the decision and follow-up.
+
 The user journey is: open a fast dashboard → identify a full filesystem → inspect the largest files, directories, apps, and caches → review an action with exact scope and estimates → apply it safely → see the actual result and undo when possible. Disktop itself makes no network calls and collects no telemetry. `npx` may contact the npm registry to install it.
 
 ### Current implementation boundary
 
-The package is the `1.0.0` release candidate. **Phases 0 through 7 are complete**; Phase 8, whole-product validation and the sole release, is the remaining gate. Nothing is published until it passes.
+The package is the `1.0.0` release candidate. **Phases 0 through 7 are complete**;
+Phase 8, whole-product validation and the sole release, remains open. Its automated
+publication prerequisites must pass before publishing; registry installation and
+provenance verification follow publication. The manual-check deferral above applies.
 
 Phase 0 delivered the contracts, not features: normative JSON Schemas for CLI output (`schemas/cli/v1/`) and the helper protocol (`schemas/native/v1/`) with valid and invalid examples under contract test; byte-exact path handling and the protected-path refusal policy in `src/domain`; XDG locations, configuration defaults, and a strict TOML subset reader in `src/storage`; the source dependency rule enforced by `eslint.config.mjs` and proven by `tests/unit/dependency-rules.test.mjs`; the filesystem fixture generator in `tests/fixtures/generate.mjs`; the fixed kernel and architecture minimums in `docs/support-matrix.md`; the action threat model in `docs/threat-model.md`; and ADRs 0001 to 0005.
 
@@ -95,8 +106,9 @@ containers. All four release helpers build with verified checksums;
 the packed artifact passes clean installation on Node 24/26 and glibc/musl. The
 million-entry resource/latency gate and both dependency advisory checks pass. See
 [the validation record](docs/release-readiness.md) and [support matrix](docs/support-matrix.md).
-Publication still requires green CI at the reviewed commit, the remaining hardware/VM
-checks explicitly listed in that matrix, and approval through the guarded workflow.
+Publication still requires green CI at the reviewed commit, every automated release
+gate and approval through the guarded workflow. The remaining hardware/VM checks
+are tester follow-up under the dated release-owner decision above.
 Phase 8 includes publication and subsequent provenance/registry-install verification,
 so it is not marked complete before those happen.
 
@@ -401,7 +413,8 @@ The optional systemd **user** timer runs only `alerts check` and may call `notif
 
 ## Internal implementation phases
 
-Each phase ends with a testable gate. No phase publishes to npm.
+Each phase ends with a testable gate. Phases 0 through 7 do not publish to npm;
+Phase 8 includes the sole initial publication.
 
 | Phase | Build work | Gate before continuing |
 | --- | --- | --- |
@@ -411,13 +424,16 @@ Each phase ends with a testable gate. No phase publishes to npm.
 | 3. Findings and application inventory **(complete)** | Implement every dev, language, AI, browser, Electron, game, VM, package, and per-user detector plus SMART, open-deleted, snapshot, log, crash, swap, and WSL diagnostics. | Each provider passes fixtures; optional tools and permissions show capability states; no duplicate findings or unlabelled size estimates. |
 | 4. Safe action engine **(complete)** | Implement immutable plans, native journal, Trash, undo, permanent erase, empty folders, broken symlinks, user caches/temp cleanup, Trash emptying, action history, interruption and restart recovery. | All mutations pass sandbox, symlink/bind-mount, collision, protected-root, invalid-byte, crash, and undo tests. Moved-to-Trash and observed free-space values are distinct. |
 | 5. Advanced analysis and actions **(complete)** | Implement staged duplicate hashes, stale evidence, keep rules, hardlink replacement, cross-disk move, compression, custom rules, and action verification. | Final byte compare, metadata compatibility, copy/hash/fsync, partial-failure recovery, rule limits, and explicit irreversible-action tests pass. |
-| 6. Managed Linux cleanup and alerts **(complete)** | Implement apt/dnf/pacman, journald, Snap, Flatpak, Docker/Podman including volumes, old kernels, `/var/crash`/core policy, system tmpfiles, scoped privilege requests, per-user breakdown, `notify-send` and systemd timer. | Distro-specific adapter tests and host/VM checks pass; every manager action has bounded scope, live preflight, apply, verify, permission, and unsupported cases, with preview where the manager supports it. Timer install/uninstall changes only user units and never cleans automatically. |
+| 6. Managed Linux cleanup and alerts **(complete)** | Implement apt/dnf/pacman, journald, Snap, Flatpak, Docker/Podman including volumes, old kernels, `/var/crash`/core policy, system tmpfiles, scoped privilege requests, per-user breakdown, `notify-send` and systemd timer. | Distro-specific adapter tests, actual apt/DNF5/pacman cache cleanup and executed host/VM checks pass; other real manager mutations remain tester follow-up in the support matrix. Every manager action has bounded scope, live preflight, apply, verify, permission, and unsupported cases, with preview where the manager supports it. Timer install/uninstall changes only user units and never cleans automatically. |
 | 7. Complete surfaces **(complete)** | Finish all TUI views, themes, vim/mouse/help, search, config, JSON/CSV/HTML exports, all CLI commands, completions, readable help, README, demo GIF, and no-telemetry statement. | A user can complete every core journey at 80×24; all commands work with no TTY and valid stdout; exports survive malicious filenames. |
-| 8. Whole-product validation and sole release | Run Linux distro CI, native builds, PTY and recovery suites, package smoke tests, benchmarks, docs review, support-matrix checks, and guarded publish workflow. | All rows in the feature matrix below pass; no unresolved critical deletion or data-loss bug; packed tarball and `npx` work on clean accounts. Publish `1.0.0` once, then verify provenance and install from the registry. |
+| 8. Whole-product validation and sole release | Run Linux distro CI, native builds, PTY and recovery suites, package smoke tests, benchmarks, docs review, support-matrix checks, and guarded publish workflow. | Automated acceptance and release gates pass; no unresolved critical deletion or data-loss bug; packed tarball and `npx` work on clean accounts. Keep the owner-deferred manual environments explicitly unvalidated. Publish `1.0.0` once through protected approval, then verify provenance and install from the registry. |
 
 ## Feature acceptance matrix
 
-This matrix is the release checklist. “Available” means the feature is implemented and tested; on a machine lacking its external dependency it reports why it cannot run.
+This matrix is the release checklist, subject to the dated manual-check deferral in
+the release contract above. “Available” means the feature is implemented and covered
+by automated tests; actual environment validation is recorded separately in the
+support matrix. On a machine lacking its external dependency it reports why it cannot run.
 
 | Requested capability | Phase | Acceptance evidence |
 | --- | --- | --- |
@@ -436,7 +452,7 @@ This matrix is the release checklist. “Available” means the feature is imple
 | Temporary, language, package, journal, Snap, Flatpak cleanup | 4, 6 | Provider-specific preview/apply/verify tests and privilege states pass. |
 | Docker/Podman images, stopped containers, build cache, volumes | 6 | Manager test fixtures prove selection and no unintended volume deletion. |
 | Old kernels, crash/core files, oversized-log cause | 3, 6 | Running kernel preserved; policy-backed cleanup only; active logs never truncated. |
-| Deleted-open, SMART, Btrfs/ZFS diagnostics | 3 | Capability probes and representative host/VM checks pass. |
+| Deleted-open, SMART, Btrfs/ZFS diagnostics | 3 | Capability probes and fixtures pass; executed Btrfs and denied SMART readings are recorded. Real SMART health and ZFS checks remain tester follow-up in the support matrix. |
 | Keep rules and hardlink replacement | 5 | Same-mount/content/metadata gates and shared-write warning tested. |
 | Move, compress, and custom cleanup rules | 5 | Source preserved on failure; staged output verified; rule max limits enforced. |
 | Per-user breakdown and scoped privilege | 3, 6 | Selected filesystem owner totals plus incomplete/denied labels; no whole-app root requirement. |
