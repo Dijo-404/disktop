@@ -1,7 +1,8 @@
-import type { Capability, Filesystem, RawPath, StorageDevice, UnmountedVolume, Warning } from "../domain/models.js";
+import type { Capability, Filesystem, RawPath, StorageDevice, StorageVolume, UnmountedVolume, Warning } from "../domain/models.js";
 
 export interface InventoryResult {
   readonly devices: readonly StorageDevice[];
+  readonly volumes: readonly StorageVolume[];
   readonly filesystems: readonly Filesystem[];
   /** Data partitions and locked encrypted containers that nothing has mounted. */
   readonly unmounted: readonly UnmountedVolume[];

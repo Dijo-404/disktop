@@ -17,23 +17,40 @@ import { realpathSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 
 const REQUEST_ID = "release-hello";
+const OUTPUT_LIMIT_BYTES = 256 * 1024;
 
 export function helperHello(command, args = [], { timeoutMilliseconds = 60_000 } = {}) {
   return new Promise((resolve, reject) => {
     const child = spawn(command, args, { stdio: ["pipe", "pipe", "pipe"], shell: false });
     let buffered = "";
+    let stdoutBytes = 0;
     let stderr = "";
     let answer;
-    const timer = setTimeout(() => {
+    let failure;
+    const fail = (error) => {
+      failure ??= error;
       child.kill("SIGKILL");
-      reject(new Error(`${command} did not answer hello within ${timeoutMilliseconds} ms; stderr: ${stderr}`));
+    };
+    const timer = setTimeout(() => {
+      fail(new Error(`${command} did not finish hello within ${timeoutMilliseconds} ms; stderr: ${stderr}`));
     }, timeoutMilliseconds);
 
     child.on("error", (error) => {
       clearTimeout(timer);
+      failure ??= error;
       reject(error);
     });
+    // A process that exits or closes input before reading the request can emit
+    // EPIPE on this stream independently of its process exit event.
+    child.stdin.on("error", fail);
     child.stdout.setEncoding("utf8").on("data", (chunk) => {
+      if (failure !== undefined) return;
+      stdoutBytes += Buffer.byteLength(chunk);
+      if (stdoutBytes > OUTPUT_LIMIT_BYTES) {
+        fail(new Error(`${command} exceeded the ${OUTPUT_LIMIT_BYTES}-byte hello output limit`));
+        return;
+      }
+      if (answer !== undefined) return;
       buffered += chunk;
       let newline;
       while (answer === undefined && (newline = buffered.indexOf("\n")) !== -1) {
@@ -46,13 +63,18 @@ export function helperHello(command, args = [], { timeoutMilliseconds = 60_000 }
           answer = new Error(`${command} wrote something that is not a protocol message: ${line.slice(0, 200)}`);
           break;
         }
+        if (message === null || typeof message !== "object" || Array.isArray(message)) {
+          answer = new Error(`${command} wrote something that is not a protocol message: ${line.slice(0, 200)}`);
+          break;
+        }
         if (message.requestId === REQUEST_ID && (message.event === "complete" || message.event === "error")) {
-          answer = message.event === "complete" && typeof message.result === "object"
+          answer = message.event === "complete" && message.result !== null && typeof message.result === "object" && !Array.isArray(message.result)
             ? message.result
             : new Error(`${command} refused hello: ${line.slice(0, 500)}`);
         }
       }
       if (answer !== undefined) {
+        buffered = "";
         child.stdin.end();
       }
     });
@@ -61,7 +83,9 @@ export function helperHello(command, args = [], { timeoutMilliseconds = 60_000 }
     });
     child.on("close", (status, signal) => {
       clearTimeout(timer);
-      if (answer instanceof Error) {
+      if (failure !== undefined) {
+        reject(failure);
+      } else if (answer instanceof Error) {
         reject(answer);
       } else if (answer === undefined || status !== 0) {
         reject(new Error(`${command} exited ${signal ?? status} ${answer === undefined ? "without answering hello" : "after hello"}; stderr: ${stderr}`));

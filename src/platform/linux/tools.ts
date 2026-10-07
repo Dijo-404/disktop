@@ -85,12 +85,14 @@ export function isAllowedQuery(name: string, commandArguments: readonly string[]
   });
 }
 
-export type RunCommand = (name: string, commandArguments: readonly string[]) => Promise<ToolOutput>;
+export type RunCommand = (name: string, commandArguments: readonly string[], signal?: AbortSignal) => Promise<ToolOutput>;
 
-export function createToolPort(run: RunCommand = runFixedCommand): ToolPort {
+export function createToolPort(
+  run: RunCommand = (name, commandArguments, signal) => runFixedCommand(name, commandArguments, undefined, undefined, signal),
+): ToolPort {
   const allowed = new Set(ALLOWED_TOOLS);
   return {
-    async run(name, commandArguments) {
+    async run(name, commandArguments, signal) {
       if (!allowed.has(name)) {
         return refused(
           `'${name}' is not a tool Disktop runs. Add it to the allowlist in src/platform/linux/tools.ts to change that.`,
@@ -99,7 +101,7 @@ export function createToolPort(run: RunCommand = runFixedCommand): ToolPort {
       if (!isAllowedQuery(name, commandArguments)) {
         return refused(`'${[name, ...commandArguments.slice(0, 2)].join(" ")}' is not a query Disktop runs.`);
       }
-      return run(name, commandArguments);
+      return run(name, commandArguments, signal);
     },
   };
 }

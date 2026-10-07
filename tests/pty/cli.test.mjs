@@ -41,11 +41,24 @@ function inPty(command, environment = {}) {
  * take the keyboard. Sending them sooner would be handled by the line
  * discipline instead, which tests the kernel rather than Disktop.
  */
-function drivePty(command, keys, environment = {}, settleMilliseconds = 1_500) {
+function drivePty(command, keys, environment = {}, settleMilliseconds) {
   return new Promise((resolve, reject) => {
     const child = spawn("script", ptyCommand(command), { env: { ...process.env, ...environment } });
     let stdout = "";
-    child.stdout.setEncoding("utf8").on("data", (chunk) => { stdout += chunk; });
+    let keysScheduled = false;
+    const keyTimers = [];
+    const sequence = Array.isArray(keys) ? keys : [keys];
+    const typeKeys = (wait) => {
+      if (keysScheduled) return;
+      keysScheduled = true;
+      sequence.forEach((key, index) => {
+        keyTimers.push(setTimeout(() => child.stdin.write(key), wait + index * 400));
+      });
+    };
+    child.stdout.setEncoding("utf8").on("data", (chunk) => {
+      stdout += chunk;
+      if (ENTER_ALTERNATE_SCREEN.test(stdout)) typeKeys(150);
+    });
     child.stderr.setEncoding("utf8").on("data", () => {});
     child.on("error", reject);
 
@@ -54,14 +67,12 @@ function drivePty(command, keys, environment = {}, settleMilliseconds = 1_500) {
       reject(new Error(`the program never exited; captured ${stdout.length} bytes`));
     }, 30_000);
 
-    // A list of keys is typed with a pause between each, so every key is
-    // drawn before the next arrives, the way a person types.
-    const sequence = Array.isArray(keys) ? keys : [keys];
-    sequence.forEach((key, index) => {
-      setTimeout(() => child.stdin.write(key), settleMilliseconds + index * 400);
-    });
+    // Full-screen input waits for the terminal to be taken, even on a busy
+    // runner. CLI scan interruption supplies an explicit delay instead.
+    if (settleMilliseconds !== undefined) typeKeys(settleMilliseconds);
     child.on("close", (status, signal) => {
       clearTimeout(giveUp);
+      keyTimers.forEach(clearTimeout);
       resolve({ status, signal, stdout });
     });
   });
@@ -146,6 +157,26 @@ test("NO_COLOR is honoured inside the TUI: attributes, but never a colour", asyn
       assert.ok(!((code >= 30 && code <= 49) || (code >= 90 && code <= 107)), `colour parameter ${code} written under NO_COLOR`);
     }
   }
+});
+
+test("a truecolor terminal receives the original Mocha palette and is restored", async (context) => {
+  if (!haveScript(context)) return;
+  const result = await drivePty("node dist/bin/disktop.js", "q", { TERM: "xterm-256color", COLORTERM: "truecolor", NO_COLOR: "" });
+  assert.ok([0, 3].includes(result.status), `unexpected exit ${result.status}`);
+  assert.match(result.stdout, /38;2;203;166;247/, "brand uses Mocha mauve");
+  assert.match(result.stdout, /48;2;30;30;46/, "ordinary rows use Mocha base");
+  assert.match(result.stdout, /38;2;205;214;244/, "text uses the original Mocha foreground");
+  assert.match(result.stdout, LEAVE_ALTERNATE_SCREEN);
+  assert.match(result.stdout, SHOW_CURSOR);
+});
+
+test("an ANSI terminal receives a legible sixteen-colour approximation", async (context) => {
+  if (!haveScript(context)) return;
+  const result = await drivePty("node dist/bin/disktop.js", "q", { TERM: "xterm", COLORTERM: "", NO_COLOR: "" });
+  assert.ok([0, 3].includes(result.status), `unexpected exit ${result.status}`);
+  assert.match(result.stdout, /\u001b\[0;40;1;95m/, "brand uses bright magenta on a dark background");
+  assert.doesNotMatch(result.stdout, /(?:38|48);(?:2|5);/, "no unsupported RGB or indexed colour escapes");
+  assert.match(result.stdout, LEAVE_ALTERNATE_SCREEN);
 });
 
 test("a dumb terminal gets the text dashboard, not a screen it cannot address", (context) => {

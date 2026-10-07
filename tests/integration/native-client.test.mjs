@@ -9,6 +9,7 @@ import { join } from "node:path";
 import { pathToFileURL } from "node:url";
 import { test } from "node:test";
 import { NativeHelperClient } from "../../dist/native/client.js";
+import { createNativeScanner } from "../../dist/platform/linux/scan/index.js";
 import { CHECKSUM_FILE, helperBinaryName, helperTarget, locateHelper } from "../../dist/native/locator.js";
 
 async function sandbox() {
@@ -198,6 +199,42 @@ function isRunning(pid) {
   }
 }
 
+test("cancelling a blocked index query kills and reaps only its dedicated read-only helper", async () => {
+  const marker = join(await sandbox(), "query-started");
+  const fake = await fakeHelper(`
+    if (request.operation === "query-index") {
+      fs.writeFileSync(${JSON.stringify(marker)}, "started");
+      lines.close();
+      process.stdin.pause();
+      setInterval(() => {}, 1000);
+    }
+  `);
+  const scanner = createNativeScanner({
+    indexDirectory: "/tmp/disktop-query-test",
+    start: () => NativeHelperClient.launch(fake.location, { shutdownGraceMilliseconds: 100 }),
+  });
+  const controller = new AbortController();
+  const begun = Date.now();
+  const request = scanner.query({ scanId: "scan-1", filter: {}, sort: "allocated", order: "descending", limit: 1 }, controller.signal);
+  const rejected = assert.rejects(request, { name: "AbortError" });
+  try {
+    const deadline = Date.now() + 2000;
+    for (;;) {
+      try { await readFile(marker); break; }
+      catch (error) {
+        if (error.code !== "ENOENT" || Date.now() >= deadline) throw error;
+        await new Promise((resolve) => setTimeout(resolve, 10));
+      }
+    }
+  } finally {
+    controller.abort();
+    await rejected;
+  }
+  assert.ok(Date.now() - begun < 2000, "query cancellation must be bounded despite an ignored protocol cancel");
+  assert.equal(isRunning(await fake.pid()), false, "the query helper is reaped before cancellation completes");
+  assert.equal(getEventListeners(controller.signal, "abort").length, 0);
+});
+
 test("a helper that stops reading its input fails the request instead of crashing Node", async () => {
   // Closing stdin while staying alive is what a helper that has lost its
   // reader looks like from Node's side: the next write is a broken pipe.
@@ -384,4 +421,130 @@ test("the helper is in its own process group, and still ends when Disktop is kil
     await new Promise((resolve) => setTimeout(resolve, 100));
   }
   assert.equal(isRunning(helper), false, "the helper saw its stdin close and ended");
+});
+
+test("an already cancelled request never reaches the helper", async () => {
+  const fake = await fakeHelper(`
+    send({ protocolVersion: 1, requestId: request.requestId, eventId: "2", event: "complete", result: { operation: request.operation } });
+  `);
+  const start = await NativeHelperClient.launch(fake.location);
+  assert.equal(start.started, true);
+  const controller = new AbortController();
+  controller.abort();
+  try {
+    await assert.rejects(() => start.client.request("trash", {}, controller.signal), /abort/i);
+    const answer = await start.client.request("probe", {});
+    assert.equal(answer.requestId, "probe-2", "no request id was assigned to the cancelled action");
+    assert.equal(getEventListeners(controller.signal, "abort").length, 0);
+  } finally {
+    await start.client.close();
+  }
+});
+
+test("a paused event consumer retains only the latest progress reading", async () => {
+  const fake = await fakeHelper(`
+    if (request.operation === "burst") {
+      send({ protocolVersion: 1, requestId: request.requestId, eventId: "2", event: "accepted", accepted: {} });
+      for (let index = 0; index < 5000; index += 1) {
+        send({ protocolVersion: 1, requestId: request.requestId, eventId: String(index + 3), event: "progress", progress: { index, padding: "p".repeat(1024) } });
+      }
+    }
+    send({ protocolVersion: 1, requestId: request.requestId, eventId: "6000", event: "complete", result: {} });
+  `);
+  const start = await NativeHelperClient.launch(fake.location);
+  assert.equal(start.started, true);
+  try {
+    const stream = start.client.stream("burst", {});
+    const first = await stream.next();
+    assert.equal(first.value.event, "accepted");
+    // The probe's response follows every burst event on the same stdout pipe,
+    // so this waits until all progress arrived while the consumer was paused.
+    await start.client.request("probe", {});
+    const remaining = [];
+    for await (const event of stream) remaining.push(event);
+    assert.deepEqual(remaining.map((event) => event.event), ["progress", "complete"]);
+    assert.equal(remaining[0].progress.index, 4999);
+  } finally {
+    await start.client.close();
+  }
+});
+
+test("returning from an action stream cancels and waits for the journalled outcome", async () => {
+  const fake = await fakeHelper(`
+    if (request.operation === "cancel") {
+      setTimeout(() => send({ protocolVersion: 1, requestId: request.arguments.cancelRequestId, eventId: "3", event: "complete", result: { journalled: true } }), 50);
+    } else {
+      send({ protocolVersion: 1, requestId: request.requestId, eventId: "2", event: "accepted", accepted: {} });
+    }
+  `);
+  const start = await NativeHelperClient.launch(fake.location);
+  assert.equal(start.started, true);
+  try {
+    const controller = new AbortController();
+    const stream = start.client.stream("trash", {}, controller.signal);
+    assert.equal((await stream.next()).value.event, "accepted");
+    const began = Date.now();
+    await stream.return();
+    assert.ok(Date.now() - began >= 40, "return waits for the terminal outcome instead of abandoning the action");
+    assert.equal(getEventListeners(controller.signal, "abort").length, 0);
+  } finally {
+    await start.client.close();
+  }
+});
+
+test("an invalid event for an active request fails explicitly instead of hanging", async () => {
+  const fake = await fakeHelper(`
+    send({ protocolVersion: 99, requestId: request.requestId, eventId: "2", event: "complete", result: {} });
+  `);
+  const start = await NativeHelperClient.launch(fake.location);
+  assert.equal(start.started, true);
+  try {
+    await assert.rejects(() => start.client.request("probe", {}), /invalid protocol event/);
+  } finally {
+    await start.client.close();
+  }
+});
+
+test("pipe backpressure preserves every durable item outcome", async () => {
+  const fake = await fakeHelper(`
+    send({ protocolVersion: 1, requestId: request.requestId, eventId: "2", event: "accepted", accepted: {} });
+    for (let index = 0; index < 2000; index += 1) {
+      send({ protocolVersion: 1, requestId: request.requestId, eventId: String(index + 3), event: "item-result", itemResult: { path: String(index), outcome: "completed" } });
+    }
+    send({ protocolVersion: 1, requestId: request.requestId, eventId: "3000", event: "complete", result: {} });
+  `);
+  const start = await NativeHelperClient.launch(fake.location);
+  assert.equal(start.started, true);
+  try {
+    let items = 0;
+    for await (const event of start.client.stream("trash", {})) {
+      if (event.event === "item-result") {
+        assert.equal(event.itemResult.path, String(items));
+        items += 1;
+      }
+    }
+    assert.equal(items, 2000);
+  } finally {
+    await start.client.close();
+  }
+});
+
+test("leaving an event stream drains a backpressured action without hanging", async () => {
+  const fake = await fakeHelper(`
+    if (request.operation === "cancel") return;
+    send({ protocolVersion: 1, requestId: request.requestId, eventId: "2", event: "accepted", accepted: {} });
+    for (let index = 0; index < 2000; index += 1) {
+      send({ protocolVersion: 1, requestId: request.requestId, eventId: String(index + 3), event: "item-result", itemResult: { path: String(index), outcome: "completed" } });
+    }
+    send({ protocolVersion: 1, requestId: request.requestId, eventId: "3000", event: "complete", result: {} });
+  `);
+  const start = await NativeHelperClient.launch(fake.location);
+  assert.equal(start.started, true);
+  try {
+    const stream = start.client.stream("trash", {});
+    assert.equal((await stream.next()).value.event, "accepted");
+    await stream.return();
+  } finally {
+    await start.client.close();
+  }
 });

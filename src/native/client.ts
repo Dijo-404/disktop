@@ -4,6 +4,7 @@ import { PROTOCOL_VERSION, parseHandshakeResponse, type NativeHelloResult } from
 import { helperTarget, locateHelper, type HelperLocation } from "./locator.js";
 
 const STDERR_KEEP_BYTES = 8 * 1024;
+const BUFFERED_EVENTS = 64;
 
 /**
  * How far the client trusts the process on the other end of the pipe.
@@ -194,17 +195,20 @@ export class NativeHelperClient {
     operationArguments: Readonly<Record<string, unknown>>,
     signal?: AbortSignal,
   ): AsyncGenerator<HelperEvent> {
+    // An operation already cancelled must never reach the helper, especially
+    // when it changes the disk: cancelling immediately after submission races
+    // the helper's first syscall.
+    signal?.throwIfAborted();
     if (this.#closed) {
       throw new Error(this.#exitReason ?? "The helper is no longer running.");
     }
 
     this.#nextRequest += 1;
     const requestId = `${operation}-${this.#nextRequest}`;
-    const pending = new EventStream();
+    const pending = new EventStream(() => this.#updateFlow());
     this.#pending.set(requestId, pending);
-
-    try {
-      const onAbort = (): void => {
+    let submitted = false;
+    const onAbort = (): void => {
         if (pending.cancelRequested || this.#closed) {
           return;
         }
@@ -215,22 +219,34 @@ export class NativeHelperClient {
           operation: "cancel",
           arguments: { cancelRequestId: requestId },
         });
-      };
+    };
 
+    try {
       if (signal !== undefined) {
-        if (signal.aborted) {
-          queueMicrotask(onAbort);
-        } else {
-          signal.addEventListener("abort", onAbort, { once: true });
-          pending.detach = () => signal.removeEventListener("abort", onAbort);
-        }
+        signal.addEventListener("abort", onAbort, { once: true });
+        pending.detach = () => signal.removeEventListener("abort", onAbort);
       }
 
       this.#write({ protocolVersion: PROTOCOL_VERSION, requestId, operation, arguments: operationArguments });
+      submitted = !this.#closed;
       yield* pending.events();
     } finally {
       pending.detach?.();
-      this.#pending.delete(requestId);
+      try {
+        if (submitted && !pending.ended) {
+          // Returning from the iterator cancels the remaining work but still
+          // waits for its terminal record. A disk action is never abandoned
+          // between its journalled intent and outcome.
+          onAbort();
+          for await (const event of pending.events()) {
+            // Drain required outcomes even if the original consumer left.
+            void event;
+          }
+        }
+      } finally {
+        this.#pending.delete(requestId);
+        this.#updateFlow();
+      }
     }
   }
 
@@ -257,7 +273,12 @@ export class NativeHelperClient {
         // SIGKILL cannot be ignored. A process stuck in uninterruptible I/O
         // only takes it when the I/O returns, and waiting for that forever
         // would hang the CLI on a kernel problem, so the wait is bounded too.
-        await this.#exitWithin(this.#limits.shutdownGraceMilliseconds);
+        if (!(await this.#exitWithin(this.#limits.shutdownGraceMilliseconds))) {
+          this.#child.stdin.destroy();
+          this.#child.stdout.destroy();
+          this.#child.stderr.destroy();
+          this.#child.unref();
+        }
       }
     }
     this.#fail("The helper was closed.");
@@ -292,6 +313,7 @@ export class NativeHelperClient {
    * once the newline arrives keeps it linear.
    */
   #absorbStdout(chunk: string): void {
+    if (this.#closed) return;
     let start = 0;
     let newline = chunk.indexOf("\n");
     while (newline >= 0) {
@@ -305,6 +327,7 @@ export class NativeHelperClient {
       this.#partialLength = 0;
       if (line.trim() !== "") {
         this.#deliver(line);
+        if (this.#closed) return;
       }
       start = newline + 1;
       newline = chunk.indexOf("\n", start);
@@ -351,10 +374,29 @@ export class NativeHelperClient {
     if (pending === undefined) {
       return;
     }
-    pending.push(event);
+    if (event.protocolVersion !== PROTOCOL_VERSION || typeof event.eventId !== "string" ||
+      !["accepted", "progress", "item-result", "complete", "error"].includes(event.event)) {
+      this.#abandon("The helper sent an invalid protocol event for a pending request.");
+      return;
+    }
+    if (!pending.push(event)) {
+      this.#abandon("The helper accepted one request more than once.");
+      return;
+    }
     // `accepted` and `progress` are not terminal; only a final event ends the stream.
     if (event.event === "complete" || event.event === "error") {
       pending.end();
+    }
+    this.#updateFlow();
+  }
+
+  /** Preserve every durable item outcome while applying pipe backpressure to a slow consumer. */
+  #updateFlow(): void {
+    if (this.#closed) return;
+    if ([...this.#pending.values()].some((pending) => pending.queued >= BUFFERED_EVENTS)) {
+      this.#child.stdout.pause();
+    } else {
+      this.#child.stdout.resume();
     }
   }
 
@@ -381,6 +423,11 @@ export class NativeHelperClient {
     }
     this.#closed = true;
     this.#exitReason = reason;
+    this.#partial = [];
+    this.#partialLength = 0;
+    // A queue may have paused stdout. Once every pending request failed there
+    // is nothing to retain; drain the pipe so its close event can still land.
+    this.#child.stdout.resume();
     for (const [, pending] of this.#pending) {
       pending.detach?.();
       pending.fail(new Error(reason));
@@ -401,17 +448,44 @@ class EventStream {
   #waiting: { resolve: (result: IteratorResult<HelperEvent>) => void; reject: (error: Error) => void } | undefined;
   #ended = false;
   #failure: Error | undefined;
+  #accepted = false;
   cancelRequested = false;
   detach?: () => void;
 
-  push(event: HelperEvent): void {
+  constructor(readonly drained: () => void) {}
+
+  get ended(): boolean {
+    return this.#ended || this.#failure !== undefined;
+  }
+
+  get queued(): number {
+    return this.#queue.length;
+  }
+
+  push(event: HelperEvent): boolean {
+    if (this.ended) return true;
+    if (event.event === "accepted") {
+      if (this.#accepted) return false;
+      this.#accepted = true;
+    }
     const waiting = this.#waiting;
     if (waiting !== undefined) {
       this.#waiting = undefined;
       waiting.resolve({ value: event, done: false });
-      return;
+      return true;
+    }
+    // Progress is a current reading, not a log. A paused consumer needs only
+    // the newest reading; retaining every tick grows without a bound in a TUI
+    // that is busy reviewing something while a scan runs.
+    if (event.event === "progress") {
+      const queued = this.#queue.findIndex((entry) => entry.event === "progress");
+      if (queued >= 0) {
+        this.#queue[queued] = event;
+        return true;
+      }
     }
     this.#queue.push(event);
+    return true;
   }
 
   end(): void {
@@ -425,6 +499,7 @@ class EventStream {
 
   fail(error: Error): void {
     this.#failure = error;
+    this.#queue.length = 0;
     const waiting = this.#waiting;
     if (waiting !== undefined) {
       this.#waiting = undefined;
@@ -436,6 +511,7 @@ class EventStream {
     for (;;) {
       const next = this.#queue.shift();
       if (next !== undefined) {
+        this.drained();
         yield next;
         continue;
       }

@@ -53,8 +53,10 @@ export function createContainerAdapter(engine: Engine, ports: ContainerPorts): M
   const name = engine === "docker" ? "Docker" : "Podman";
   const before = new Map<string, bigint | undefined>();
 
-  async function rows(commandArguments: readonly string[]): Promise<Rows> {
-    const answer: ToolOutput = await ports.tools.run(engine, commandArguments);
+  async function rows(commandArguments: readonly string[], signal?: AbortSignal): Promise<Rows> {
+    signal?.throwIfAborted();
+    const answer: ToolOutput = await ports.tools.run(engine, commandArguments, signal);
+    signal?.throwIfAborted();
     if (answer.capability.status !== "available") {
       return { rows: [], failure: answer.capability };
     }
@@ -80,8 +82,8 @@ export function createContainerAdapter(engine: Engine, ports: ContainerPorts): M
     });
   }
 
-  async function images(warnings: Warning[]): Promise<readonly ManagerItem[] | Capability> {
-    const listing = await rows(CONTAINER_QUERIES.images);
+  async function images(warnings: Warning[], signal?: AbortSignal): Promise<readonly ManagerItem[] | Capability> {
+    const listing = await rows(CONTAINER_QUERIES.images, signal);
     if (listing.failure !== undefined) {
       return listing.failure;
     }
@@ -97,8 +99,8 @@ export function createContainerAdapter(engine: Engine, ports: ContainerPorts): M
     });
   }
 
-  async function stoppedContainers(warnings: Warning[]): Promise<readonly ManagerItem[] | Capability> {
-    const listing = await rows(CONTAINER_QUERIES.containers);
+  async function stoppedContainers(warnings: Warning[], signal?: AbortSignal): Promise<readonly ManagerItem[] | Capability> {
+    const listing = await rows(CONTAINER_QUERIES.containers, signal);
     if (listing.failure !== undefined) {
       return listing.failure;
     }
@@ -110,14 +112,15 @@ export function createContainerAdapter(engine: Engine, ports: ContainerPorts): M
 
   async function volumes(
     warnings: Warning[],
+    signal?: AbortSignal,
   ): Promise<{ readonly anonymous: readonly ManagerItem[]; readonly named: readonly string[] } | Capability> {
-    const listing = await rows(engine === "docker" ? CONTAINER_QUERIES.dockerVolumes : CONTAINER_QUERIES.podmanVolumes);
+    const listing = await rows(engine === "docker" ? CONTAINER_QUERIES.dockerVolumes : CONTAINER_QUERIES.podmanVolumes, signal);
     if (listing.failure !== undefined) {
       return listing.failure;
     }
     let marked: ReadonlySet<string> | undefined;
     if (engine === "docker") {
-      const filtered = await rows(CONTAINER_QUERIES.dockerAnonymousVolumes);
+      const filtered = await rows(CONTAINER_QUERIES.dockerAnonymousVolumes, signal);
       if (filtered.failure !== undefined) {
         return filtered.failure;
       }
@@ -135,8 +138,8 @@ export function createContainerAdapter(engine: Engine, ports: ContainerPorts): M
     };
   }
 
-  async function buildCache(): Promise<bigint | undefined> {
-    const listing = await rows(CONTAINER_QUERIES.systemDf);
+  async function buildCache(signal?: AbortSignal): Promise<bigint | undefined> {
+    const listing = await rows(CONTAINER_QUERIES.systemDf, signal);
     for (const [line] of listing.rows) {
       try {
         const row = JSON.parse(line ?? "") as { Type?: unknown; Reclaimable?: unknown };
@@ -166,14 +169,14 @@ export function createContainerAdapter(engine: Engine, ports: ContainerPorts): M
     };
   }
 
-  async function discover(): Promise<ManagerDiscovery> {
+  async function discover(signal?: AbortSignal): Promise<ManagerDiscovery> {
     const warnings: Warning[] = [];
-    const imageItems = await images(warnings);
+    const imageItems = await images(warnings, signal);
     if (!Array.isArray(imageItems)) {
       return { adapter: engine, capability: explain(imageItems as Capability), proposals: [], warnings: [] };
     }
-    const containerItems = await stoppedContainers(warnings);
-    const volumeItems = await volumes(warnings);
+    const containerItems = await stoppedContainers(warnings, signal);
+    const volumeItems = await volumes(warnings, signal);
     const proposals: ManagerProposal[] = [
       exact(`${engine}.remove-dangling-images`, `${name} images nothing refers to`, imageItems, [
         `${imageItems.length} image(s) have no tag and no container refers to them.`,
@@ -211,7 +214,7 @@ export function createContainerAdapter(engine: Engine, ports: ContainerPorts): M
       }
     }
     if (engine === "docker") {
-      const reclaimable = await buildCache();
+      const reclaimable = await buildCache(signal);
       proposals.push({
         action: "docker.prune-build-cache",
         title: "Docker build cache nothing refers to",
@@ -251,27 +254,27 @@ export function createContainerAdapter(engine: Engine, ports: ContainerPorts): M
     };
   }
 
-  async function presentFor(action: ManagerActionId): Promise<ReadonlySet<string> | undefined> {
+  async function presentFor(action: ManagerActionId, signal?: AbortSignal): Promise<ReadonlySet<string> | undefined> {
     const ignored: Warning[] = [];
     const listed =
       action === `${engine}.remove-dangling-images`
-        ? await images(ignored)
+        ? await images(ignored, signal)
         : action === `${engine}.remove-stopped-containers`
-          ? await stoppedContainers(ignored)
-          : await volumes(ignored).then((result) => ("status" in result ? result : result.anonymous));
+          ? await stoppedContainers(ignored, signal)
+          : await volumes(ignored, signal).then((result) => ("status" in result ? result : result.anonymous));
     return Array.isArray(listed) ? new Set(listed.map((item) => item.id)) : undefined;
   }
 
   return {
     id: engine,
     discover,
-    preview: (action) => previewFrom(discover, action),
-    async preflight(scope) {
+    preview: (action, _parameters, signal) => previewFrom(discover, action, signal),
+    async preflight(scope, signal) {
       if (scope.action === "docker.prune-build-cache") {
-        before.set(scope.action, await buildCache());
+        before.set(scope.action, await buildCache(signal));
         return { skipped: new Map() };
       }
-      const present = await presentFor(scope.action);
+      const present = await presentFor(scope.action, signal);
       if (present === undefined) {
         return { refusal: `${engine} could not be asked what is there now.`, skipped: new Map() };
       }

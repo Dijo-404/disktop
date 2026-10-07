@@ -17,6 +17,7 @@ import {
   TABS,
   clearNotice,
   cycleTab,
+  diskRows,
   findingsFor,
   listLength,
   moveSelection,
@@ -27,6 +28,7 @@ import {
   selectRow,
   selectedExploreRow,
   selectedFinding,
+  selectedDiskMount,
   selectedIndex,
   selectedRecord,
   switchTab,
@@ -99,6 +101,8 @@ interface Running {
   readonly controller: AbortController;
   readonly generation: number;
   readonly promise: Promise<void>;
+  readonly work: (signal: AbortSignal, generation: number) => Promise<void>;
+  readonly recover?: (state: AppState, message: string) => AppState;
 }
 
 const EXIT_COMPLETE = 0;
@@ -121,6 +125,7 @@ export class TuiController {
   readonly #services: TuiServices;
   readonly #hooks: ControllerHooks;
   readonly #running = new Map<TaskKind, Running>();
+  readonly #executing = new Map<TaskKind, Running>();
   readonly #busy = new Map<TaskKind, Busy>();
   #generation = 0;
   #leaving = false;
@@ -193,7 +198,7 @@ export class TuiController {
    */
   async shutdown(graceMilliseconds = 5_000): Promise<void> {
     this.#leaving = true;
-    for (const running of this.#running.values()) {
+    for (const running of [...this.#running.values(), ...this.#executing.values()]) {
       running.controller.abort();
     }
     const mutating = [...this.#running.entries()].filter(([kind]) => MUTATING.has(kind)).map(([, running]) => running.promise);
@@ -608,8 +613,7 @@ export class TuiController {
     const state = this.#state;
     switch (state.tab) {
       case "Disks": {
-        const filesystem = state.disks.view.filesystems[state.disks.selected];
-        const mount = filesystem?.mounts[0];
+        const mount = selectedDiskMount(state);
         if (mount !== undefined) {
           this.#set(switchTab(state, "Explore"));
           this.#openExplore(mount, true);
@@ -709,13 +713,16 @@ export class TuiController {
 
   #cancel(): void {
     const state = this.#state;
-    const cancellable = [...this.#running.entries()].reverse().find(([kind]) => kind === "scan" || kind === "findings" || kind === "duplicates" || kind === "plan" || MUTATING.has(kind));
+    const runningTasks = [...this.#running.entries()];
+    const cancellable = runningTasks.find(([kind]) => MUTATING.has(kind)) ?? runningTasks.reverse().find(([kind]) => kind === "scan" || kind === "findings" || kind === "duplicates" || kind === "explore" || kind === "plan" || kind === "elevate");
     if (cancellable !== undefined) {
       const [kind, running] = cancellable;
       running.controller.abort();
+      this.#executing.get(kind)?.controller.abort();
+      const stopped = kind === "duplicates" ? exploreFailed(state, "Stopped.") : kind === "explore" ? exploreStopped(state) : state;
       this.#set(
         withNotice(
-          state,
+          stopped,
           MUTATING.has(kind)
             ? "Stopping after the current item; what was done is journalled."
             : kind === "scan"
@@ -824,7 +831,8 @@ export class TuiController {
 
   /** Update state only if this task is still the current one of its kind. */
   #ifCurrent(kind: TaskKind, generation: number, update: (state: AppState) => AppState): void {
-    if (this.#running.get(kind)?.generation === generation) {
+    const running = this.#running.get(kind);
+    if (running?.generation === generation && !running.controller.signal.aborted) {
       this.#set(update(this.#state));
     }
   }
@@ -842,46 +850,56 @@ export class TuiController {
     work: (signal: AbortSignal, generation: number) => Promise<void>,
     recover?: (state: AppState, message: string) => AppState,
   ): void {
+    if (this.#leaving) return;
     const previous = this.#running.get(kind);
     if (MUTATING.has(kind) && this.acting) {
-      // One change to the disk at a time: an apply and an undo never overlap,
-      // and the second is refused rather than queued behind the first.
       this.#set(withNotice(this.#state, "An action is already running; wait for it to finish.", "warn"));
       return;
     }
     previous?.controller.abort();
+    this.#executing.get(kind)?.controller.abort();
     const controller = new AbortController();
-    this.#generation += 1;
-    const generation = this.#generation;
+    const generation = ++this.#generation;
     if (busy !== undefined) {
       this.#busy.set(kind, { ...busy, startedAt: this.#services.now().getTime() });
       this.#syncBusy();
     }
-    // The task is registered before its first line runs, so a result it
-    // produces synchronously is already recognised as current.
+    const task = (promise: Promise<void>): Running => ({ controller, generation, promise, work, ...(recover === undefined ? {} : { recover }) });
+    if (previous !== undefined) {
+      // One active job and one replaceable pending job per kind. Repeated keys
+      // replace the pending request without retaining a promise chain or
+      // starting additional helpers/password prompts.
+      this.#running.set(kind, task(previous.promise));
+      return;
+    }
     let begin: () => void = () => undefined;
-    const registered = new Promise<void>((resolve) => {
-      begin = resolve;
-    });
+    const registered = new Promise<void>((resolve) => { begin = resolve; });
     const promise = (async () => {
       await registered;
-      try {
-        await work(controller.signal, generation);
-      } catch (error) {
-        if (this.#running.get(kind)?.generation === generation && !this.#leaving) {
-          const message = error instanceof Error ? error.message : "The operation failed for an unknown reason.";
-          const recovered = recover === undefined ? this.#state : recover(this.#state, message);
-          this.#set(withNotice(recovered, message, "danger"));
-        }
-      } finally {
-        if (this.#running.get(kind)?.generation === generation) {
-          this.#running.delete(kind);
-          this.#busy.delete(kind);
-          this.#syncBusy();
+      let current: Running | undefined;
+      while ((current = this.#running.get(kind)) !== undefined) {
+        this.#executing.set(kind, current);
+        try {
+          if (!current.controller.signal.aborted) await current.work(current.controller.signal, current.generation);
+        } catch (error) {
+          if (this.#running.get(kind)?.generation === current.generation && !this.#leaving) {
+            const message = error instanceof Error ? error.message : "The operation failed for an unknown reason.";
+            const recovered = kind === "explore" && current.controller.signal.aborted
+              ? exploreStopped(this.#state)
+              : current.recover === undefined ? this.#state : current.recover(this.#state, message);
+            this.#set(withNotice(recovered, current.controller.signal.aborted ? "Stopped." : message, current.controller.signal.aborted ? "warn" : "danger"));
+          }
+        } finally {
+          this.#executing.delete(kind);
+          if (this.#running.get(kind)?.generation === current.generation) {
+            this.#running.delete(kind);
+            this.#busy.delete(kind);
+            this.#syncBusy();
+          }
         }
       }
     })();
-    this.#running.set(kind, { controller, generation, promise });
+    this.#running.set(kind, task(promise));
     begin();
   }
 
@@ -894,7 +912,7 @@ export class TuiController {
     this.#run("inventory", undefined, async (_signal, generation) => {
       const view = await this.#services.dashboard.inventory();
       this.#ifCurrent("inventory", generation, (state) => {
-        const rows = view.filesystems.length + view.unmounted.length;
+        const rows = diskRows(view).length;
         const updated = { ...state, disks: { view, selected: Math.min(state.disks.selected, Math.max(0, rows - 1)) } };
         return announce ? withNotice(updated, view.complete ? "Filesystems read again." : "Filesystems read again; some readings could not be taken.", view.complete ? "ok" : "warn") : updated;
       });
@@ -908,8 +926,10 @@ export class TuiController {
    * newest scan of anything does. Explore never scans on its own.
    */
   #openExplore(path: RawPath | undefined, offerScan = false): void {
-    this.#run("explore", undefined, async (_signal, generation) => {
+    this.#running.get("duplicates")?.controller.abort();
+    this.#run("explore", undefined, async (signal, generation) => {
       const snapshots = await this.#services.snapshots.list();
+      if (signal.aborted) return;
       const wanted = path;
       const snapshot =
         wanted === undefined
@@ -927,6 +947,7 @@ export class TuiController {
         return;
       }
       const elevated = await this.#services.elevated.recorded(snapshot.scanId);
+      if (signal.aborted) return;
       this.#ifCurrent("explore", generation, (state) => {
         const rest = omit(state.explore, "trend", "typeTotals", "elevated");
         return {
@@ -945,26 +966,29 @@ export class TuiController {
           },
         };
       });
-      await this.#loadDirectoryNow(root, 0, undefined, snapshot, generation);
-      this.#loadTrend(snapshot, snapshots);
+      await this.#loadDirectoryNow(root, 0, undefined, snapshot, generation, signal);
+      if (!signal.aborted) this.#loadTrend(snapshot, snapshots);
     }, exploreFailed);
   }
 
   #loadDirectory(path: RawPath, selected: number, select?: RawPath): void {
+    this.#running.get("duplicates")?.controller.abort();
     const snapshot = this.#state.explore.snapshot;
     if (snapshot === undefined) {
       return;
     }
-    this.#run("explore", undefined, async (_signal, generation) => {
+    this.#run("explore", undefined, async (signal, generation) => {
       this.#ifCurrent("explore", generation, (state) => ({ ...state, explore: { ...state.explore, loading: true } }));
-      await this.#loadDirectoryNow(path, selected, select, snapshot, generation);
+      await this.#loadDirectoryNow(path, selected, select, snapshot, generation, signal);
     }, exploreFailed);
   }
 
-  async #loadDirectoryNow(path: RawPath, selected: number, select: RawPath | undefined, snapshot: SnapshotSummary, generation: number): Promise<void> {
+  async #loadDirectoryNow(path: RawPath, selected: number, select: RawPath | undefined, snapshot: SnapshotSummary, generation: number, signal: AbortSignal): Promise<void> {
     const explore = this.#services.explore;
     try {
-      const found = await explore.page({ scanId: snapshot.scanId, filter: { atPath: path }, limit: 1 });
+      const found = await explore.page({ scanId: snapshot.scanId, filter: { atPath: path }, limit: 1 }, signal);
+      const running = this.#running.get("explore");
+      if (running?.generation !== generation || running.controller.signal.aborted) return;
       if (found.kind === "unavailable") {
         this.#ifCurrent("explore", generation, (state) => ({ ...state, explore: { ...state.explore, loading: false, rows: [], empty: found.capability.explanation } }));
         return;
@@ -1012,8 +1036,8 @@ export class TuiController {
       }
       const showTypes = this.#state.explore.showTypes;
       const [children, types] = await Promise.all([
-        explore.page({ scanId: snapshot.scanId, filter: { parentId: entry.id }, sort: this.#state.explore.sort, order: orderFor(this.#state.explore.sort), limit: PAGE_ROWS }),
-        showTypes ? explore.page({ scanId: snapshot.scanId, filter: { underPath: path }, limit: 1, includeTypeTotals: true }) : Promise.resolve(undefined),
+        explore.page({ scanId: snapshot.scanId, filter: { parentId: entry.id }, sort: this.#state.explore.sort, order: orderFor(this.#state.explore.sort), limit: PAGE_ROWS }, signal),
+        showTypes ? explore.page({ scanId: snapshot.scanId, filter: { underPath: path }, limit: 1, includeTypeTotals: true }, signal) : Promise.resolve(undefined),
       ]);
       if (children.kind === "unavailable") {
         this.#ifCurrent("explore", generation, (state) => ({ ...state, explore: { ...state.explore, loading: false, rows: [], empty: children.capability.explanation } }));
@@ -1059,6 +1083,7 @@ export class TuiController {
   #reloadExplore(reset: boolean, cursor?: string): void {
     const state = this.#state;
     const explore = state.explore;
+    if (explore.mode !== "duplicates") this.#running.get("duplicates")?.controller.abort();
     const snapshot = explore.snapshot;
     if (snapshot === undefined) {
       return;
@@ -1124,7 +1149,7 @@ export class TuiController {
             order: orderFor(sort),
             limit: PAGE_ROWS,
             ...(cursor === undefined ? {} : { cursor }),
-          });
+          }, signal);
           if (outcome.kind === "unavailable") {
             this.#ifCurrent("explore", generation, (current) => ({ ...current, explore: { ...current.explore, loading: false, rows: [], empty: outcome.capability.explanation } }));
             return;
@@ -1161,6 +1186,7 @@ export class TuiController {
   }
 
   #findDuplicates(place: RawPath, snapshot: SnapshotSummary): void {
+    this.#running.get("explore")?.controller.abort();
     this.#run("duplicates", { label: "Comparing file contents", detail: "sizes, then edges, then whole files", cancellable: true }, async (signal, generation) => {
       this.#set({ ...this.#state, explore: { ...this.#state.explore, loading: true, rows: [] } });
       const outcome = await this.#services.find.find({ kind: "duplicates", scanId: snapshot.scanId, path: place, rule: "oldest", limit: PAGE_ROWS }, signal);
@@ -1178,9 +1204,17 @@ export class TuiController {
           return { ...state, explore: { ...state.explore, loading: false, rows: [], empty: message } };
         }
         const rows: ExploreRow[] = [];
+        let limited = false;
         for (const [index, group] of result.groups.entries()) {
-          rows.push({ kind: "group", group, index });
-          for (const file of group.group.files) {
+          if (rows.length >= MAX_ROWS - 1) {
+            limited = true;
+            break;
+          }
+          const files = group.group.files.slice(0, MAX_ROWS - rows.length - 1);
+          limited ||= files.length < group.group.files.length;
+          const bounded = files.length === group.group.files.length ? group : { ...group, group: { ...group.group, files } };
+          rows.push({ kind: "group", group: bounded, index, totalFiles: group.group.files.length });
+          for (const file of files) {
             const keep = group.decision.kind === "decided" && group.decision.kept.path.bytesBase64 === file.path.bytesBase64;
             rows.push({ kind: "member", file, keep, undecided: group.decision.kind !== "decided", groupIndex: index });
           }
@@ -1196,7 +1230,9 @@ export class TuiController {
             duplicates: { reclaimable: result.reclaimableBytes, complete: result.complete, warnings: result.warnings },
           },
         };
-        return result.complete ? next : withNotice(next, result.warnings[0]?.message ?? "The duplicate search was incomplete.", "warn");
+        return limited
+          ? withNotice(next, `Showing at most ${MAX_ROWS.toLocaleString("en")} duplicate rows; open a smaller directory to see the rest.`, "warn")
+          : result.complete ? next : withNotice(next, result.warnings[0]?.message ?? "The duplicate search was incomplete.", "warn");
       });
     }, exploreFailed);
   }
@@ -1245,7 +1281,7 @@ export class TuiController {
     const state = this.#state;
     let path: RawPath;
     if (state.tab === "Disks") {
-      const mount = state.disks.view.filesystems[state.disks.selected]?.mounts[0];
+      const mount = selectedDiskMount(state);
       if (mount === undefined) {
         this.#explainUnmounted();
         return;
@@ -1284,7 +1320,7 @@ export class TuiController {
     if (snapshot === undefined) {
       return;
     }
-    this.#run("elevate", { label: "Measuring unreadable directories as root", cancellable: true }, async (signal) => {
+    this.#run("elevate", { label: "Measuring unreadable directories as root", cancellable: true }, async (signal, generation) => {
       this.#hooks.suspend(
         "Disktop is measuring the directories its scan could not read, with the system's du running as root, read-only.\n" +
           "Your system will ask for your password (a dialog on the desktop, or sudo here). Nothing is changed.\n",
@@ -1295,6 +1331,7 @@ export class TuiController {
       } finally {
         this.#hooks.resume();
       }
+      if (signal.aborted || this.#running.get("elevate")?.generation !== generation) return;
       const state = this.#state;
       switch (outcome.kind) {
         case "measured": {
@@ -1327,8 +1364,17 @@ export class TuiController {
   /** Enter or S on a partition nothing has mounted: there is nothing to read yet. */
   #explainUnmounted(): void {
     const state = this.#state;
-    const volume = state.disks.view.unmounted[state.disks.selected - state.disks.view.filesystems.length];
-    if (volume === undefined) {
+    const row = diskRows(state.disks.view)[state.disks.selected];
+    if (row?.kind !== "volume") {
+      return;
+    }
+    const volume = row.volume;
+    if (volume.state === "swap" || volume.state === "in-use") {
+      this.#set(withNotice(state, `${volume.devicePath} is ${volume.state === "swap" ? "swap storage" : "used by another storage layer"}; it has no directory tree to scan.`, "info"));
+      return;
+    }
+    if (volume.state === "unknown") {
+      this.#set(withNotice(state, `${volume.devicePath} has no readable filesystem signature. Its contents are unknown; Disktop cannot mount or scan it.`, "info"));
       return;
     }
     const action = volume.state === "locked" ? "Unlock and mount" : "Mount";
@@ -1402,7 +1448,7 @@ export class TuiController {
       this.#ifCurrent("findings", generation, (state) => {
         const rest = omit(state.findings, "failure");
         const selected = { Clean: 0, Dev: 0, Apps: 0 };
-        return { ...state, findings: { ...rest, summary, loadedAt: this.#services.now().getTime(), selected } };
+        return { ...state, findings: { ...rest, summary, loadedAt: this.#services.now().getTime(), selected, selectedProvider: 0 } };
       });
     }, (state, message) => ({ ...state, findings: { ...state.findings, failure: message } }));
   }
@@ -1695,6 +1741,10 @@ function dialogIdentity(dialog: Dialog): string {
 
 function exploreFailed(state: AppState, message: string): AppState {
   return { ...state, explore: { ...omit(state.explore, "nextCursor"), loading: false, rows: [], empty: message } };
+}
+
+function exploreStopped(state: AppState): AppState {
+  return { ...state, explore: { ...state.explore, loading: false, ...(state.explore.rows.length === 0 ? { empty: "Stopped." } : {}) } };
 }
 
 function orderFor(sort: string): "ascending" | "descending" {

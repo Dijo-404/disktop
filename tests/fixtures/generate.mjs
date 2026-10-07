@@ -31,14 +31,23 @@ function basenameOf(path) {
   return path.slice(path.lastIndexOf("/") + 1);
 }
 
-function sandboxCleanup(fixture) {
+function sandboxCleanup(fixture, restoreUnreadable = false) {
+  const originalRoot = fixture.root;
   return async () => {
     if (removed.has(fixture)) {
       throw new Error(`Fixture ${fixture.root} was already removed`);
     }
-    const resolved = assertSandbox(fixture.root);
-    removed.add(fixture);
+    if (fixture.root !== originalRoot) {
+      throw new Error(`${fixture.root} is not a Disktop fixture sandbox created by this fixture`);
+    }
+    const resolved = assertSandbox(originalRoot);
+    if (restoreUnreadable) {
+      await chmod(join(resolved, "unreadable-directory"), 0o700).catch((error) => {
+        if (error.code !== "ENOENT") throw error;
+      });
+    }
     await rm(resolved, { recursive: true, force: true });
+    removed.add(fixture);
   };
 }
 
@@ -80,8 +89,11 @@ async function buildStandardFixture(root) {
 
   const sparse = join(root, "sparse.bin");
   const handle = await open(sparse, "w");
-  await handle.truncate(SPARSE_BYTES);
-  await handle.close();
+  try {
+    await handle.truncate(SPARSE_BYTES);
+  } finally {
+    await handle.close();
+  }
   record("sparse-file", sparse, { apparentBytes: SPARSE_BYTES });
 
   const original = join(root, "hardlink-original.bin");
@@ -134,11 +146,7 @@ async function buildStandardFixture(root) {
   record("changing-file", changing);
 
   const fixture = { root, manifest };
-  const remove = sandboxCleanup(fixture);
-  fixture.cleanup = async () => {
-    await chmod(join(assertSandbox(fixture.root), "unreadable-directory"), 0o700).catch(() => undefined);
-    await remove();
-  };
+  fixture.cleanup = sandboxCleanup(fixture, true);
   return fixture;
 }
 
@@ -207,23 +215,35 @@ export async function createHostileNameFixture() {
  * occupy no blocks, so a tree of them totals zero on every filesystem.
  */
 export async function createLargeFixture({ entries, fanOut = 256, bytesPerFile = 0 }) {
-  if (!Number.isInteger(entries) || entries < 1) {
+  if (!Number.isSafeInteger(entries) || entries < 1) {
     throw new RangeError("entries must be a positive integer");
   }
-  const root = await sandbox();
-  let created = 0;
-  for (let bucket = 0; created < entries; bucket += 1) {
-    const directory = join(root, `bucket-${bucket}`);
-    await mkdir(directory);
-    const batch = Math.min(fanOut, entries - created);
-    for (let index = 0; index < batch; index += 1) {
-      await writeFile(join(directory, `file-${index}.bin`), bytesPerFile === 0 ? "" : "d".repeat(bytesPerFile));
-      created += 1;
-    }
+  if (!Number.isSafeInteger(fanOut) || fanOut < 1) {
+    throw new RangeError("fanOut must be a positive integer");
   }
-  const fixture = { root, entryCount: created, bytesPerFile };
-  fixture.cleanup = sandboxCleanup(fixture);
-  return fixture;
+  if (!Number.isSafeInteger(bytesPerFile) || bytesPerFile < 0) {
+    throw new RangeError("bytesPerFile must be a nonnegative integer");
+  }
+  const payload = bytesPerFile === 0 ? "" : "d".repeat(bytesPerFile);
+  const root = await sandbox();
+  try {
+    let created = 0;
+    for (let bucket = 0; created < entries; bucket += 1) {
+      const directory = join(root, `bucket-${bucket}`);
+      await mkdir(directory);
+      const batch = Math.min(fanOut, entries - created);
+      for (let index = 0; index < batch; index += 1) {
+        await writeFile(join(directory, `file-${index}.bin`), payload);
+        created += 1;
+      }
+    }
+    const fixture = { root, entryCount: created, bytesPerFile };
+    fixture.cleanup = sandboxCleanup(fixture);
+    return fixture;
+  } catch (error) {
+    await rm(assertSandbox(root), { recursive: true, force: true });
+    throw error;
+  }
 }
 
 /**

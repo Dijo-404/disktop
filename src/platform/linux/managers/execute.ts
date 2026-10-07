@@ -1,13 +1,13 @@
-import { statfs as readStatfs } from "node:fs/promises";
 import type { ActionPlan, ActionResult, VerificationCheck } from "../../../domain/actions.js";
 import { CapabilityUnavailable } from "../../../domain/errors.js";
 import type { ManagerScope } from "../../../domain/managers.js";
-import { rawPathFromUtf8 } from "../../../domain/paths.js";
+import { pathBytes, rawPathFromUtf8 } from "../../../domain/paths.js";
 import type { HelperStart } from "../../../native/client.js";
 import { parseActionResult } from "../../../native/protocol.js";
 import type { ActionPort } from "../../../ports/actions.js";
 import type { CommandRun, CommandRunner, ManagerAdapter } from "../../../ports/managers.js";
 import { ActionRefused, connect, refuseError, toResult } from "../actions/index.js";
+import { createStatfsReader } from "../inventory/statfs.js";
 
 export interface ManagerExecutorOptions {
   readonly adapters: readonly ManagerAdapter[];
@@ -18,6 +18,7 @@ export interface ManagerExecutorOptions {
 }
 
 const NOT_RUN = "Stopped before this command; it was never run.";
+const readStatfs = createStatfsReader();
 
 export function createManagerExecutor(options: ManagerExecutorOptions): Pick<ActionPort, "apply"> {
   const journalDirectory = rawPathFromUtf8(options.journalDirectory).bytesBase64;
@@ -37,7 +38,9 @@ export function createManagerExecutor(options: ManagerExecutorOptions): Pick<Act
         });
       }
 
-      const preflight = await adapter.preflight(scope);
+      signal.throwIfAborted();
+      const preflight = await adapter.preflight(scope, signal);
+      signal.throwIfAborted();
       if (preflight.refusal !== undefined) {
         throw new ActionRefused({ code: "changed-target", message: preflight.refusal });
       }
@@ -210,8 +213,8 @@ function commandCheck(runs: readonly CommandRun[], stopped: string | undefined):
 
 async function freeBytes(path: string): Promise<bigint | undefined> {
   try {
-    const reading = await readStatfs(path, { bigint: true });
-    return reading.bavail * reading.bsize;
+    const reading = await readStatfs(pathBytes(rawPathFromUtf8(path)));
+    return reading.availableBlocks * reading.blockSize;
   } catch {
     return undefined;
   }

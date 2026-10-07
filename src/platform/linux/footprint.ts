@@ -99,7 +99,7 @@ export function createIndexFootprint(options: IndexFootprintOptions): FootprintP
 
       const measurements: FootprintMeasurement[] = [];
       for (const path of paths) {
-        measurements.push(await readRow(options.measurement, scanId, accounting, path));
+        measurements.push(await readRow(options.measurement, scanId, accounting, path, signal));
       }
       return { measurements, warnings };
     },
@@ -113,7 +113,8 @@ export function createIndexFootprint(options: IndexFootprintOptions): FootprintP
      * larger of the two. A name that had more matches than its share sets
      * `truncated`, so the caller says so instead of listing fewer in silence.
      */
-    async entriesUnder(root, limit) {
+    async entriesUnder(root, limit, signal) {
+      signal?.throwIfAborted();
       const covering = await newestCovering(options.snapshots, root);
       if (covering === undefined) {
         // No stored scan reaches this path. "Nothing is there" and "nobody
@@ -127,7 +128,7 @@ export function createIndexFootprint(options: IndexFootprintOptions): FootprintP
           sort: "allocated",
           order: "descending",
           limit: Math.min(Math.max(1, limit), 1000),
-        }),
+        }, signal),
       );
       if (page === undefined) {
         return { entries: [], searched: false, truncated: false };
@@ -139,7 +140,8 @@ export function createIndexFootprint(options: IndexFootprintOptions): FootprintP
       };
     },
 
-    async directoriesNamed(names, limit) {
+    async directoriesNamed(names, limit, signal) {
+      signal?.throwIfAborted();
       const home = options.home;
       if (home === undefined) {
         return { paths: [], searched: false, truncated: false };
@@ -162,7 +164,7 @@ export function createIndexFootprint(options: IndexFootprintOptions): FootprintP
             sort: "allocated",
             order: "descending",
             limit: Math.min(share, 1000),
-          }),
+          }, signal),
         );
         if (page === undefined) {
           return { paths: [], searched: false, truncated: false };
@@ -174,7 +176,8 @@ export function createIndexFootprint(options: IndexFootprintOptions): FootprintP
       return { paths: found.slice(0, limit), searched: true, truncated: truncated || found.length > limit };
     },
 
-    async ownerTotals(limit): Promise<OwnerUsageReading> {
+    async ownerTotals(limit, signal): Promise<OwnerUsageReading> {
+      signal?.throwIfAborted();
       const home = options.home;
       if (home === undefined) {
         return { owners: [], searched: false, complete: false, truncated: false };
@@ -193,7 +196,7 @@ export function createIndexFootprint(options: IndexFootprintOptions): FootprintP
           // The page itself is not wanted; the aggregate is.
           limit: 1,
           includeOwnerTotals: true,
-        }),
+        }, signal),
       );
       if (page === undefined) {
         return { owners: [], searched: false, complete: false, truncated: false };
@@ -230,6 +233,7 @@ async function readRow(
   scanId: string,
   accounting: Accounting,
   path: RawPath,
+  signal: AbortSignal,
 ): Promise<FootprintMeasurement> {
   let page;
   try {
@@ -239,7 +243,7 @@ async function readRow(
       sort: accounting === "apparent" ? "apparent" : "allocated",
       order: "descending",
       limit: 1,
-    });
+    }, signal);
   } catch (error) {
     // The helper refuses a path the scan never saw rather than answering with
     // an empty page; either way there is no row for it.

@@ -12,10 +12,10 @@
 //! `RESOLVE_BENEATH | RESOLVE_NO_SYMLINKS | RESOLVE_NO_XDEV`, so a nested
 //! mount stops the item rather than being silently swallowed into the archive.
 
+use crate::directory_names::{Names, Store};
 use crate::sys::{self, EntryKind};
 use crate::transfer::check;
 use sha2::{Digest, Sha256};
-use std::collections::HashMap;
 use std::io::{self, Read, Write};
 use std::os::fd::{AsRawFd, OwnedFd};
 use std::os::unix::io::{FromRawFd, RawFd};
@@ -217,17 +217,18 @@ pub fn readable_as_tar(
 struct Frame {
     source: OwnedFd,
     prefix: Vec<u8>,
-    names: Vec<Vec<u8>>,
+    names: Names,
 }
 
 impl Frame {
-    fn enter(source: OwnedFd, prefix: Vec<u8>) -> io::Result<Frame> {
+    fn enter(
+        source: OwnedFd,
+        prefix: Vec<u8>,
+        store: &Store,
+        cancelled: &AtomicBool,
+    ) -> io::Result<Frame> {
         let mut stream = sys::Directory::from_descriptor(duplicate(source.as_raw_fd())?)?;
-        let mut names = Vec::new();
-        while let Some(name) = stream.next_name()? {
-            names.push(name);
-        }
-        names.reverse();
+        let names = Names::read(&mut stream, store, cancelled)?;
         Ok(Frame {
             source,
             prefix,
@@ -254,10 +255,16 @@ fn append_children<W: Write>(
     entries: &mut u64,
     cancelled: &AtomicBool,
 ) -> io::Result<()> {
-    let mut archived: HashMap<(u64, u64), Vec<u8>> = HashMap::new();
-    let mut stack = vec![Frame::enter(owned(duplicate(source)?), root.to_vec())?];
+    let mut archived = crate::inode_map::Map::<Vec<u8>>::new();
+    let store = Store::default();
+    let mut stack = vec![Frame::enter(
+        owned(duplicate(source)?),
+        root.to_vec(),
+        &store,
+        cancelled,
+    )?];
     while let Some(frame) = stack.last_mut() {
-        let Some(name) = frame.names.pop() else {
+        let Some(name) = frame.names.pop()? else {
             stack.pop();
             continue;
         };
@@ -284,24 +291,24 @@ fn append_children<W: Write>(
                 *entries += 1;
 
                 let child = owned(sys::open_child_directory(source, &name, false)?);
-                stack.push(Frame::enter(child, path)?);
+                stack.push(Frame::enter(child, path, &store, cancelled)?);
             }
             EntryKind::File => {
                 let key = (metadata.device, metadata.inode);
                 if metadata.link_count > 1
-                    && let Some(first) = archived.get(&key)
+                    && let Some(first) = archived.get(&key)?
                 {
                     let mut header = tar::Header::new_gnu();
                     header.set_entry_type(tar::EntryType::Link);
                     header.set_size(0);
                     header.set_mode(metadata.permissions);
                     header.set_mtime(metadata.modified_nanoseconds / 1_000_000_000);
-                    builder.append_link(&mut header, osstr(&path), osstr(first))?;
+                    builder.append_link(&mut header, osstr(&path), osstr(&first))?;
                     *entries += 1;
                     continue;
                 }
                 if metadata.link_count > 1 {
-                    archived.insert(key, path.clone());
+                    archived.insert(key, path.clone())?;
                 }
                 let mut reader = Member::new(
                     Source::open(source, &name)?,

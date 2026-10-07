@@ -8,6 +8,8 @@ Node starts the matching packaged `disktop-fs` child with `spawn` and a fixed ar
 
 Every request carries a protocol version, unique request ID, operation, and validated arguments. A fast operation emits one `complete` or `error` event. A scan emits `accepted`, then `progress` while it walks — after 4,096 entries or 250 ms, whichever comes first, and never more than ten a second however fast the walk reads — then exactly one `complete` carrying its totals; `item-result` arrives with the action operations. Event IDs are monotonic from 1 per request, every event echoes a valid request ID, and unknown top-level fields and versions are rejected. A scan runs on its own thread so that `cancel` can be read and acted on while it is still walking, and every event goes out through one lock, so two requests never interleave inside a line. Malformed or non-canonical base64 paths and out-of-range integers are rejected; `schemas/native/v1/` fixes every field name and limit.
 
+At most eight worker operations run in one helper session. A saturated session refuses further work with an actionable error; it still accepts cancellation. Completed workers are reaped as requests arrive, and an in-flight request ID cannot be reused or replace another request's cancellation flag. An input failure, like closing stdin, cancels and joins the workers before the helper exits.
+
 Cancellation is the `cancel` operation, whose argument is the request ID to stop. The helper stops the named scan at a directory boundary, closes its handles, writes the totals it did gather, and emits a `complete` event with `complete: false` and a `cancelled` warning. A request ID that is not in flight answers `unknown-request` rather than succeeding silently. Closing stdin means the client has gone away: every running scan is cancelled the same way and then waited for, so each one still emits its final event. Process termination or a broken pipe must leave a record that startup reconciliation can inspect. The client must not treat a missing final event as success.
 
 ## Path and number encoding
@@ -39,7 +41,9 @@ A page is read through an index for each shape a surface asks for, and the helpe
 
 `atPath` restricts a page to the one row at exactly that path. A subtree's first row is the path's own, but a listing sorted by size or time cannot be trusted to put it first: a directory whose own inode holds no blocks, as on Btrfs, ties with the files below it, and the tie-break follows the sort order into the subtree. A path the scan never saw is refused exactly as `underPath` refuses one. Browsing a directory is therefore one `atPath` query for its row and `id`, then `parentId` pages in whichever order the person chose.
 
-`hash-candidates` reads that index and then reads content, which is why it runs on its own thread and answers `cancel` like a scan does. It is a three-stage funnel. SQL groups regular files by apparent size and returns only the sizes with more than one member, so a file with no possible twin is never opened. Sizes come back largest first, 256 at a time, and the members of one size are read only when that size is reached, so the helper holds one size class's paths at a time rather than every candidate in the scan. The cancel flag is read before every file and after every mebibyte of a full read, so stopping a search that has reached a disk image takes milliseconds rather than as long as reading the image. At most 64 per-file warnings are listed; the rest are counted in one summary. Each surviving group is narrowed by a digest of its first and last 64 KiB, and each group that survives that is narrowed again by a digest of every byte. Rows the index marked `shared` are excluded at the query, and two names reaching one inode collapse to one member, because removing the second frees nothing. Each candidate is opened read-only through the same descent a mutation makes — from `/`, one segment at a time, never following a symlink — and the descriptor's own identity is what the result reports, so the group describes the files that are there now rather than the ones the scan remembered.
+`hash-candidates` reads that index and then reads content, which is why it runs on its own thread and answers `cancel` like a scan does. It is a three-stage funnel. SQL groups regular files by apparent size and returns only the sizes with more than one member, so a file with no possible twin is never opened. Sizes come back largest first, 256 at a time. Each size class streams into an anonymous disk-backed SQLite scratch database with a 2 MiB page cache; its paths and digest partitions are not retained as one in-memory collection. Rebuilding paths uses at most 4,096 cached directory rows. The cancel flag is read before every file and after every 128 KiB of a full read, so a large file does not defer cancellation until hashing ends. At most 64 per-file warnings are listed; the rest are counted in one summary. Each surviving group is narrowed by a digest of its first and last 64 KiB, and each group that survives that is narrowed again by a digest of every byte. Rows the index marked `shared` are excluded at the query, and two names reaching one inode collapse to one member, because removing the second frees nothing. Each candidate is opened read-only through the same descent a mutation makes — from `/`, one segment at a time, never following a symlink — and its identity is checked before and after hashing and between stages. A changed file makes the result incomplete instead of grouping a digest against stale metadata.
+
+Duplicate output respects the requested group and per-group limits and a conservative 8 MiB result budget, so extremely long paths cannot turn valid caps into an unbounded protocol line. Reaching any cap marks the result incomplete, identifies the omitted work, and asks the caller to narrow the search. Scratch files are released when the search ends, including cancellation or failure.
 
 The digests group candidates. They never authorise anything: an operation that releases one copy of something because another copy exists re-opens both files and compares them byte for byte first. [ADR 0006](adr/0006-content-identity-and-archive-dependencies.md) records why the line is drawn there. A result with `complete: false` carries a warning saying what it missed — a cap it hit, a file it could not read, or a cancellation.
 
@@ -89,6 +93,12 @@ writer, with `synchronous = FULL`, because this file is the record a crash is ju
 against. A successful action response without a corresponding durable journal outcome
 is a protocol violation, and `src/native/protocol.ts` refuses such a result rather
 than returning it.
+The journal directory is opened segment by segment without symlinks, must belong to
+the invoking user, and is held open for the connection's lifetime. Its ancestors must
+be owned by that user or root and cannot be shared-writable without a sticky bit.
+The journal must be a user-owned regular file with exactly one hardlink; directory
+mode `0700` and file mode `0600` are enforced, and a permission failure refuses the
+action before it writes intent.
 
 The action result distinguishes selected bytes, bytes moved to Trash, the free-space
 readings before and after, completed/skipped/failed counts, and undo eligibility.
@@ -110,9 +120,12 @@ Each item is checked in a fixed order and stops at the first thing that fails. I
 comes before content: a name that already reaches the kept inode is `skipped` with
 `already-linked`, because removing it would free nothing. A target on another device is
 refused with `different-filesystem`; a hardlink cannot cross one. Owner, group, and
-permissions must match, because one inode has one set of them and linking would silently
-change the target's — a mismatch is `metadata-incompatible`. Then both files are read in
-full and compared byte for byte; anything else is `content-changed`. The digests that
+permissions, ACLs, and extended attributes must match, because one inode has one set
+of them and linking would silently change the target's — a mismatch or an unreadable
+attribute is `metadata-incompatible`. Attributes are compared through the pinned
+descriptors, one bounded attribute value at a time. Then both files are read in
+full and compared byte for byte, with cancellation between bounded reads; anything
+else is `content-changed`. The digests that
 grouped these files said they were probably identical, and probably is not a basis for
 releasing somebody's only copy of something.
 
@@ -123,6 +136,9 @@ old inode and the step that cannot be taken back. The reviewed name never points
 nothing: before the exchange it holds the old inode, after it the kept one. A filesystem
 that cannot exchange two names atomically is refused with `unsupported-filesystem` rather
 than served by a sequence with a window where the name is gone.
+Before releasing the exchanged-out inode, the helper repeats the identity,
+ownership, permissions, ACL, and extended-attribute checks. A change after comparison
+is exchanged back instead of being released.
 
 A completed item reports the bytes it freed, which is zero when the replaced file had
 another name of its own: only the last name to an inode frees anything. The result's

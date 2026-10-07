@@ -279,12 +279,20 @@ export function wrap(text: string, width: number): string[] {
       let rest = word;
       while (cellWidth(rest) > width) {
         const head = sliceCells(rest, width);
+        if (head === "") {
+          // A two-cell grapheme cannot fit a one-cell line. Consume it whole
+          // and show a replacement rather than looping forever on it.
+          const first = segmenter.segment(rest)[Symbol.iterator]().next().value?.segment ?? "";
+          lines.push("?");
+          rest = rest.slice(first.length);
+          continue;
+        }
         lines.push(head);
         rest = rest.slice(head.length);
       }
       line = rest;
     }
-    lines.push(line);
+    if (line !== "" || paragraph.trim() === "") lines.push(line);
   }
   return lines;
 }

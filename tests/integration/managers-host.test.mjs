@@ -14,6 +14,11 @@ function sudoNeedsAPassword() {
 }
 
 test("a root command with no terminal to ask for a password is denied, and nothing runs", async (t) => {
+  const { resolveTrustedExecutable } = await import("../../dist/platform/linux/process.js");
+  if (await resolveTrustedExecutable("journalctl") === undefined) {
+    t.skip("journalctl is absent here, so there is no command to ask sudo to run");
+    return;
+  }
   if (!sudoNeedsAPassword()) {
     t.skip("sudo is absent here or runs without a password, so a refusal cannot be observed");
     return;
@@ -36,6 +41,32 @@ async function hostPorts() {
     paths: createPathProbe(),
     installed: async (tool) => (await resolveTrustedExecutable(tool)) !== undefined,
   };
+}
+
+for (const manager of ["apt", "dnf"]) {
+  test(`${manager}'s real cache returns bounded valid items or an explicit permission denial`, async (t) => {
+    const { createPackageCacheAdapters } = await import("../../dist/platform/linux/managers/package-cache.js");
+    const { MANAGER_ACTIONS } = await import("../../dist/domain/managers.js");
+    const adapter = createPackageCacheAdapters(await hostPorts()).find((candidate) => candidate.id === manager);
+    const discovery = await adapter.discover();
+    if (discovery.capability.status === "missing-tool") {
+      t.skip(`${manager} is not installed here`);
+      return;
+    }
+    if (discovery.capability.status === "permission-denied") {
+      assert.deepEqual(discovery.proposals, []);
+      assert.match(discovery.capability.explanation, /read|denied|permission|EACCES/i);
+      return;
+    }
+    assert.equal(discovery.capability.status, "available");
+    for (const proposal of discovery.proposals) {
+      const template = MANAGER_ACTIONS[proposal.action];
+      assert.ok(proposal.items.length <= template.maxItems);
+      assert.equal(new Set(proposal.items.map((item) => item.id)).size, proposal.items.length);
+      assert.ok(proposal.estimatedBytes >= 0n);
+      for (const item of proposal.items) assert.match(item.id, template.itemPattern);
+    }
+  });
 }
 
 test("pacman's cache on this host is read, and every offered item is a name Disktop would hand it", async (t) => {
@@ -123,12 +154,19 @@ test("this host's kernels are judged by its own package manager, and the running
 
 test("this host's tmpfiles policies are previewed by dry run and nothing is cleaned", async (t) => {
   const { createTmpfilesAdapter } = await import("../../dist/platform/linux/managers/tmpfiles.js");
+  const { createManagerInventory } = await import("../../dist/platform/linux/managers/index.js");
   const ports = await hostPorts();
-  const discovery = await createTmpfilesAdapter(ports).discover();
+  const [discovery] = await createManagerInventory([createTmpfilesAdapter(ports)]).discover();
   if (discovery.capability.status === "missing-tool") {
     t.skip("systemd-tmpfiles is not installed here");
     return;
   }
+  if (discovery.capability.status === "permission-denied") {
+    assert.deepEqual(discovery.proposals, [], "an unreadable policy never authorizes cleanup");
+    assert.match(discovery.capability.explanation, /read|denied|permission|EACCES/i);
+    return;
+  }
+  assert.equal(discovery.capability.status, "available");
   assert.equal(discovery.proposals.length, 3);
   for (const proposal of discovery.proposals) {
     assert.ok(["simulated", "none"].includes(proposal.preview));

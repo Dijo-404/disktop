@@ -17,8 +17,11 @@ const INSTALLATIONS: readonly { readonly flag: "--user" | "--system"; readonly a
 export function createFlatpakAdapter(ports: FlatpakPorts): ManagerAdapter {
   const before = new Map<string, ReadonlySet<string> | undefined>();
 
-  async function refs(flag: "--user" | "--system"): Promise<ReadonlySet<string> | undefined> {
-    const answer = await ports.tools.run("flatpak", ["list", flag, "--columns=ref"]);
+  async function refs(flag: "--user" | "--system", signal?: AbortSignal, reportDenied = false): Promise<ReadonlySet<string> | undefined> {
+    signal?.throwIfAborted();
+    const answer = await ports.tools.run("flatpak", ["list", flag, "--columns=ref"], signal);
+    signal?.throwIfAborted();
+    if (reportDenied && answer.capability.status === "permission-denied") throw Object.assign(new Error(answer.capability.explanation), { code: "EACCES" });
     if (answer.capability.status !== "available") {
       return undefined;
     }
@@ -30,10 +33,10 @@ export function createFlatpakAdapter(ports: FlatpakPorts): ManagerAdapter {
     );
   }
 
-  async function discover(): Promise<ManagerDiscovery> {
+  async function discover(signal?: AbortSignal): Promise<ManagerDiscovery> {
     const proposals: ManagerProposal[] = [];
     for (const installation of INSTALLATIONS) {
-      const installed = await refs(installation.flag);
+      const installed = await refs(installation.flag, signal, true);
       if (installed === undefined) {
         continue;
       }
@@ -69,9 +72,9 @@ export function createFlatpakAdapter(ports: FlatpakPorts): ManagerAdapter {
   return {
     id: "flatpak",
     discover,
-    preview: (action) => previewFrom(discover, action),
-    async preflight(scope) {
-      before.set(scope.action, await refs(flagFor(scope.action)));
+    preview: (action, _parameters, signal) => previewFrom(discover, action, signal),
+    async preflight(scope, signal) {
+      before.set(scope.action, await refs(flagFor(scope.action), signal));
       return { skipped: new Map() };
     },
     async verify(scope) {

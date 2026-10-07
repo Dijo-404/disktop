@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, rm, truncate, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
@@ -30,4 +30,19 @@ test("explore joins owner totals to names and says whether names were read", asy
   const outcome = await service.page({ scanId: "scan-1", includeOwnerTotals: true });
   assert.deepEqual(outcome.page.owners, [{ ownerId: 1000n, name: "alice", entries: 1n, allocatedBytes: 1n, apparentBytes: 1n }]);
   assert.equal(outcome.page.namesRead, true);
+});
+
+test("an oversized sparse account database is read only through its bounded prefix", async () => {
+  const root = await mkdtemp(join(tmpdir(), "disktop-passwd-"));
+  try {
+    const file = join(root, "passwd");
+    await writeFile(file, "root:x:0:0::/root:/bin/sh\nalice:x:1000:1000::/home/alice:/bin/sh\n");
+    // Larger than Node's whole-file Buffer limit without allocating the data.
+    await truncate(file, 5 * 1024 * 1024 * 1024);
+    const names = await createAccountNames(file).names();
+    assert.deepEqual([...names], [[0n, "root"], [1000n, "alice"]]);
+    assert.deepEqual([...await createAccountNames(root).names()], []);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
 });

@@ -7,6 +7,7 @@ import {
   type FindingCategory,
 } from "../domain/findings.js";
 import type { Capability, RawPath, Warning } from "../domain/models.js";
+import { sanitizeText } from "../domain/paths.js";
 import type {
   DiscoveryEnvironment,
   FindingProvider,
@@ -81,9 +82,21 @@ export function createFootprintService(
       const warnings: Warning[] = [];
       const found: Finding[] = [];
       let complete = true;
+      // Every detector's query belongs to this discovery task, including its
+      // capability probe. The immutable wrapper keeps simultaneous requests
+      // independent and means a provider cannot forget to carry cancellation.
+      const scopedEnvironment: DiscoveryEnvironment = {
+        ...environment,
+        tools: { run: (name, args) => environment.tools.run(name, args, signal) },
+        index: {
+          directoriesNamed: (names, limit) => environment.index.directoriesNamed(names, limit, signal),
+          ownerTotals: (limit) => environment.index.ownerTotals(limit, signal),
+          entriesUnder: (root, limit) => environment.index.entriesUnder(root, limit, signal),
+        },
+      };
 
       const outcomes = await mapWithLimit(selected, CONCURRENCY, signal, (provider) =>
-        ask(provider, environment, signal),
+        ask(provider, scopedEnvironment, signal),
       );
       for (const outcome of outcomes) {
         if (outcome === undefined) {
@@ -109,7 +122,7 @@ export function createFootprintService(
       );
       const measurement = request.measureSizes
         ? await measure(merged.kept, footprints, signal)
-        : { findings: merged.kept, warnings: [], measured: true };
+        : { findings: merged.kept, warnings: [], measured: true, complete: true };
 
       return summarize({
         findings: measurement.findings,
@@ -117,7 +130,7 @@ export function createFootprintService(
         warnings: [...warnings, ...measurement.warnings],
         // Sizes that were asked for and could not be established are a short
         // answer, not a complete one. Sizes nobody asked for are neither.
-        complete: complete && measurement.measured,
+        complete: complete && measurement.complete,
         measured: request.measureSizes && measurement.measured,
         selected,
       });
@@ -133,7 +146,7 @@ async function ask(
 ): Promise<{ report: ProviderReport; findings: readonly Finding[]; warnings: readonly Warning[] }> {
   let capability: Capability;
   try {
-    capability = await provider.probe(environment);
+    capability = await provider.probe(environment, signal);
   } catch (error) {
     return failed(provider, error, "could not be probed");
   }
@@ -186,18 +199,20 @@ function failed(
   error: unknown,
   what: string,
 ): { report: ProviderReport; findings: readonly Finding[]; warnings: readonly Warning[] } {
-  const detail = error instanceof Error ? error.message : "unknown error";
+  const detail = sanitizeText(error instanceof Error ? error.message : "unknown error");
+  const code = typeof error === "object" && error !== null ? (error as NodeJS.ErrnoException).code : undefined;
+  const denied = code === "EACCES" || code === "EPERM";
   return {
     report: {
       providerId: provider.id,
       version: provider.version,
-      capability: { status: "available", explanation: `${provider.id} ${what} and reported nothing.` },
+      capability: { status: denied ? "permission-denied" : "available", explanation: `${provider.id} ${what} and reported nothing: ${detail}` },
       findings: 0,
       complete: false,
       ran: false,
     },
     findings: [],
-    warnings: [{ code: "provider-failed", message: `${provider.id} ${what}: ${detail}` }],
+    warnings: [{ code: denied ? "provider-denied" : "provider-failed", message: `${provider.id} ${what}: ${detail}` }],
   };
 }
 
@@ -211,7 +226,7 @@ async function measure(
   findings: readonly Finding[],
   footprints: FootprintPort,
   signal: AbortSignal,
-): Promise<{ findings: readonly Finding[]; warnings: readonly Warning[]; measured: boolean }> {
+): Promise<{ findings: readonly Finding[]; warnings: readonly Warning[]; measured: boolean; complete: boolean }> {
   const wanted = new Map<string, RawPath>();
   for (const finding of findings) {
     if (finding.size.basis !== "unknown") {
@@ -223,7 +238,7 @@ async function measure(
   }
 
   if (wanted.size === 0) {
-    return { findings, warnings: [], measured: true };
+    return { findings, warnings: [], measured: true, complete: true };
   }
 
   const reading = await footprints.measure([...wanted.values()], signal);
@@ -231,6 +246,7 @@ async function measure(
     reading.measurements.map((measurement) => [measurement.path.bytesBase64, measurement]),
   );
   const anyMeasured = reading.measurements.some((measurement) => measurement.bytes !== undefined);
+  const unmeasured = [...wanted.values()].filter((path) => byPath.get(path.bytesBase64)?.bytes === undefined);
 
   return {
     findings: findings.map((finding) => {
@@ -249,8 +265,11 @@ async function measure(
         size: { bytes: total, basis: first.basis, explanation: first.explanation },
       };
     }),
-    warnings: reading.warnings,
+    warnings: unmeasured.length > 0 && reading.warnings.length === 0
+      ? [{ code: "measurement-incomplete", message: `${unmeasured.length} requested footprint(s) could not be measured; their sizes remain unknown.`, ...(unmeasured.length === 1 ? { path: unmeasured[0] as RawPath } : {}) }]
+      : reading.warnings,
     measured: anyMeasured,
+    complete: unmeasured.length === 0,
   };
 }
 
