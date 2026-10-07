@@ -76,8 +76,10 @@ export function isNetworkFilesystem(type: string): boolean {
  * It is real storage but read-only and already counted inside its backing file,
  * so counting it again would double-count the same bytes.
  */
-export function isLoopImage(type: string, source: string): boolean {
-  return type === "squashfs" || type === "erofs" || source.startsWith("/dev/loop");
+export function isLoopImage(source: string): boolean {
+  // Compressed read-only filesystems can also live directly on a real disk
+  // (a live USB or an appliance root). Their type does not make them a loop image.
+  return source.startsWith("/dev/loop");
 }
 
 /** Windows drives surfaced inside WSL, which are excluded from scans by default. */

@@ -47,7 +47,7 @@ export type ExploreOutcome =
   | { readonly kind: "unavailable"; readonly capability: Capability };
 
 export interface ExploreService {
-  page(request: ExploreRequest): Promise<ExploreOutcome>;
+  page(request: ExploreRequest, signal?: AbortSignal): Promise<ExploreOutcome>;
 }
 
 /**
@@ -59,7 +59,8 @@ export interface ExploreService {
  */
 export function createExploreService(index: FileIndexPort, accounts?: AccountNamesPort): ExploreService {
   return {
-    async page(request) {
+    async page(request, signal) {
+      signal?.throwIfAborted();
       const query: EntryQuery = {
         scanId: request.scanId,
         filter: request.filter ?? {},
@@ -72,8 +73,10 @@ export function createExploreService(index: FileIndexPort, accounts?: AccountNam
       };
 
       try {
-        const page = await index.query(query);
+        const page = await index.query(query, signal);
+        signal?.throwIfAborted();
         const names = page.ownerTotals === undefined ? undefined : await (accounts?.names() ?? new Map<bigint, string>());
+        signal?.throwIfAborted();
         return {
           kind: "page",
           page: {

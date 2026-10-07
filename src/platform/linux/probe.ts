@@ -1,5 +1,5 @@
 import { constants } from "node:fs";
-import { lstat, open, readdir } from "node:fs/promises";
+import { lstat, open, opendir } from "node:fs/promises";
 import { pathBytes, rawPathFromBytes } from "../../domain/paths.js";
 import { allocatedBytesFromBlocks } from "../../domain/sizes.js";
 import type { PathFacts, PathProbe } from "../../ports/providers.js";
@@ -12,10 +12,9 @@ const MAX_ENTRIES = 4096;
 /**
  * Read-only questions about paths a detector already knows the names of.
  *
- * Every call resolves the path's bytes, never its display text, and every
- * failure is an absent answer rather than an exception: a provider asking
- * whether `~/.cargo/registry` exists should not have to catch EACCES to find
- * out that it cannot tell.
+ * Every call resolves the path's bytes, never its display text. Missing paths
+ * are absent answers; denied and failed reads propagate so discovery cannot
+ * mistake data it could not inspect for an empty directory.
  */
 export function createPathProbe(): PathProbe {
   return {
@@ -34,22 +33,36 @@ export function createPathProbe(): PathProbe {
           inode: reading.ino,
           mountId: reading.dev.toString(10),
         } satisfies PathFacts;
-      } catch {
-        return undefined;
+      } catch (error) {
+        if (isAbsent(error)) return undefined;
+        throw error;
       }
     },
 
     async list(path) {
-      let names: Buffer[];
+      const names: Buffer[] = [];
       try {
-        names = await readdir(Buffer.from(pathBytes(path)), { encoding: "buffer" });
-      } catch {
-        return [];
+        // Node supports byte names here; @types/node types this option as text
+        // encodings only. Validate the returned name instead of trusting its type.
+        const directory = await opendir(Buffer.from(pathBytes(path)), { encoding: "buffer" as BufferEncoding, bufferSize: 32 });
+        try {
+          for (;;) {
+            const entry = await directory.read();
+            if (entry === null) break;
+            const name: unknown = entry.name;
+            if (!Buffer.isBuffer(name)) throw new Error("The directory reader did not preserve raw name bytes");
+            retainName(names, name);
+          }
+        } finally {
+          await directory.close();
+        }
+      } catch (error) {
+        if (isAbsent(error)) return [];
+        throw error;
       }
       const prefix = withTrailingSlash(pathBytes(path));
       return names
         .sort(Buffer.compare)
-        .slice(0, MAX_ENTRIES)
         .map((name) => rawPathFromBytes(new Uint8Array(Buffer.concat([prefix, name]))));
     },
 
@@ -66,8 +79,9 @@ export function createPathProbe(): PathProbe {
       let handle;
       try {
         handle = await open(Buffer.from(pathBytes(path)), constants.O_RDONLY | constants.O_NONBLOCK);
-      } catch {
-        return undefined;
+      } catch (error) {
+        if (isAbsent(error)) return undefined;
+        throw error;
       }
       try {
         if (!(await handle.stat()).isFile()) {
@@ -83,13 +97,48 @@ export function createPathProbe(): PathProbe {
           filled += bytesRead;
         }
         return buffer.subarray(0, filled).toString("utf8");
-      } catch {
-        return undefined;
+      } catch (error) {
+        if (isAbsent(error)) return undefined;
+        throw error;
       } finally {
         await handle.close();
       }
     },
   };
+}
+
+/** A missing parent or a parent that is not a directory means this path is absent. */
+function isAbsent(error: unknown): boolean {
+  const code = (error as NodeJS.ErrnoException).code;
+  return code === "ENOENT" || code === "ENOTDIR";
+}
+
+/** Retain the same first sorted names as readdir+sort without retaining the full directory. */
+function retainName(heap: Buffer[], name: Buffer): void {
+  if (heap.length < MAX_ENTRIES) {
+    heap.push(name);
+    let index = heap.length - 1;
+    while (index > 0) {
+      const parent = (index - 1) >> 1;
+      if (Buffer.compare(heap[parent] as Buffer, name) >= 0) break;
+      heap[index] = heap[parent] as Buffer;
+      index = parent;
+    }
+    heap[index] = name;
+    return;
+  }
+  if (Buffer.compare(name, heap[0] as Buffer) >= 0) return;
+  let index = 0;
+  for (;;) {
+    const left = index * 2 + 1;
+    if (left >= heap.length) break;
+    const right = left + 1;
+    const largest = right < heap.length && Buffer.compare(heap[right] as Buffer, heap[left] as Buffer) > 0 ? right : left;
+    if (Buffer.compare(name, heap[largest] as Buffer) >= 0) break;
+    heap[index] = heap[largest] as Buffer;
+    index = largest;
+  }
+  heap[index] = name;
 }
 
 interface ModeReading {

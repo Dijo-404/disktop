@@ -14,6 +14,7 @@ export interface BlockDevice {
   readonly major: number | undefined;
   readonly minor: number | undefined;
   readonly parentName: string | undefined;
+  readonly parentNames: readonly string[];
   /** The node under `/dev`, which is how a mount names its source. */
   readonly path: string | undefined;
   /** The signature lsblk found on the device, such as `ext4` or `crypto_LUKS`. */
@@ -33,14 +34,14 @@ export interface LsblkResult {
 /** Asked for by name so a future lsblk column order cannot shift a value. */
 export const LSBLK_COLUMNS = "NAME,KNAME,PATH,TYPE,SIZE,ROTA,RM,MODEL,TRAN,MAJ:MIN,PKNAME,FSTYPE,LABEL,PARTTYPE,MOUNTPOINT";
 
-export const LSBLK_ARGUMENTS: readonly string[] = ["--json", "--bytes", "--output", LSBLK_COLUMNS];
+export const LSBLK_ARGUMENTS: readonly string[] = ["--all", "--json", "--bytes", "--output", LSBLK_COLUMNS];
 
 /**
  * Flatten `lsblk`'s nested tree into one row per block device.
  *
- * `--bytes` writes sizes as JSON numbers, which an IEEE 754 double can only
- * represent exactly below 2^53. A larger value is refused with a warning rather
- * than silently rounded, because every byte count Disktop reports is exact.
+ * `--bytes` writes sizes as JSON numbers. The supported Node runtimes expose
+ * each primitive's original token to the reviver, so SIZE is preserved before
+ * an IEEE 754 double rounds it. Other fields retain their usual JSON types.
  */
 export function parseLsblk(source: string): LsblkResult {
   const devices: BlockDevice[] = [];
@@ -48,7 +49,9 @@ export function parseLsblk(source: string): LsblkResult {
 
   let document: unknown;
   try {
-    document = JSON.parse(source);
+    document = JSON.parse(source, (key: string, value: unknown, context?: { readonly source?: string }) =>
+      key === "size" && typeof value === "number" && context?.source !== undefined ? context.source : value,
+    );
   } catch {
     return {
       devices: [],
@@ -63,12 +66,22 @@ export function parseLsblk(source: string): LsblkResult {
     };
   }
 
-  visit(document["blockdevices"], undefined, devices, warnings);
-  return { devices, warnings };
+  visit(document["blockdevices"], devices, warnings);
+  const unique = new Map<string, BlockDevice>();
+  for (const device of devices) {
+    const earlier = unique.get(device.kernelName);
+    unique.set(device.kernelName, earlier === undefined ? device : {
+      ...earlier,
+      parentNames: [...new Set([...earlier.parentNames, ...device.parentNames])],
+    });
+  }
+  return { devices: [...unique.values()], warnings };
 }
 
-function visit(rows: readonly unknown[], parentName: string | undefined, devices: BlockDevice[], warnings: Warning[]): void {
-  for (const row of rows) {
+function visit(rows: readonly unknown[], devices: BlockDevice[], warnings: Warning[]): void {
+  const pending = rows.map((row) => ({ row, parentName: undefined as string | undefined })).reverse();
+  while (pending.length > 0) {
+    const { row, parentName } = pending.pop() as { row: unknown; parentName: string | undefined };
     if (!isRecord(row)) {
       continue;
     }
@@ -78,6 +91,8 @@ function visit(rows: readonly unknown[], parentName: string | undefined, devices
       warnings.push({ code: "lsblk-unnamed-device", message: "An lsblk row has no name and was skipped." });
       continue;
     }
+    const kernelName = text(row["kname"]) ?? name;
+    const parents = [...new Set([text(row["pkname"]), parentName].filter((parent): parent is string => parent !== undefined))];
 
     const size = exactBytes(row["size"]);
     if (size === undefined) {
@@ -89,7 +104,7 @@ function visit(rows: readonly unknown[], parentName: string | undefined, devices
       const deviceNumber = splitDeviceNumber(text(row["maj:min"]));
       devices.push({
         name,
-        kernelName: text(row["kname"]) ?? name,
+        kernelName,
         type: text(row["type"]) ?? "unknown",
         sizeBytes: size,
         rotational: tristateBoolean(row["rota"]),
@@ -98,7 +113,8 @@ function visit(rows: readonly unknown[], parentName: string | undefined, devices
         transport: text(row["tran"]),
         major: deviceNumber?.major,
         minor: deviceNumber?.minor,
-        parentName: text(row["pkname"]) ?? parentName,
+        parentName: parents[0],
+        parentNames: parents,
         path: text(row["path"]),
         filesystemType: text(row["fstype"]),
         label: text(row["label"]),
@@ -109,7 +125,9 @@ function visit(rows: readonly unknown[], parentName: string | undefined, devices
 
     const children = row["children"];
     if (Array.isArray(children)) {
-      visit(children, name, devices, warnings);
+      for (let index = children.length - 1; index >= 0; index -= 1) {
+        pending.push({ row: children[index], parentName: kernelName });
+      }
     }
   }
 }

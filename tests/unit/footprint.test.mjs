@@ -80,6 +80,19 @@ function run(providers, request = { measureSizes: true }, footprints = measuring
   return service.discover(request, new AbortController().signal);
 }
 
+test("denied path probes and discovery reads stay denied and make the result incomplete", async () => {
+  for (const phase of ["probe", "discover"]) {
+    const detector = provider("cache.language", AVAILABLE, EMPTY);
+    detector[phase] = async () => { throw Object.assign(new Error("Permission denied\u001b[2J"), { code: "EACCES" }); };
+    const summary = await run([detector]);
+    assert.equal(summary.complete, false);
+    assert.equal(summary.providers[0].capability.status, "permission-denied");
+    assert.equal(summary.providers[0].ran, false);
+    assert.equal(summary.warnings[0].code, "provider-denied");
+    assert.doesNotMatch(summary.warnings[0].message, /\u001b/);
+  }
+});
+
 test("every provider is listed, including the ones that could not look", async () => {
   const summary = await run([
     provider("cache.language", AVAILABLE, { findings: [finding({})], warnings: [], complete: true }),
@@ -319,6 +332,27 @@ test("a measurement that found nothing makes the whole result incomplete", async
   assert.equal(summary.complete, false, "sizes were asked for and none were established");
 });
 
+test("one measured footprint cannot make an unknown footprint a complete discovery", async () => {
+  const summary = await run([
+    provider("cache.language", AVAILABLE, {
+      findings: [finding({}), finding({ id: "storage.models:models", paths: [MODELS] })], warnings: [], complete: true,
+    }),
+  ], { measureSizes: true }, {
+    async measure(paths) {
+      return {
+        measurements: paths.map((path) => path.bytesBase64 === CACHE.bytesBase64
+          ? { path, bytes: 4096n, basis: "measured-allocated", explanation: "Measured" }
+          : { path, basis: "unknown", explanation: "The row could not be read" }),
+        warnings: [],
+      };
+    },
+  });
+  assert.equal(summary.measured, true, "the successful measurement remains reported");
+  assert.equal(summary.complete, false, "completion requires every requested footprint");
+  assert.equal(summary.findings.find((item) => item.id === "storage.models:models").size.basis, "unknown");
+  assert.ok(summary.warnings.some((warning) => warning.code === "measurement-incomplete" && warning.path.bytesBase64 === MODELS.bytesBase64));
+});
+
 test("skipping measurement on purpose leaves the result complete", async () => {
   const summary = await run(
     [provider("cache.language", AVAILABLE, { findings: [finding({})], warnings: [], complete: true })],
@@ -385,4 +419,24 @@ test("a category filter narrows the findings of a provider that spans several ca
   const summary = await service.discover({ measureSizes: false, categories: ["log"] }, new AbortController().signal);
   assert.deepEqual(summary.findings.map((entry) => entry.id), ["managers:journald.vacuum"]);
   assert.deepEqual(summary.categoryTotals.map((total) => total.category), ["log"]);
+});
+
+test("every provider query receives its discovery task's cancellation signal", async () => {
+  const controller = new AbortController();
+  const env = environment();
+  const seen = [];
+  env.tools = { async run(name, args, signal) {
+    seen.push(signal);
+    return { capability: AVAILABLE, stdout: "", stderr: "", exitCode: 0 };
+  } };
+  const querying = {
+    id: "querying", version: 1, categories: ["language-cache"],
+    async probe(current) { return (await current.tools.run("probe", [])).capability; },
+    async discover(current) { await current.tools.run("discover", []); return EMPTY; },
+  };
+  const service = createFootprintService([querying], env, measuring);
+  const result = await service.discover({ measureSizes: false }, controller.signal);
+  assert.equal(result.complete, true);
+  assert.deepEqual(seen, [controller.signal, controller.signal], "probe and discovery both carry cancellation");
+  assert.notEqual(env.tools.run, undefined, "the shared environment remains usable by another request");
 });

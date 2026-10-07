@@ -235,19 +235,19 @@ function capacitySection(report: Report, size: Size): string[] {
     }
     parts.push("</tbody></table></div>");
   }
-  if (capacity.unmounted.length > 0) {
+  if (capacity.volumes.length > 0) {
     parts.push(
-      "<h3>Not mounted</h3>",
+      "<h3>Partitions and volumes</h3>",
       '<div class="table-wrap"><table>',
-      "<caption>Partitions holding data, and locked encrypted containers, that nothing has mounted. How full they are is unknown until they are mounted.</caption>",
+      "<caption>All persistent partitions, including firmware, recovery and swap. Usage requires a readable mount; an unknown signature does not imply an empty volume.</caption>",
       '<thead><tr><th>Device</th><th>Type</th><th class="num">Size</th><th>State</th><th>Label</th><th>On disk</th></tr></thead>',
       "<tbody>",
     );
-    for (const volume of capacity.unmounted) {
+    for (const volume of capacity.volumes) {
       parts.push(
-        `<tr><td class="path">${escapeHtml(volume.devicePath)}</td><td>${escapeHtml(volume.filesystemType)}</td><td class="num">${size(volume.sizeBytes)}</td><td>${
-          volume.state === "locked" ? '<span class="flag">encrypted, locked</span>' : "not mounted"
-        }</td><td>${escapeHtml(volume.label ?? "")}</td><td>${escapeHtml(volume.deviceId)}</td></tr>`,
+        `<tr><td class="path">${escapeHtml(volume.devicePath)}</td><td>${escapeHtml(volume.filesystemType ?? "unknown")}</td><td class="num">${size(volume.sizeBytes)}</td><td>${escapeHtml(
+          volume.state === "unmounted" ? "not mounted" : volume.state,
+        )}</td><td>${escapeHtml(volume.label ?? "")}</td><td>${escapeHtml(volume.deviceIds.join(", "))}</td></tr>`,
       );
     }
     parts.push("</tbody></table></div>");

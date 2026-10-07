@@ -25,9 +25,9 @@ interface Installed {
 
 interface Family {
   readonly action: ManagerActionId;
-  readonly list: () => Promise<readonly Installed[] | undefined>;
+  readonly list: (signal?: AbortSignal) => Promise<readonly Installed[] | undefined>;
   /** What else would go, or undefined when the simulation could not run. */
-  readonly simulate: (names: readonly string[]) => Promise<{ readonly extra: readonly string[] } | undefined>;
+  readonly simulate: (names: readonly string[], signal?: AbortSignal) => Promise<{ readonly extra: readonly string[] } | undefined>;
 }
 
 const DPKG_FORMAT = "-f=${Package}\t${Status}\t${Installed-Size}\n";
@@ -60,8 +60,10 @@ export function compareReleases(left: string, right: string): number {
 export function createKernelAdapter(ports: KernelPorts): ManagerAdapter {
   const debian: Family = {
     action: "kernels.dpkg-purge",
-    async list() {
-      const answer = await ports.tools.run("dpkg-query", ["-W", DPKG_FORMAT]);
+    async list(signal) {
+      signal?.throwIfAborted();
+      const answer = await ports.tools.run("dpkg-query", ["-W", DPKG_FORMAT], signal);
+      signal?.throwIfAborted();
       if (answer.capability.status !== "available") {
         return undefined;
       }
@@ -83,8 +85,10 @@ export function createKernelAdapter(ports: KernelPorts): ManagerAdapter {
       }
       return packages;
     },
-    async simulate(names) {
-      const answer = await ports.tools.run("apt-get", ["-s", "purge", ...names]);
+    async simulate(names, signal) {
+      signal?.throwIfAborted();
+      const answer = await ports.tools.run("apt-get", ["-s", "purge", ...names], signal);
+      signal?.throwIfAborted();
       if (answer.capability.status !== "available") {
         return undefined;
       }
@@ -95,8 +99,10 @@ export function createKernelAdapter(ports: KernelPorts): ManagerAdapter {
 
   const fedora: Family = {
     action: "kernels.rpm-erase",
-    async list() {
-      const answer = await ports.tools.run("rpm", ["-qa", "--qf", RPM_FORMAT]);
+    async list(signal) {
+      signal?.throwIfAborted();
+      const answer = await ports.tools.run("rpm", ["-qa", "--qf", RPM_FORMAT], signal);
+      signal?.throwIfAborted();
       if (answer.capability.status !== "available") {
         return undefined;
       }
@@ -114,8 +120,10 @@ export function createKernelAdapter(ports: KernelPorts): ManagerAdapter {
       }
       return packages;
     },
-    async simulate(names) {
-      const answer = await ports.tools.run("rpm", ["-e", "--test", "--", ...names]);
+    async simulate(names, signal) {
+      signal?.throwIfAborted();
+      const answer = await ports.tools.run("rpm", ["-e", "--test", "--", ...names], signal);
+      signal?.throwIfAborted();
       if (answer.capability.status === "available" && answer.stderr.trim() === "") {
         return { extra: [] };
       }
@@ -171,12 +179,13 @@ export function createKernelAdapter(ports: KernelPorts): ManagerAdapter {
       .sort((left, right) => (left.name < right.name ? -1 : left.name > right.name ? 1 : 0));
   }
 
-  async function discover(): Promise<ManagerDiscovery> {
+  async function discover(signal?: AbortSignal): Promise<ManagerDiscovery> {
+    signal?.throwIfAborted();
     const chosen = await family();
     if ("adapter" in chosen) {
       return chosen;
     }
-    const packages = await chosen.list();
+    const packages = await chosen.list(signal);
     if (packages === undefined) {
       return {
         adapter: "kernels",
@@ -192,7 +201,7 @@ export function createKernelAdapter(ports: KernelPorts): ManagerAdapter {
       return { adapter: "kernels", capability: { status: "available", explanation: "Only the running and the newest kernel are installed." }, proposals: [], warnings: [] };
     }
     const names = candidates.map((entry) => entry.name);
-    const simulation = await chosen.simulate(names);
+    const simulation = await chosen.simulate(names, signal);
     const items: ManagerItem[] = candidates.map((entry) => (entry.bytes === undefined ? { id: entry.name } : { id: entry.name, bytes: entry.bytes }));
     const measured = items.every((item) => item.bytes !== undefined);
     const bounded = simulation !== undefined && simulation.extra.length === 0;
@@ -230,8 +239,9 @@ export function createKernelAdapter(ports: KernelPorts): ManagerAdapter {
   return {
     id: "kernels",
     discover,
-    preview: (action) => previewFrom(discover, action),
-    async preflight(scope: ManagerScope): Promise<PreflightResult> {
+    preview: (action, _parameters, signal) => previewFrom(discover, action, signal),
+    async preflight(scope: ManagerScope, signal): Promise<PreflightResult> {
+      signal?.throwIfAborted();
       const running = ports.runningRelease();
       const names = scope.items.map((item) => item.id);
       if (names.some((name) => name.endsWith(`-${running}`) || name === `linux-image-${running}`)) {
@@ -241,7 +251,7 @@ export function createKernelAdapter(ports: KernelPorts): ManagerAdapter {
       if ("adapter" in chosen) {
         return { refusal: chosen.capability.explanation, skipped: new Map() };
       }
-      const packages = await chosen.list();
+      const packages = await chosen.list(signal);
       if (packages === undefined) {
         return { refusal: "The package database could not be read, so nothing was run.", skipped: new Map() };
       }
@@ -253,7 +263,7 @@ export function createKernelAdapter(ports: KernelPorts): ManagerAdapter {
           skipped: new Map(),
         };
       }
-      const simulation = await chosen.simulate(names);
+      const simulation = await chosen.simulate(names, signal);
       if (simulation === undefined || simulation.extra.length > 0) {
         return { refusal: "What removing these would take has changed since review, so nothing was run.", skipped: new Map() };
       }

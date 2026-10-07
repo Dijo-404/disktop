@@ -111,7 +111,7 @@ export function createPlanService(dependencies: PlanDependencies): PlanService {
   return {
     async plan(request, signal) {
       if (request.operation === "manager") {
-        return planManager(dependencies, request);
+        return planManager(dependencies, request, signal);
       }
       if (!GENERIC_OPERATIONS.includes(request.operation)) {
         return refuse("not-implemented", `Disktop cannot plan a '${request.operation}' action yet.`);
@@ -329,7 +329,8 @@ const MANAGER_PREFIX = "managers:";
 export const ROOT_REFUSAL =
   "Disktop is running as root, where it reads everything and changes no file itself. Run it as the user who owns these files; only a reviewed manager action runs as root.";
 
-async function planManager(dependencies: PlanDependencies, request: PlanRequest): Promise<PlanOutcome> {
+async function planManager(dependencies: PlanDependencies, request: PlanRequest, signal: AbortSignal): Promise<PlanOutcome> {
+  if (signal.aborted) return refuse("cancelled", "Manager planning was cancelled; nothing was planned.");
   if (
     request.path !== undefined ||
     request.destination !== undefined ||
@@ -350,7 +351,8 @@ async function planManager(dependencies: PlanDependencies, request: PlanRequest)
   if (dependencies.managers === undefined) {
     return refuse("not-implemented", "No manager adapter is available in this build.");
   }
-  const preview = await dependencies.managers.preview(action, {});
+  const preview = await dependencies.managers.preview(action, {}, signal);
+  if (signal.aborted) return refuse("cancelled", "Manager planning was cancelled; nothing was planned.");
   if (preview.kind === "refused") {
     return refuse(preview.capability === undefined ? "invalid-plan" : "unsupported", preview.message);
   }

@@ -15,7 +15,8 @@
 //! number in this protocol. The helper has no calendar and Node already
 //! formats timestamps for the public JSON.
 
-use rusqlite::{Connection, OptionalExtension, params};
+use rusqlite::{Connection, OpenFlags, OptionalExtension, params};
+use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
 use std::path::{Path, PathBuf};
 
 pub const JOURNAL_FILE: &str = "journal-v1.sqlite";
@@ -221,6 +222,7 @@ pub struct JournalPage {
 
 pub struct Journal {
     connection: Connection,
+    _directory: OwnedFd,
     /// Actions this handle began and has not finished. Dropping the handle
     /// without finishing them is what an abandoned action looks like from
     /// inside the process, so they stop counting as in flight then.
@@ -266,12 +268,36 @@ impl Journal {
     /// index next door can afford `NORMAL` because every row in it can be
     /// produced again by scanning; nothing here can.
     pub fn open(directory: &Path) -> rusqlite::Result<Journal> {
-        if let Err(error) = std::fs::create_dir_all(directory) {
-            return Err(rusqlite::Error::ToSqlConversionFailure(Box::new(error)));
-        }
-        make_private(directory, 0o700);
+        let held = private_directory(directory).map_err(sqlite_io_failure)?;
         let path = journal_path(directory);
-        let connection = Connection::open(&path)?;
+        let name = JOURNAL_FILE.as_bytes();
+        let descriptor = match crate::sys::openat_create_exclusive(held.as_raw_fd(), name, 0o600) {
+            Ok(descriptor) => descriptor,
+            Err(error) if error.raw_os_error() == Some(libc::EEXIST) => {
+                crate::sys::openat_read_no_symlinks(held.as_raw_fd(), name)
+                    .map_err(sqlite_io_failure)?
+            }
+            Err(error) => return Err(sqlite_io_failure(error)),
+        };
+        let file = unsafe { OwnedFd::from_raw_fd(descriptor) };
+        let metadata = crate::sys::metadata_of(file.as_raw_fd()).map_err(sqlite_io_failure)?;
+        if metadata.kind != crate::sys::EntryKind::File
+            || metadata.owner_id != unsafe { libc::geteuid() }
+            || metadata.link_count != 1
+        {
+            return Err(sqlite_io_failure(std::io::Error::new(
+                std::io::ErrorKind::PermissionDenied,
+                "The action journal must be a regular file owned by this user with no other hardlinks.",
+            )));
+        }
+        crate::sys::fchmod(file.as_raw_fd(), 0o600).map_err(sqlite_io_failure)?;
+        crate::sys::fsync(held.as_raw_fd()).map_err(sqlite_io_failure)?;
+        let connection = Connection::open_with_flags(
+            &path,
+            OpenFlags::SQLITE_OPEN_READ_WRITE
+                | OpenFlags::SQLITE_OPEN_NO_MUTEX
+                | OpenFlags::SQLITE_OPEN_NOFOLLOW,
+        )?;
         connection.pragma_update(None, "journal_mode", "WAL")?;
         connection.pragma_update(None, "synchronous", "FULL")?;
         connection.pragma_update(None, "foreign_keys", "ON")?;
@@ -284,9 +310,9 @@ impl Journal {
         migrate(&connection)?;
         // The journal names every path Disktop has acted on, so it is private
         // to the user who owns it whichever process created it first.
-        make_private(&path, 0o600);
         Ok(Journal {
             connection,
+            _directory: held,
             began: std::cell::RefCell::new(Vec::new()),
         })
     }
@@ -1076,11 +1102,55 @@ fn unclamp(value: i64) -> u64 {
     value.max(0) as u64
 }
 
-/// Narrow a path Disktop just created to this user. A failure is left alone:
-/// the file may already exist with a mode somebody chose deliberately.
-fn make_private(path: &Path, mode: u32) {
-    use std::os::unix::fs::PermissionsExt;
-    let _ = std::fs::set_permissions(path, std::fs::Permissions::from_mode(mode));
+fn sqlite_io_failure(error: std::io::Error) -> rusqlite::Error {
+    rusqlite::Error::ToSqlConversionFailure(Box::new(error))
+}
+
+/// Create and open the journal's directory one component at a time. No
+/// symlink or directory another account can replace may redirect journal
+/// writes, and a privacy failure must refuse the action before its intent.
+fn private_directory(path: &Path) -> std::io::Result<OwnedFd> {
+    use std::os::unix::ffi::OsStrExt;
+    let bytes = path.as_os_str().as_bytes();
+    if bytes == b"/" || !crate::guard::is_absolute_normalised(bytes) {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "The journal directory must be an absolute, normalized private path.",
+        ));
+    }
+    let mut directory = unsafe { OwnedFd::from_raw_fd(crate::sys::open_filesystem_root()?) };
+    let user = unsafe { libc::geteuid() };
+    for component in bytes[1..].split(|byte| *byte == b'/') {
+        let parent = crate::sys::metadata_of(directory.as_raw_fd())?;
+        if (parent.owner_id != user && parent.owner_id != 0)
+            || parent.writable_by_anyone_without_sticky
+        {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::PermissionDenied,
+                "A directory above the journal is owned or writable by another account.",
+            ));
+        }
+        match crate::sys::mkdirat_exclusive(directory.as_raw_fd(), component, 0o700) {
+            Ok(()) => crate::sys::fsync(directory.as_raw_fd())?,
+            Err(error) if error.raw_os_error() == Some(libc::EEXIST) => {}
+            Err(error) => return Err(error),
+        }
+        directory = unsafe {
+            OwnedFd::from_raw_fd(crate::sys::open_directory_no_symlinks(
+                directory.as_raw_fd(),
+                component,
+            )?)
+        };
+    }
+    let metadata = crate::sys::metadata_of(directory.as_raw_fd())?;
+    if metadata.owner_id != user {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::PermissionDenied,
+            "The journal directory must belong to this user.",
+        ));
+    }
+    crate::sys::fchmod(directory.as_raw_fd(), 0o700)?;
+    Ok(directory)
 }
 
 /// Hex, so the cursor survives the contract's restricted alphabet, and opaque,
@@ -1138,6 +1208,62 @@ CREATE TABLE action_item (action_id TEXT NOT NULL REFERENCES action(id) ON DELET
 ";
 
     use super::tests_support::abandon;
+
+    #[test]
+    fn a_journal_file_symlink_is_refused_without_changing_its_target() {
+        use std::os::unix::fs::{PermissionsExt, symlink};
+        let sandbox = Sandbox::new("journal-symlink-file");
+        let directory = sandbox.directory(b"state");
+        sandbox.file(b"unrelated", 123);
+        let unrelated = sandbox.path().join("unrelated");
+        std::fs::set_permissions(&unrelated, std::fs::Permissions::from_mode(0o644)).unwrap();
+        let before = std::fs::read(&unrelated).unwrap();
+        symlink(&unrelated, journal_path(&directory)).unwrap();
+        assert!(Journal::open(&directory).is_err());
+        assert_eq!(std::fs::read(&unrelated).unwrap(), before);
+        assert_eq!(
+            std::fs::metadata(unrelated).unwrap().permissions().mode() & 0o777,
+            0o644
+        );
+    }
+
+    #[test]
+    fn a_symlinked_journal_directory_is_refused_before_any_file_is_created() {
+        use std::os::unix::fs::symlink;
+        let sandbox = Sandbox::new("journal-symlink-directory");
+        let actual = sandbox.directory(b"actual");
+        let link = sandbox.path().join("state");
+        symlink(&actual, &link).unwrap();
+        assert!(Journal::open(&link).is_err());
+        assert!(!journal_path(&actual).exists());
+    }
+
+    #[test]
+    fn a_journal_with_another_hardlink_is_refused_before_its_permissions_change() {
+        use std::os::unix::fs::PermissionsExt;
+        let sandbox = Sandbox::new("journal-hardlink");
+        let directory = sandbox.directory(b"state");
+        sandbox.file(b"unrelated", 123);
+        let unrelated = sandbox.path().join("unrelated");
+        std::fs::set_permissions(&unrelated, std::fs::Permissions::from_mode(0o644)).unwrap();
+        std::fs::hard_link(&unrelated, journal_path(&directory)).unwrap();
+        assert!(Journal::open(&directory).is_err());
+        assert_eq!(
+            std::fs::metadata(unrelated).unwrap().permissions().mode() & 0o777,
+            0o644
+        );
+    }
+
+    #[test]
+    fn an_ancestor_writable_by_other_accounts_refuses_journal_creation() {
+        use std::os::unix::fs::PermissionsExt;
+        let sandbox = Sandbox::new("journal-unsafe-ancestor");
+        let shared = sandbox.directory(b"shared");
+        std::fs::set_permissions(&shared, std::fs::Permissions::from_mode(0o777)).unwrap();
+        let directory = shared.join("state");
+        assert!(Journal::open(&directory).is_err());
+        assert!(!directory.exists());
+    }
 
     #[test]
     fn a_journal_written_before_staging_was_recorded_opens_and_records_it() {

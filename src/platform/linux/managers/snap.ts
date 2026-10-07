@@ -38,21 +38,24 @@ export function parseSnapRevisions(text: string): { readonly revisions: readonly
 }
 
 export function createSnapAdapter(ports: SnapPorts): ManagerAdapter {
-  async function revisions(): Promise<ReturnType<typeof parseSnapRevisions> | ManagerDiscovery> {
-    const answer = await ports.tools.run("snap", ["list", "--all"]);
+  async function revisions(signal?: AbortSignal): Promise<ReturnType<typeof parseSnapRevisions> | ManagerDiscovery> {
+    signal?.throwIfAborted();
+    const answer = await ports.tools.run("snap", ["list", "--all"], signal);
+    signal?.throwIfAborted();
     if (answer.capability.status !== "available") {
       return { adapter: "snap", capability: answer.capability, proposals: [], warnings: [] };
     }
     return parseSnapRevisions(answer.stdout);
   }
 
-  async function discover(): Promise<ManagerDiscovery> {
-    const listing = await revisions();
+  async function discover(signal?: AbortSignal): Promise<ManagerDiscovery> {
+    const listing = await revisions(signal);
     if ("adapter" in listing) {
       return listing;
     }
     const items: ManagerItem[] = [];
     for (const revision of listing.revisions.filter((entry) => entry.disabled)) {
+      signal?.throwIfAborted();
       const [name, rev] = revision.id.split("=");
       const facts = await ports.paths.facts(rawPathFromUtf8(`/var/lib/snapd/snaps/${name as string}_${rev as string}.snap`));
       items.push({ id: revision.id, ...(facts === undefined ? {} : { bytes: facts.allocatedBytes }) });
@@ -86,17 +89,17 @@ export function createSnapAdapter(ports: SnapPorts): ManagerAdapter {
     };
   }
 
-  async function disabledNow(): Promise<ReadonlySet<string> | undefined> {
-    const listing = await revisions();
+  async function disabledNow(signal?: AbortSignal): Promise<ReadonlySet<string> | undefined> {
+    const listing = await revisions(signal);
     return "adapter" in listing ? undefined : new Set(listing.revisions.filter((entry) => entry.disabled).map((entry) => entry.id));
   }
 
   return {
     id: "snap",
     discover,
-    preview: (action) => previewFrom(discover, action),
-    async preflight(scope) {
-      const disabled = await disabledNow();
+    preview: (action, _parameters, signal) => previewFrom(discover, action, signal),
+    async preflight(scope, signal) {
+      const disabled = await disabledNow(signal);
       if (disabled === undefined) {
         return { refusal: "snap could not be asked which revisions are disabled now.", skipped: new Map() };
       }

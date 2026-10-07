@@ -1,11 +1,12 @@
-import { readFile, statfs } from "node:fs/promises";
-import type { Capability, Filesystem, RawPath, StorageDevice, UnmountedVolume, Warning } from "../../../domain/models.js";
+import { readFile } from "node:fs/promises";
+import type { Capability, Filesystem, RawPath, StorageDevice, StorageVolume, UnmountedVolume, Warning } from "../../../domain/models.js";
 import { isWithin, pathBytes } from "../../../domain/paths.js";
 import type { InventoryPort, InventoryResult } from "../../../ports/inventory.js";
 import { LSBLK_ARGUMENTS, deviceKindOf, isMemoryBackedDevice, parseLsblk, type BlockDevice } from "./lsblk.js";
 import { filesystemIdOf, parseMountinfo, type MountEntry } from "./mountinfo.js";
 import { isLoopImage, isNetworkFilesystem, isPseudoFilesystem, isWindowsMount } from "./filesystem-kinds.js";
 import { runFixedCommand, type CommandOutcome } from "../process.js";
+import { createStatfsReader } from "./statfs.js";
 
 const MOUNTINFO_PATH = "/proc/self/mountinfo";
 const VERSION_PATH = "/proc/version";
@@ -34,18 +35,7 @@ export const linuxInventorySources: InventorySources = {
   async runLsblk() {
     return runFixedCommand("lsblk", LSBLK_ARGUMENTS);
   },
-  async statfs(mountPoint) {
-    // statfs is given the mount point's bytes, never its display text.
-    const reading = await statfs(Buffer.from(mountPoint), { bigint: true });
-    return {
-      blockSize: reading.bsize,
-      blocks: reading.blocks,
-      freeBlocks: reading.bfree,
-      availableBlocks: reading.bavail,
-      totalInodes: reading.files,
-      freeInodes: reading.ffree,
-    };
-  },
+  statfs: createStatfsReader(),
   async detectWindowsSubsystem() {
     try {
       return /microsoft|wsl/i.test(await readFile(VERSION_PATH, "utf8"));
@@ -69,6 +59,7 @@ export function createLinuxInventory(
   const capacity: CapacityReader = {
     sources,
     timeoutMilliseconds: options.statfsTimeoutMilliseconds ?? STATFS_TIMEOUT_MILLISECONDS,
+    pending: new Map(),
     stuck: new Set(),
   };
   return {
@@ -91,6 +82,7 @@ interface CapacityReader {
   readonly timeoutMilliseconds: number;
   /** Mount points, by their bytes, whose statfs has not returned yet. */
   readonly stuck: Set<string>;
+  readonly pending: Map<string, Promise<CapacityReading>>;
 }
 
 type CapacityReading =
@@ -103,17 +95,29 @@ async function readCapacity(reader: CapacityReader, mountPoint: RawPath): Promis
   if (reader.stuck.has(key)) {
     return { kind: "timed-out" };
   }
-  reader.stuck.add(key);
-  const pending = reader.sources.statfs(pathBytes(mountPoint)).then(
+  let pending = reader.pending.get(key);
+  if (pending === undefined) {
+    pending = reader.sources.statfs(pathBytes(mountPoint)).then(
     (reading): CapacityReading => ({ kind: "read", reading }),
-    (error: unknown): CapacityReading => ({ kind: "failed", error }),
-  );
-  // Only an answer, however late, makes the mount worth asking again.
-  void pending.finally(() => reader.stuck.delete(key));
+    (error: unknown): CapacityReading => (error as NodeJS.ErrnoException).code === "ETIMEDOUT"
+      ? { kind: "timed-out" } : { kind: "failed", error },
+    );
+    reader.pending.set(key, pending);
+    const current = pending;
+    // A concurrent inventory shares this reading. It is considered stuck
+    // only after its timeout, rather than while a healthy call is in flight.
+    void pending.finally(() => {
+      if (reader.pending.get(key) === current) reader.pending.delete(key);
+      reader.stuck.delete(key);
+    });
+  }
 
   let timer: NodeJS.Timeout | undefined;
   const expired = new Promise<CapacityReading>((resolve) => {
-    timer = setTimeout(() => resolve({ kind: "timed-out" }), reader.timeoutMilliseconds);
+    timer = setTimeout(() => {
+      reader.stuck.add(key);
+      resolve({ kind: "timed-out" });
+    }, reader.timeoutMilliseconds);
   });
   try {
     return await Promise.race([pending, expired]);
@@ -172,6 +176,7 @@ async function collect(capacity: CapacityReader): Promise<InventoryResult> {
 
   return {
     devices,
+    volumes: buildVolumes(mounts, blockDevices),
     filesystems,
     unmounted: findUnmounted(mounts, blockDevices),
     warnings,
@@ -246,7 +251,7 @@ async function joinFilesystems(
   const grouped = new Map<string, MountEntry[]>();
   for (const mount of mounts) {
     const sourceDisplay = mount.source.display;
-    if (isPseudoFilesystem(mount.filesystemType) || isLoopImage(mount.filesystemType, sourceDisplay)) {
+    if (isPseudoFilesystem(mount.filesystemType) || isLoopImage(sourceDisplay)) {
       continue;
     }
     if (windowsSubsystem && isWindowsMount(mount.filesystemType, mount.mountPoint.display)) {
@@ -353,21 +358,74 @@ function backingDevice(mount: MountEntry, topology: BlockTopology): BlockDevice 
  * only the disk is a thing anyone can point at.
  */
 function wholeDiskName(device: BlockDevice, byKernelName: ReadonlyMap<string, BlockDevice>): string {
+  return wholeDiskNames(device, byKernelName)[0] ?? device.kernelName;
+}
+
+/** lsblk is a graph: one RAID or LVM volume can occur below several physical disks. */
+function wholeDiskNames(device: BlockDevice, byKernelName: ReadonlyMap<string, BlockDevice>): readonly string[] {
   const seen = new Set<string>();
-  let current = device;
-  while (current.type !== "disk") {
-    const parentName = current.parentName;
-    if (parentName === undefined || seen.has(parentName)) {
-      break;
+  const disks = new Set<string>();
+  const pending = [device];
+  while (pending.length > 0) {
+    const current = pending.pop() as BlockDevice;
+    if (seen.has(current.kernelName)) {
+      continue;
     }
-    seen.add(parentName);
-    const parent = byKernelName.get(parentName);
-    if (parent === undefined) {
-      break;
+    seen.add(current.kernelName);
+    if (current.type === "disk" || current.type === "rom") {
+      if (!isMemoryBackedDevice(current)) {
+        disks.add(current.kernelName);
+      }
+      continue;
     }
-    current = parent;
+    for (const name of [...current.parentNames].reverse()) {
+      const parent = byKernelName.get(name);
+      if (parent !== undefined) {
+        pending.push(parent);
+      }
+    }
   }
-  return current.kernelName;
+  return [...disks];
+}
+
+/** Hardware topology is visible even when capacity cannot be read or a volume is not mounted. */
+function buildVolumes(mounts: readonly MountEntry[], topology: BlockTopology): readonly StorageVolume[] {
+  const children = new Set(topology.devices.flatMap((device) => [...device.parentNames]));
+  const mountsByDevice = new Map<string, MountEntry[]>();
+  for (const mount of mounts) {
+    const device = backingDevice(mount, topology);
+    if (device !== undefined) {
+      const group = mountsByDevice.get(device.kernelName) ?? [];
+      group.push(mount);
+      mountsByDevice.set(device.kernelName, group);
+    }
+  }
+  return topology.devices.filter((device) =>
+    !isMemoryBackedDevice(device) && device.type !== "loop" &&
+    ((device.type !== "disk" && device.type !== "rom") || !children.has(device.kernelName)) &&
+    (wholeDiskNames(device, topology.byKernelName).length > 0 || device.parentNames.length === 0),
+  ).map((device) => {
+    const group = mountsByDevice.get(device.kernelName) ?? [];
+    const type = device.filesystemType;
+    const state: StorageVolume["state"] = type === "swap" || device.mountPoint === "[SWAP]" ? "swap"
+      : group.length > 0 || device.mountPoint !== undefined ? "mounted"
+        : children.has(device.kernelName) ? "in-use"
+          : type === undefined ? "unknown"
+            : ENCRYPTED_CONTAINERS.has(type) ? "locked" : "unmounted";
+    const deviceIds = wholeDiskNames(device, topology.byKernelName);
+    return {
+      id: device.kernelName,
+      devicePath: device.path ?? `/dev/${device.kernelName}`,
+      deviceId: deviceIds[0] ?? device.kernelName,
+      deviceIds,
+      type: device.type,
+      sizeBytes: device.sizeBytes,
+      ...(type === undefined ? {} : { filesystemType: type }),
+      ...(device.label === undefined ? {} : { label: device.label }),
+      mounts: dedupeMountPoints(group),
+      state,
+    };
+  });
 }
 
 /**
@@ -402,11 +460,20 @@ function findUnmounted(mounts: readonly MountEntry[], topology: BlockTopology): 
   const used = new Set<string>();
   const markUsed = (device: BlockDevice | undefined): void => {
     const seen = new Set<string>();
-    let current = device;
-    while (current !== undefined && !seen.has(current.kernelName)) {
+    const pending = device === undefined ? [] : [device];
+    while (pending.length > 0) {
+      const current = pending.pop() as BlockDevice;
+      if (seen.has(current.kernelName)) {
+        continue;
+      }
       seen.add(current.kernelName);
       used.add(current.kernelName);
-      current = current.parentName === undefined ? undefined : topology.byKernelName.get(current.parentName);
+      for (const name of current.parentNames) {
+        const parent = topology.byKernelName.get(name);
+        if (parent !== undefined) {
+          pending.push(parent);
+        }
+      }
     }
   };
   for (const mount of mounts) {
@@ -417,8 +484,8 @@ function findUnmounted(mounts: readonly MountEntry[], topology: BlockTopology): 
     if (device.mountPoint !== undefined) {
       markUsed(device);
     }
-    if (device.parentName !== undefined) {
-      parents.add(device.parentName);
+    for (const name of device.parentNames) {
+      parents.add(name);
     }
   }
 
@@ -470,11 +537,11 @@ function buildDevices(blockDevices: readonly BlockDevice[]): readonly StorageDev
   }
 
   return blockDevices
-    .filter((device) => device.type === "disk" && !isMemoryBackedDevice(device))
+    .filter((device) => (device.type === "disk" || device.type === "rom") && !isMemoryBackedDevice(device))
     .map((device) => ({
       id: device.kernelName,
       name: device.name,
-      kind: deviceKindOf(device),
+      kind: device.type === "rom" ? "unknown" : deviceKindOf(device),
       removable: device.removable,
       sizeBytes: device.sizeBytes,
       ...(device.model === undefined ? {} : { model: device.model }),

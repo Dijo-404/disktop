@@ -78,7 +78,7 @@ test("listing a directory returns one level, sorted, with invalid bytes intact",
   }
 });
 
-test("a file and a directory that cannot be read list empty rather than throwing", async () => {
+test("a file lists empty, while an unreadable directory reports the denied read", async () => {
   const root = await sandbox();
   try {
     await writeFile(join(root, "plain.txt"), "a");
@@ -88,14 +88,16 @@ test("a file and a directory that cannot be read list empty rather than throwing
 
     assert.deepEqual(await probe.list(rawPathFromUtf8(join(root, "plain.txt"))), []);
     if (process.getuid?.() !== 0) {
-      assert.deepEqual(await probe.list(rawPathFromUtf8(closed)), []);
+      await assert.rejects(probe.list(rawPathFromUtf8(closed)), { code: "EACCES" });
+      await assert.rejects(probe.facts(rawPathFromUtf8(join(closed, "hidden"))), { code: "EACCES" });
+      await assert.rejects(probe.readText(rawPathFromUtf8(join(closed, "hidden")), 64), { code: "EACCES" });
     }
   } finally {
     await restoreAndRemove(root);
   }
 });
 
-test("reading text stops at the byte limit and never throws", async () => {
+test("reading text stops at the byte limit and missing or non-file paths are absent", async () => {
   const root = await sandbox();
   try {
     const file = join(root, "settings.toml");
@@ -143,6 +145,27 @@ test("reading text from a pipe or a device answers nothing at once instead of wa
     // A procfs file reports no size and is still read, up to the limit.
     const version = await probe.readText(rawPathFromUtf8("/proc/version"), 8);
     assert.equal(version?.length, 8);
+  } finally {
+    await restoreAndRemove(root);
+  }
+});
+
+test("large directory sampling remains bounded and preserves the first sorted raw names", async () => {
+  const root = await sandbox();
+  try {
+    // Create in reverse order, across bounded batches, so the answer cannot
+    // accidentally rely on directory enumeration order.
+    for (let end = 4608; end > 0; end -= 64) {
+      await Promise.all(Array.from({ length: Math.min(64, end) }, (_, offset) =>
+        writeFile(join(root, String(end - offset - 1).padStart(5, "0")), "")));
+    }
+    const listed = await probe.list(rawPathFromUtf8(root));
+    assert.equal(listed.length, 4096);
+    assert.deepEqual(listed.map((path) => path.display.slice(root.length + 1)),
+      Array.from({ length: 4096 }, (_, index) => String(index).padStart(5, "0")));
+    // Repeated reads close their directory descriptors and return the same
+    // bounded selection, rather than retaining the previous directory's rows.
+    assert.deepEqual(await probe.list(rawPathFromUtf8(root)), listed);
   } finally {
     await restoreAndRemove(root);
   }

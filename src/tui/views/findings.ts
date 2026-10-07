@@ -2,7 +2,7 @@ import { categoryTotals, type Finding, type FindingCategory } from "../../domain
 import { formatBytes } from "../../domain/sizes.js";
 import { LineBuilder, type HitRegion, type ScreenLine } from "../frame.js";
 import { findingsFor, isActionable, type FindingsTab } from "../state.js";
-import { cellWidth, padEnd, padStart, relativeAge, truncate, truncateMiddle } from "../text.js";
+import { cellWidth, padEnd, padStart, relativeAge, truncate, truncateMiddle, wrap } from "../text.js";
 import type { Theme } from "../themes.js";
 import { SERIES, barSpans, seriesGlyph, sharePercent, stackedBarSpans } from "../widgets/bars.js";
 import { ruleLine, spinnerFrame, type Hint } from "../widgets/chrome.js";
@@ -114,7 +114,7 @@ export function renderFindings(context: ViewContext, tab: FindingsTab, home: str
   }
 
   if (state.findings.showProviders) {
-    return { lines: providerLines(context), hits: [], hints: [["p", "back to findings"], ["r", "look again"], ["q", "quit"]] };
+    return { lines: providerLines(context), hits: [], hints: [["j/k", "move"], ["p", "back to findings"], ["r", "look again"], ["q", "quit"]] };
   }
 
   const findings = findingsFor(tab, summary.findings);
@@ -141,7 +141,7 @@ export function renderFindings(context: ViewContext, tab: FindingsTab, home: str
     }
   }
   const unavailable = summary.providers.filter((provider) => !provider.ran || provider.capability.status !== "available").length;
-  const status = `${summary.complete ? "" : "incomplete · "}${unavailable > 0 ? `${unavailable} detector${unavailable === 1 ? "" : "s"} unavailable (p)` : `${summary.providers.length} detectors`}`;
+  const status = `${summary.complete ? "" : `incomplete${theme.glyphs.separator}`}${unavailable > 0 ? `${unavailable} detector${unavailable === 1 ? "" : "s"} unavailable (p)` : `${summary.providers.length} detectors`}`;
   intro.addRight(status, summary.complete ? "muted" : "warn", 1);
   lines.push(intro.build());
 
@@ -280,33 +280,48 @@ function providerLines(context: ViewContext): ScreenLine[] {
   const { state, theme, width, height } = context;
   const summary = state.findings.summary;
   const lines: ScreenLine[] = [];
+  const nameWidth = width >= 80 ? 28 : Math.max(14, Math.floor(width * 0.38));
+  const stateWidth = width >= 72 ? 20 : 16;
+  const countWidth = width >= 60 ? 6 : 0;
   lines.push(new LineBuilder(width).add(" Detectors", "title").add("  what each one could see, and why not when it could not", "dim").build());
   lines.push(
     new LineBuilder(width)
       .add("  ")
-      .add(padEnd("DETECTOR", 28), "heading")
-      .add(padEnd("STATE", 20), "heading")
-      .add(padStart("FOUND", 6), "heading")
+      .add(padEnd("DETECTOR", nameWidth), "heading")
+      .add(padEnd("STATE", stateWidth), "heading")
+      .add(countWidth > 0 ? padStart("FOUND", countWidth) : "", "heading")
       .add("  WHY", "heading")
       .build(),
   );
   const providers = [...(summary?.providers ?? [])].sort((left, right) => Number(left.ran && left.capability.status === "available") - Number(right.ran && right.capability.status === "available"));
-  for (const provider of providers.slice(0, Math.max(0, height - 3))) {
+  const selected = Math.min(state.findings.selectedProvider, Math.max(0, providers.length - 1));
+  const detailHeight = height >= 10 ? 4 : 0;
+  const listRows = Math.max(1, height - 2 - detailHeight);
+  const window = listWindow(selected, providers.length, listRows);
+  for (let index = window.start; index < window.end; index += 1) {
+    const provider = providers[index];
+    if (provider === undefined) continue;
     const ok = provider.ran && provider.capability.status === "available";
     lines.push(
       new LineBuilder(width)
-        .add("  ")
-        .add(padEnd(provider.providerId, 28, theme.glyphs.ellipsis), ok ? "normal" : "strong")
-        .add(padEnd(`${ok ? theme.glyphs.ok : theme.glyphs.warn} ${provider.capability.status}`, 20), ok ? "ok" : provider.capability.status === "missing-tool" ? "muted" : "warn")
-        .add(padStart(String(provider.findings), 6), "dim")
+        .add(index === selected ? `${theme.glyphs.pointer} ` : "  ", "accent")
+        .add(padEnd(provider.providerId, nameWidth, theme.glyphs.ellipsis), ok ? "normal" : "strong")
+        .add(padEnd(`${ok ? theme.glyphs.ok : theme.glyphs.warn} ${provider.capability.status}`, stateWidth, theme.glyphs.ellipsis), ok ? "ok" : provider.capability.status === "missing-tool" ? "muted" : "warn")
+        .add(countWidth > 0 ? padStart(String(provider.findings), countWidth) : "", "dim")
         .add(`  ${ok ? "" : provider.capability.explanation}`, "dim")
-        .build(),
+        .build({ selected: index === selected }),
     );
   }
-  if ((summary?.providers.length ?? 0) > height - 3) {
-    lines.push(new LineBuilder(width).add(`  ${theme.glyphs.ellipsis} ${(summary?.providers.length ?? 0) - (height - 3)} more`, "muted").build());
+  const body = fit(lines, height - detailHeight);
+  const current = providers[selected];
+  if (detailHeight > 0 && current !== undefined) {
+    body.push(ruleLine(current.providerId, width, theme));
+    for (const text of wrap(current.capability.explanation, width - 4).slice(0, 2)) {
+      body.push(new LineBuilder(width).add("  ").add(text, current.complete ? "dim" : "warn").build());
+    }
+    body.push(new LineBuilder(width).add(`  ${selected + 1}/${providers.length} detectors${theme.glyphs.separator}${current.complete ? "complete reading" : "incomplete reading"}`, "muted").build());
   }
-  return fit(lines, height);
+  return fit(body, height);
 }
 
 function statusFor(context: ViewContext): ScreenLine | undefined {

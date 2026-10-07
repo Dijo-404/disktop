@@ -8,7 +8,7 @@ Status: planned `1.0.0` command surface. Every command the parser declares is im
 | --- | --- |
 | `disktop` | Opens the [terminal UI](#terminal-ui) when stdin and stdout are both terminals and `TERM` can address the cursor, and prints the text dashboard otherwise (a pipe, `TERM=dumb`, or no `TERM`). |
 | `disktop --json` | One `dashboard.json` envelope: capability, filesystems, and alerts. |
-| `disktop devices [--json]` | Physical disks counted once with their partitions, every mounted filesystem joined to its backing disk, and the partitions holding data that nothing has mounted (`unmounted`), such as a Windows partition or a locked LUKS container, whose usage is unknown until they are mounted. EFI, recovery, reserved, and swap partitions are left out. |
+| `disktop devices [--json]` | All connected persistent disks (including separate SSDs, USB storage, memory cards and optical drives), their partitions and logical volumes (`volumes`), and every readable mounted filesystem. Firmware, recovery, reserved, swap and partitions with unknown filesystem signatures remain visible. RAID/LVM volumes name every backing disk. Usage is unknown without a readable mount; nothing is mounted or unlocked automatically. The legacy `unmounted` array remains the data-only subset. |
 | `disktop alerts check [--threshold PERCENT] [--notify] [--json]` | Space and inode thresholds. Exits `1` when one is reached. `--notify`, or `alerts.notify` in the configuration, also sends one desktop notification; one that could not be sent is a warning and never changes the exit status. |
 | `disktop scan [PATH] [--json]` | Walks `PATH` (the working directory by default) through the helper, writes the detailed index, and saves a snapshot. `--accounting allocated\|apparent`, `--cross-filesystems`, `--throttle RATE`, `--max-depth DEPTH`, `--sudo`. Ctrl+C stops it at a directory boundary and still reports what was measured. |
 | `disktop explore [PATH] [--json]` | One page of `PATH` and everything below it, from the most recent scan covering it. `--sort`, `--order`, `--kind`, `--min-size`, `--max-size`, `--ext`, `--name`, `--older-than DAYS`, `--limit`, `--cursor`, `--type-totals`, `--owners`. |
@@ -64,7 +64,7 @@ disktop explore [PATH] --sort allocated --min-size 1GiB --ext log --json
 disktop find duplicates|stale|empty|broken [PATH] --json
 disktop snapshots list|diff --json
 disktop clean --dry-run --json
-disktop clean plan FINDING_ID --operation trash|erase|move|compress|hardlink --json
+disktop clean plan FINDING_ID --operation trash|permanent|move|compress|hardlink --json
 disktop clean plan --path PATH --operation trash --json
 disktop clean apply PLAN_ID --yes --json
 disktop clean apply PLAN_ID --yes --permanent --json
@@ -299,10 +299,10 @@ warnings go to stderr. With `--output FILE` it is written to a new file:
 
 A crash leaves at most a hidden `.disktop-report-*.partial` staging file, never a
 truncated report under the name you asked for. On a filesystem that has no hard links,
-such as vfat or exFAT on a USB stick, Disktop claims the name with an exclusive create
-and renames the finished staging file over the empty file it has just made, so the
-promise not to replace anything still holds. A report starts out readable by its owner
-alone, because it lists names of files somebody owns; `chmod` it to share it.
+such as vfat or exFAT on a USB stick, Disktop refuses report publication with an
+actionable `unsupported` error. Choose an output directory on ext4, Btrfs or another
+filesystem supporting hard links. A placeholder followed by an ordinary rename cannot
+guarantee that a concurrently replaced destination remains untouched.
 
 An existing `FILE` is refused with exit `2` before anything slow runs, and there is no
 option to overwrite one: move the old report away or name a new one. Run as root,
@@ -354,6 +354,7 @@ a spreadsheet may display a large one rounded, and the file still holds it exact
 | `filesystem` | filesystem, with its first mount point | `id`, `kind` (type), path, `total_bytes`, `free_bytes`, `available_bytes`, `used_percent`, `inodes_used_percent`, `status` (`read-only` or `read-write`), `detail` |
 | `mount` | further mount point of a filesystem | `id`, path |
 | `device` | block device | `id`, `kind` (`ssd`, `hdd`, `unknown`), `total_bytes`, `entries` (partitions), `detail` |
+| `volume` | every persistent partition or logical volume | `id`, `kind` (filesystem signature or `unknown`), `path_display`, `total_bytes`, `status`, `detail` |
 | `unmounted` | partition with data that nothing has mounted | `id`, `kind` (filesystem type), `path_display` (the device node), `total_bytes`, `status` (`unmounted` or `locked`), `detail` |
 | `alert` | alert | `id` (filesystem), `kind`, `used_percent`, `threshold_percent`, `detail` |
 | `scan` | included scan | `id` (scan), `kind` (accounting), path (the `--path`), `allocated_bytes`, `apparent_bytes`, `shared_bytes` (whole scan), `entries` (scanned), `modified_at` (when scanned), `status`, `detail` |
@@ -539,8 +540,10 @@ complete it — `disktop scan` run as root from a root-owned install, never `sud
 `$XDG_CONFIG_HOME/systemd/user`, each starting with a `# Managed by Disktop` line, and
 enables the timer. The service runs `alerts check --notify` hourly and nothing else; it
 never cleans. Install refuses to overwrite a unit that does not carry the marker, and
-reports an install whose units were written but not enabled as incomplete. `timer
-uninstall` disables the timer and removes only marked units; it is safe to run twice.
+reports failed reload or enable steps with an error and the systemctl diagnostic.
+`timer uninstall` disables the timer before removing marked units; if disable fails,
+the units remain in place and the error warns that the timer may still run. A failed
+reload after removal gives the recovery command. Uninstall is safe to run twice.
 Neither command elevates anything.
 
 Configuration is `$XDG_CONFIG_HOME/disktop/config.toml` with the standard home fallback;
@@ -555,7 +558,7 @@ is a reviewed plan, applied through `clean apply`'s service, and journalled.
 
 | Tab | Shows | Keys beyond the common ones |
 | --- | --- | --- |
-| 1 Disks | Filesystems with usage bars; the selected one's used, root-reserved, and available space, device, inodes, and mounts. Below them, partitions holding data that nothing has mounted (a Windows partition, a locked LUKS drive), with how to mount or unlock them. | Enter explore it, `S` scan it |
+| 1 Disks | Connected drive counts, readable filesystems with usage bars, and every other partition or logical volume. The selected filesystem separates used, root-reserved, and available space, device, inodes, and mounts. Locked, swap, RAID/LVM backing, and unknown-signature storage have explicit states; unknown never means empty. | Enter explore a mounted tree, `S` scan it |
 | 2 Explore | A stored scan, a directory at a time: size, share of the parent, growth since the previous comparable snapshot, a trend sparkline of the total, file types. A directory the scan never entered shows `?` and why; after `A`, an unreadable one shows its size measured as root and opens to one level of what is inside. | Enter/`l` open, `h`/Backspace up, `s` sort, `f` finders (largest, duplicates, stale, empty, broken), `/` filter, `t` types, `n` more, `c` plan, `S` scan, `A` measure unreadable directories as root (asks for your password) |
 | 3 Clean | Findings a plan could act on, totalled by category, then informational ones. | Enter details, `c` plan, `p` detectors, `r` look again |
 | 4 Dev, 5 Apps | The same findings narrowed to development or to applications. | as Clean |
@@ -567,7 +570,9 @@ selects rows, switches tabs, and scrolls.
 
 The filter after `/` is words (name contains), `ext:log` or `.log`, `>1GiB`/`<5MB`
 (allocated size), `age>30` (not modified for 30 days), and `type:file|dir|link|other`.
-It compiles to the same `EntryFilter` as `explore`'s flags.
+It compiles to the same `EntryFilter` as `explore`'s flags. Long filters scroll their text to keep the
+newest input and its cursor visible. In the detector list (`p`), `j`/`k`, paging, and
+`g`/`G` reach every detector; the selected explanation appears below the list.
 
 A plan is reviewed in a dialog showing its operation, whether and how it can be undone,
 the selected bytes and item count, the permission it needs, its expiry, its warnings,
@@ -587,9 +592,19 @@ terminal back. Results keep selected bytes, bytes moved to Trash, and the observ
 free-space change apart, as `clean apply --json` does.
 
 Esc stops a running scan (what it read is indexed and marked incomplete), a discovery,
-or a duplicate search. An apply or undo stops after its current item and still reports;
+an index query, or a duplicate search. An apply or undo stops after its current item and still reports;
 `q` is refused while one runs, and Ctrl+C asks it to stop, waits for it to journal, and
 exits `130`. A normal quit exits `0`, or `3` when the inventory was incomplete.
+
+The TUI uses [Catppuccin Mocha](https://catppuccin.com/palette/#mocha): mauve accents,
+dark surfaces, teal usage bars, yellow warnings, and soft red failures. `COLORTERM=truecolor`
+or `24bit` selects the original RGB palette; 256- and 16-colour terminals use
+approximations. Selection, state glyphs, and distinct distribution fills remain
+readable without colour. The scan activity bar is indeterminate: a tree's total extent
+is unknown until traversal finishes. A duplicate listing retains at most 10,000 rows;
+if a group exceeds this, its true copy count and the limit are shown, and a smaller
+directory can be searched. Short dialogs centre around their content, and result
+dialogs show the journal id and preserve partial or uncertain outcomes.
 
 Environment: `NO_COLOR` (non-empty) removes colour and keeps bold and inverse; a locale
 that is not UTF-8, `TERM=linux`, or `DISKTOP_ASCII=1` draw ASCII glyphs;

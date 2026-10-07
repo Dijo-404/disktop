@@ -7,7 +7,7 @@ All notable changes to Disktop are recorded here. Versions follow [Semantic Vers
 The first public release. Everything below the Phase headings was built in internal
 phases that were never published; this is the first version anybody can install.
 
-### Status, 2026-10-05
+### Status, 2026-10-07
 
 Not published. Phases 0–7 are complete. Phase 8 (whole-product validation and the sole
 release) is in progress:
@@ -15,24 +15,50 @@ release) is in progress:
 - **Done and verified locally:** the package, the four-helper release build and its
   checksums, the packed-tarball install test, the hardening audit of every mutation, and
   a first run on real hardware — an Arch laptop with Btrfs on LUKS, subvolume mounts, a
-  Windows partition, and a locked 4 TB LUKS drive. That run found the wrong answers
-  listed first under Phase 8 below, and they are fixed. The local gate (`npm run check`,
-  the Rust format, lint, and test gates, `npm run test:package`) passes: 996 unit and
-  contract tests, 119 integration (2 skipped: the cross-disk move needs a second
-  writable filesystem, `DISKTOP_TEST_DESTINATION_FS`), 13 recovery, 16 PTY, 9 package,
-  and 244 helper tests.
-- **Still required before the one publication:** the CI workflows green on GitHub,
-  including the ARM64 runners (the ARM64 helpers have been built but never run); the
+  Windows partition, and a locked 4 TB LUKS drive. Those hardware runs exposed
+  accounting and mount-policy defects now covered by regressions. The local gate (`npm run check`,
+  the Rust format, lint, and test gates) passes: 1,068 unit and contract tests,
+  128 integration, 13 recovery, 18 PTY, and 266 helper tests. The six ordinary
+  integration skips are external-tool, namespace, second-filesystem and opt-in timer
+  cases; separate gates passed real cross-device/full-disk/full-journal/read-only
+  actions, a real user timer and SSH terminal restoration. All nine package checks
+  passed on Node 26 glibc, Node 24 glibc and Node 24 musl. The million-entry benchmark
+  passed all six resource and latency checks. See [validation evidence](docs/release-readiness.md).
+- **Publication gates:** green CI at the reviewed commit, including the ARM64 runners; the
   host and VM checks the support matrix still lists as not validated (distribution
-  managers, the user timer, privileged manager cleanup, SMART, ZFS, WSL, SSH); and,
+  manager mutations under privilege, SMART, ZFS and WSL); and,
   after publishing, provenance and a registry install verified on clean accounts.
 - **Known limits, stated rather than hidden:** on Btrfs, reflinked and compressed files
   each report their full size, so a scan's file total can exceed what `df` reports as
   used (`uv`'s cache reflinks packages into virtualenvs); `du -x`, used for the
   measurement taken as root, stops at a Btrfs subvolume nested inside an unreadable
   directory; that measurement lists one level below each directory and is not
-  browsable further; and the TUI's short confirmation dialogs still stretch to the full
-  height of the screen.
+  browsable further.
+
+### Phase 8: production hardening and release engineering
+
+- Inventory includes every persistent partition and connected storage device, including
+  unmounted filesystems, locked encrypted containers, swap, recovery partitions and
+  partitions with unknown signatures. Shared RAID/LVM parents are counted once, and
+  large `lsblk` byte counts retain their exact value in JSON and reports.
+- The TUI uses Catppuccin Mocha, compact navigation, centered confirmation dialogs,
+  aligned capacity and distribution bars, and clear partial-action outcomes. Small
+  terminals, no color, ASCII rendering and repeated-session resource use have regressions.
+- Wide directory snapshots, hardlink maps and duplicate size classes spill to bounded
+  scratch indexes. Cancelled and superseded UI tasks retain one pending request per kind;
+  native progress is coalesced while durable item outcomes apply backpressure.
+- Hardlink replacement checks ACLs and extended attributes using open descriptors,
+  including after exchange. Undo verifies the restored identity and rolls back a changed
+  Trash entry. Journal files refuse symlinks, extra hardlinks and unsafe ownership.
+- Stored plans and helper checksum files have bounded, no-follow reads. Plans and reports
+  publish without replacing existing files; reports refuse filesystems without a safe
+  publication primitive. Unavailable network mounts cannot exhaust Node's worker pool.
+- Read-only discovery commands propagate cancellation to their process groups. User
+  timer failures report the failing systemctl step and preserve units when disable fails.
+  A real user-manager integration test exercises runtime timer installation and removal.
+- Private mount-namespace tests cover a full output filesystem, a read-only source and
+  cross-device moves, with source bytes preserved on refusal. Dependency advisory checks
+  now gate both CI and publication, and distro CI exercises read-only manager adapters.
 
 ### Phase 7: the complete terminal UI, reports, and completions
 

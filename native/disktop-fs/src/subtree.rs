@@ -4,6 +4,7 @@
 //! directory is moved or removed, so an entry added, removed, renamed, or
 //! rewritten below it since review stops the item.
 
+use crate::directory_names::{Names, Store};
 use crate::guard::Refusal;
 use crate::sys::{self, EntryKind};
 use sha2::{Digest, Sha256};
@@ -79,10 +80,12 @@ pub fn digest(parent: RawFd, name: &[u8], cancelled: &AtomicBool) -> Result<Subt
     // The path of the entry being digested, relative to the reviewed
     // directory. Each frame remembers where its own directory's path ends.
     let mut relative = Vec::new();
-    let mut stack = vec![Frame::enter(root, 0, cancelled)?];
+    let names = Store::default();
+    let mut stack = vec![Frame::enter(root, 0, &names, cancelled)?];
 
     while let Some(frame) = stack.last_mut() {
-        let Some(name) = frame.names.pop() else {
+        check_cancelled(cancelled)?;
+        let Some(name) = frame.names.pop().map_err(|error| refusal(&error))? else {
             stack.pop();
             continue;
         };
@@ -111,7 +114,7 @@ pub fn digest(parent: RawFd, name: &[u8], cancelled: &AtomicBool) -> Result<Subt
             }
             let child = sys::open_child_directory(directory, &name, false)
                 .map_err(|error| refusal(&error))?;
-            stack.push(Frame::enter(child, relative.len(), cancelled)?);
+            stack.push(Frame::enter(child, relative.len(), &names, cancelled)?);
         }
     }
 
@@ -125,36 +128,42 @@ pub fn digest(parent: RawFd, name: &[u8], cancelled: &AtomicBool) -> Result<Subt
 /// byte order so the next one is a `pop`, and where its own path ends.
 struct Frame {
     directory: sys::Directory,
-    names: Vec<Vec<u8>>,
+    names: Names,
     base: usize,
 }
 
 impl Frame {
     /// Takes ownership of `descriptor` whatever it returns.
-    fn enter(descriptor: RawFd, base: usize, cancelled: &AtomicBool) -> Result<Frame, Refusal> {
-        if cancelled.load(Ordering::Relaxed) {
+    fn enter(
+        descriptor: RawFd,
+        base: usize,
+        names: &Store,
+        cancelled: &AtomicBool,
+    ) -> Result<Frame, Refusal> {
+        if let Err(refusal) = check_cancelled(cancelled) {
             sys::close(descriptor);
-            return Err(Refusal::new(
-                "cancelled",
-                "Stopped before the directory's contents were all read.",
-            ));
+            return Err(refusal);
         }
         let mut directory =
             sys::Directory::from_descriptor(descriptor).map_err(|error| refusal(&error))?;
-        let mut names = Vec::new();
-        while let Some(name) = directory.next_name().map_err(|error| refusal(&error))? {
-            names.push(name);
-        }
-        // Byte order, so the digest does not depend on the order a filesystem
-        // happens to return names in.
-        names.sort();
-        names.reverse();
+        let names =
+            Names::read(&mut directory, names, cancelled).map_err(|error| refusal(&error))?;
         Ok(Frame {
             directory,
             names,
             base,
         })
     }
+}
+
+fn check_cancelled(cancelled: &AtomicBool) -> Result<(), Refusal> {
+    if cancelled.load(Ordering::Relaxed) {
+        return Err(Refusal::new(
+            "cancelled",
+            "Stopped before the directory's contents were all read.",
+        ));
+    }
+    Ok(())
 }
 
 fn kind_byte(kind: EntryKind) -> u8 {
@@ -167,6 +176,12 @@ fn kind_byte(kind: EntryKind) -> u8 {
 }
 
 fn refusal(error: &std::io::Error) -> Refusal {
+    if crate::transfer::is_cancelled(error) {
+        return Refusal::new(
+            "cancelled",
+            "Stopped before the directory's contents were all read.",
+        );
+    }
     match error.raw_os_error() {
         Some(libc::EXDEV) => Refusal::new(
             "protected-path",

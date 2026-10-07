@@ -1,9 +1,10 @@
 import { createHash } from "node:crypto";
 import { constants } from "node:fs";
-import { access, lstat, readFile, stat } from "node:fs/promises";
+import { access, lstat, open, stat } from "node:fs/promises";
 import { posix } from "node:path";
 import { fileURLToPath } from "node:url";
 import type { Capability } from "../domain/models.js";
+import { readOwnFile } from "../storage/files.js";
 
 export type HelperIntegrity = "checksum-verified" | "development-build";
 
@@ -35,6 +36,8 @@ export const CHECKSUM_FILE = "SHA256SUMS";
 
 /** Four lines of about a hundred bytes each; anything much larger is not ours. */
 const CHECKSUM_FILE_MAX_BYTES = 4096;
+/** Packaged helpers are a few MiB; a corrupt replacement cannot impose an unbounded hash. */
+const HELPER_MAX_BYTES = 256 * 1024 * 1024;
 
 const ARCHITECTURES: Readonly<Record<string, string>> = { x64: "x64", arm64: "arm64" };
 
@@ -161,8 +164,9 @@ async function verifyPackaged(path: string, target: string, vendorDirectory: str
   let entry;
   try {
     entry = await lstat(path);
-  } catch {
-    return undefined;
+  } catch (error) {
+    return (error as NodeJS.ErrnoException).code === "ENOENT" ? undefined
+      : refuse(`The packaged helper for ${target} could not be inspected and is not run.`);
   }
   if (!entry.isFile()) {
     return refuse(`The packaged helper for ${target} is not a regular file, so it is not run.`);
@@ -182,7 +186,12 @@ async function verifyPackaged(path: string, target: string, vendorDirectory: str
     return refuse(`The helper for ${target} has no recorded checksum in ${CHECKSUM_FILE}, so it is not run.`);
   }
 
-  const actual = createHash("sha256").update(await readFile(path)).digest("hex");
+  let actual: string;
+  try {
+    actual = await helperChecksum(path);
+  } catch {
+    return refuse(`The packaged helper for ${target} could not be read as a bounded regular file and is not run.`);
+  }
   if (actual !== expected) {
     return refuse(`The helper for ${target} does not match its recorded checksum in ${CHECKSUM_FILE} and is not run; the installation was altered or damaged after it was packed.`);
   }
@@ -193,15 +202,34 @@ async function verifyPackaged(path: string, target: string, vendorDirectory: str
 async function readChecksums(path: string): Promise<ReadonlyMap<string, string> | "malformed" | undefined> {
   let text: string;
   try {
-    const info = await stat(path);
-    if (!info.isFile() || info.size > CHECKSUM_FILE_MAX_BYTES) {
-      return "malformed";
-    }
-    text = await readFile(path, "utf8");
-  } catch {
-    return undefined;
+    text = await readOwnFile(path, CHECKSUM_FILE_MAX_BYTES, { followSymlinks: false });
+  } catch (error) {
+    return (error as NodeJS.ErrnoException).code === "ENOENT" ? undefined : "malformed";
   }
   return parseChecksums(text) ?? "malformed";
+}
+
+async function helperChecksum(path: string): Promise<string> {
+  const handle = await open(path, constants.O_RDONLY | constants.O_NONBLOCK | constants.O_NOFOLLOW);
+  try {
+    const facts = await handle.stat();
+    if (!facts.isFile() || facts.size > HELPER_MAX_BYTES) {
+      throw new RangeError("The helper is not a bounded regular file");
+    }
+    const hash = createHash("sha256");
+    const buffer = Buffer.allocUnsafe(64 * 1024);
+    let read = 0;
+    for (;;) {
+      const { bytesRead } = await handle.read(buffer, 0, buffer.length, read);
+      if (bytesRead === 0) break;
+      read += bytesRead;
+      if (read > HELPER_MAX_BYTES) throw new RangeError("The helper grew past its bound");
+      hash.update(buffer.subarray(0, bytesRead));
+    }
+    return hash.digest("hex");
+  } finally {
+    await handle.close();
+  }
 }
 
 async function isExecutableFile(path: string): Promise<boolean> {

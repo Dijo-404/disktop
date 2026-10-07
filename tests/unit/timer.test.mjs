@@ -118,6 +118,31 @@ test("uninstall removes Disktop's units and can run twice", async () => {
   assert.deepEqual(second.units.map((unit) => unit.state), ["absent", "absent"]);
 });
 
+test("a failed daemon reload leaves installed units explicit and never enables the timer", async () => {
+  const directory = await home();
+  const control = systemctl({ "--user daemon-reload": { exitCode: 1, stderr: "Failed to connect to bus" } });
+  const result = await createSystemdUserTimer({ unitDirectory: directory, systemctl: control.run }).install(UNITS);
+  assert.equal(result.enabled, false);
+  assert.match(result.failure.message, /daemon-reload.*Failed to connect to bus/);
+  assert.equal(control.calls.some((call) => call.includes("enable")), false);
+  assert.ok((await readFile(join(directory, "disktop-alerts.timer"), "utf8")).startsWith(TIMER_MARKER));
+});
+
+test("a failed disable preserves both units and reports that the timer may still run", async () => {
+  const directory = await home();
+  const control = systemctl({ "--user disable --now disktop-alerts.timer": { exitCode: 1, stderr: "Access denied" } });
+  const timer = createSystemdUserTimer({ unitDirectory: directory, systemctl: control.run });
+  await timer.install(UNITS);
+  control.calls.length = 0;
+  const result = await timer.uninstall();
+  assert.equal(result.failure.code, "permission-denied");
+  assert.match(result.failure.message, /units were kept/);
+  for (const name of ["disktop-alerts.service", "disktop-alerts.timer"]) {
+    assert.ok((await readFile(join(directory, name), "utf8")).startsWith(TIMER_MARKER));
+  }
+  assert.deepEqual(control.calls, ["--user show-environment", "--user disable --now disktop-alerts.timer"]);
+});
+
 test("uninstall refuses a timer Disktop did not write, and neither stops nor removes anything", async () => {
   const directory = await home();
   const control = systemctl();
@@ -184,6 +209,18 @@ test("timer install reports the units it wrote and that the timer is on", async 
 test("a timer written but not enabled is an incomplete install", async () => {
   const context = timerContext({ ...WRITTEN, enabled: false });
   assert.equal(await runCli(["timer", "install", "--json"], context), 3);
+});
+
+test("timer command failures reach the CLI as actionable error envelopes", async () => {
+  for (const action of ["install", "uninstall"]) {
+    const context = timerContext({ ...WRITTEN, failure: { code: "permission-denied", message: "systemctl disable failed; the units were kept" } });
+    const status = await runCli(["timer", action, "--json"], context);
+    const envelope = JSON.parse(context.captured.stdout);
+    assert.equal(status, 2);
+    assert.ok(validators.get("timer")(envelope), JSON.stringify(validators.get("timer").errors));
+    assert.equal(envelope.error.code, "permission-denied");
+    assert.match(envelope.error.message, /units were kept/);
+  }
 });
 
 test("a foreign unit at Disktop's path refuses the install", async () => {

@@ -169,7 +169,7 @@ export function createReportService(dependencies: ReportDependencies): ReportSer
             `No stored scan covers ${request.subject.display}. Run 'disktop scan ${request.subject.display}' first, or leave out --path.`,
           );
         }
-        scan = await scanSection(dependencies.explore, request.subject, snapshot, request.limit);
+        scan = await scanSection(dependencies.explore, request.subject, snapshot, request.limit, signal);
         const record = await dependencies.elevated?.recorded(snapshot.scanId);
         const elevated = record === undefined ? undefined : elevatedUnder(record, request.subject);
         if (elevated !== undefined) {
@@ -253,6 +253,7 @@ async function scanSection(
   subject: RawPath,
   snapshot: SnapshotSummary,
   limit: number,
+  signal: AbortSignal,
 ): Promise<ScanSection> {
   const warnings: Warning[] = snapshot.completeness.complete ? [] : [...snapshot.completeness.warnings];
   if (!snapshot.completeness.complete && warnings.length === 0) {
@@ -276,7 +277,7 @@ async function scanSection(
       order: "descending",
       limit,
       includeTypeTotals: true,
-    });
+    }, signal);
   } catch (error) {
     if (error instanceof StaleScanIndex) {
       return unanswered(
@@ -296,31 +297,48 @@ async function scanSection(
   // The breakdown that adds up: what is directly inside, then the largest
   // files on their own. Either is left out, not emptied, if the index cannot
   // answer for it.
-  const own = await explore.page({ scanId: snapshot.scanId, filter: { atPath: subject }, limit: 1 });
-  const subjectRow = own.kind === "page" ? own.page.entries.find((entry) => entry.path.bytesBase64 === subject.bytesBase64) : undefined;
+  let breakdownComplete = true;
+  const additionalPage = async (query: Parameters<ExploreService["page"]>[0], section: string) => {
+    try {
+      const page = await explore.page(query, signal);
+      if (page.kind === "page") return page.page;
+      breakdownComplete = false;
+      warnings.push({ code: "index-unavailable", message: `${section} could not be read: ${page.capability.explanation}` });
+    } catch (error) {
+      if (!(error instanceof StaleScanIndex) && !(error instanceof CapabilityUnavailable)) throw error;
+      breakdownComplete = false;
+      warnings.push({
+        code: "index-unavailable",
+        message: `${section} could not be read: ${error instanceof CapabilityUnavailable ? error.capability.explanation : error.message}`,
+      });
+    }
+    return undefined;
+  };
+  const own = await additionalPage({ scanId: snapshot.scanId, filter: { atPath: subject }, limit: 1 }, "The subject's index row");
+  const subjectRow = own?.entries.find((entry) => entry.path.bytesBase64 === subject.bytesBase64);
   const children =
     subjectRow === undefined
       ? undefined
-      : await explore.page({ scanId: snapshot.scanId, filter: { parentId: subjectRow.id }, sort: "allocated", order: "descending", limit });
-  const files = await explore.page({
+      : await additionalPage({ scanId: snapshot.scanId, filter: { parentId: subjectRow.id }, sort: "allocated", order: "descending", limit }, "The direct-child breakdown");
+  const files = await additionalPage({
     scanId: snapshot.scanId,
     filter: { underPath: subject, kinds: ["file"] },
     sort: "allocated",
     order: "descending",
     limit,
-  });
+  }, "The largest-file breakdown");
 
   return {
     included: true,
-    complete: snapshot.completeness.complete,
+    complete: snapshot.completeness.complete && breakdownComplete,
     warnings,
     subject,
     snapshot,
     largest: { limit, entries: outcome.page.entries, more: outcome.page.nextCursor !== undefined },
-    ...(children?.kind === "page"
-      ? { children: { limit, entries: children.page.entries, more: children.page.nextCursor !== undefined } }
+    ...(children !== undefined
+      ? { children: { limit, entries: children.entries, more: children.nextCursor !== undefined } }
       : {}),
-    ...(files.kind === "page" ? { largestFiles: { limit, entries: files.page.entries, more: files.page.nextCursor !== undefined } } : {}),
+    ...(files !== undefined ? { largestFiles: { limit, entries: files.entries, more: files.nextCursor !== undefined } } : {}),
     typeTotals: outcome.page.typeTotals ?? [],
   };
 }

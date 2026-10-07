@@ -26,9 +26,18 @@ function haveTmux(context) {
   return true;
 }
 
-async function pane() {
-  await delay(700);
-  return tmux("capture-pane", "-p", "-t", "disktop").stdout;
+async function pane(expected) {
+  const deadline = Date.now() + 10_000;
+  let contents = "";
+  do {
+    const captured = tmux("capture-pane", "-p", "-t", "disktop");
+    assert.equal(captured.status, 0, captured.stderr);
+    contents = captured.stdout;
+    if (expected.test(contents)) return contents;
+    await delay(75);
+  } while (Date.now() < deadline);
+  assert.match(contents, expected, "the expected frame was not drawn before the deadline");
+  return contents;
 }
 
 test("the TUI draws, redraws on resize, and hands the pane back inside tmux", async (context) => {
@@ -52,7 +61,7 @@ test("the TUI draws, redraws on resize, and hands the pane back inside tmux", as
     );
     assert.equal(started.status, 0, started.stderr);
 
-    const first = await pane();
+    const first = await pane(/MOUNT/);
     assert.match(first, /Disktop/);
     assert.match(first, /MOUNT/);
     for (const line of first.split("\n")) {
@@ -60,19 +69,19 @@ test("the TUI draws, redraws on resize, and hands the pane back inside tmux", as
     }
 
     tmux("send-keys", "-t", "disktop", "2");
-    assert.match(await pane(), /Nothing has been scanned here yet/);
+    assert.match(await pane(/Nothing has been scanned here yet/), /Nothing has been scanned here yet/);
 
     tmux("resize-window", "-t", "disktop", "-x", "60", "-y", "18");
-    const narrow = await pane();
+    const narrow = await pane(/Nothing has been scanned/);
     assert.match(narrow, /Explore/, "the tab bar survives a narrower window");
     assert.match(narrow, /Nothing has been scanned/, "and so does the view");
 
     tmux("resize-window", "-t", "disktop", "-x", "30", "-y", "8");
-    assert.match(await pane(), /needs at least/, "below the minimum it says so");
+    assert.match(await pane(/needs at least/), /needs at least/, "below the minimum it says so");
 
     tmux("resize-window", "-t", "disktop", "-x", "100", "-y", "30");
     tmux("send-keys", "-t", "disktop", "q");
-    const after = await pane();
+    const after = await pane(/exited with [03]/);
     assert.match(after, /exited with [03]/, "q leaves with a documented status");
     assert.doesNotMatch(after, /MOUNT/, "the alternate screen is gone and the shell's screen is back");
   } finally {

@@ -23,6 +23,15 @@ after(async () => {
 
 const NOW = new Date("2026-10-01T09:00:00.000Z");
 
+test("a missing plan directory is empty, but directory read failures surface", async () => {
+  const root = await sandbox();
+  const store = createPlanStore(root);
+  assert.deepEqual(await store.list(), []);
+  await writeFile(join(root, "plans"), "a store directory was replaced by a file");
+  await assert.rejects(store.list(), { code: "ENOTDIR" });
+  await assert.rejects(store.prune(NOW), { code: "ENOTDIR" });
+});
+
 function plan(overrides = {}) {
   return buildPlan({
     operation: "trash",
@@ -417,4 +426,55 @@ test("a stored file cannot claim a manager plan needs no administrator rights", 
   document.permission = "user";
   await writeFile(file, JSON.stringify(document));
   assert.equal((await store.get(saved.id)).permission, "manager-privilege");
+});
+
+test("plan publication refuses to replace an existing reviewed ID", async () => {
+  const root = await sandbox();
+  const store = createPlanStore(root);
+  const saved = plan();
+  await store.save(saved);
+  const file = join(root, "plans", `${saved.id}.json`);
+  const before = await readFile(file);
+  await assert.rejects(store.save({ ...saved, scopeSummary: "a different selection" }), (error) => error.code === "EEXIST");
+  assert.deepEqual(await readFile(file), before);
+  assert.deepEqual(await readdir(join(root, "plans")), [`${saved.id}.json`], "failed publication cleans its stage");
+});
+
+test("plan save refuses IDs that could write outside its store", async () => {
+  const root = await sandbox();
+  const store = createPlanStore(root);
+  await assert.rejects(store.save({ ...plan(), id: "../outside" }), /plan ID/);
+  assert.deepEqual(await readdir(root), []);
+});
+
+test("an internal plan ID must match its filename before reading or pruning", async () => {
+  const root = await sandbox();
+  const store = createPlanStore(root);
+  const saved = plan({ createdAt: new Date("2026-09-01T09:00:00.000Z") });
+  await store.save(saved);
+  const file = join(root, "plans", `${saved.id}.json`);
+  const outside = join(root, "outside.json");
+  await writeFile(outside, "keep this");
+  const document = JSON.parse(await readFile(file, "utf8"));
+  document.id = "../outside";
+  await writeFile(file, JSON.stringify(document));
+  assert.equal(await store.get(saved.id), undefined);
+  assert.equal((await store.list()).length, 0);
+  assert.equal(await store.prune(NOW), 0);
+  assert.equal(await readFile(outside, "utf8"), "keep this", "prune cannot resolve an ID read from untrusted contents");
+});
+
+test("pipes, symlinks and oversized plan files are refused without blocking or unbounded reads", async () => {
+  const { open, symlink } = await import("node:fs/promises");
+  const { spawnSync } = await import("node:child_process");
+  const root = await sandbox();
+  const store = createPlanStore(root);
+  await store.save(plan());
+  const directory = join(root, "plans");
+  assert.equal(spawnSync("mkfifo", [join(directory, "pipe.json")]).status, 0);
+  await symlink("/dev/zero", join(directory, "device.json"));
+  const large = await open(join(directory, "large.json"), "w");
+  try { await large.truncate(64 * 1024 * 1024 + 1); } finally { await large.close(); }
+  for (const id of ["pipe", "device", "large"]) assert.equal(await store.get(id), undefined);
+  assert.equal((await store.list()).length, 1, "only the regular bounded record is usable");
 });

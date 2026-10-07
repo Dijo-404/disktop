@@ -5,8 +5,11 @@ import type { ItemVerdict, ManagerAdapter, ManagerDiscovery, ManagerPreviewOutco
 export async function previewFrom(
   discover: ManagerAdapter["discover"],
   action: string,
+  signal?: AbortSignal,
 ): Promise<ManagerPreviewOutcome> {
-  const discovery: ManagerDiscovery = await discover();
+  signal?.throwIfAborted();
+  const discovery: ManagerDiscovery = await discover(signal);
+  signal?.throwIfAborted();
   const proposal = discovery.proposals.find((candidate) => candidate.action === action);
   return proposal === undefined
     ? { kind: "refused", message: discovery.capability.explanation, capability: discovery.capability }

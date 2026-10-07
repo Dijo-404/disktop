@@ -51,138 +51,120 @@ export async function createTerminalRenderer(options: RendererOptions): Promise<
 const ESC = "\u001b[";
 
 /**
- * SGR parameters for each style at each colour depth. Empty means "no
- * attributes".
- *
- * The terminal's own background may be dark or light, and Disktop cannot ask
- * which. So plain text keeps the terminal's default foreground, emphasis is
- * bold rather than a brighter grey, and colours are mid-tones that read on
- * either. Where Disktop sets a background itself — the header band, the
- * selected row — it sets the foreground too, from the `onDark` table, so the
- * pair is legible whatever the terminal's own colours are.
+ * Catppuccin Mocha: https://catppuccin.com/palette/#mocha.
+ * Truecolor uses the original RGB values; 256-colour terminals get the nearest
+ * xterm cube/greyscale entry. Owning both foreground and background keeps the
+ * dark palette readable even when the terminal normally has a light theme.
  */
+const MOCHA = {
+  base: ["30;30;46", 235],
+  mantle: ["24;24;37", 234],
+  surface0: ["49;50;68", 237],
+  surface1: ["69;71;90", 239],
+  text: ["205;214;244", 189],
+  subtext1: ["186;194;222", 146],
+  subtext0: ["166;173;200", 146],
+  overlay0: ["108;112;134", 243],
+  mauve: ["203;166;247", 183],
+  red: ["243;139;168", 211],
+  peach: ["250;179;135", 216],
+  yellow: ["249;226;175", 223],
+  green: ["166;227;161", 151],
+  teal: ["148;226;213", 116],
+  blue: ["137;180;250", 111],
+  lavender: ["180;190;254", 147],
+} as const;
+
+type MochaColor = keyof typeof MOCHA;
+type PaletteDepth = "256" | "truecolor";
+
+function mochaSgr(color: MochaColor, depth: PaletteDepth, background = false): string {
+  const [rgb, indexed] = MOCHA[color];
+  return `${background ? 48 : 38};${depth === "truecolor" ? `2;${rgb}` : `5;${indexed}`}`;
+}
+
+function mochaPalette(depth: PaletteDepth): Readonly<Record<StyleName, string>> {
+  const fg = (color: MochaColor, attributes = ""): string => `${attributes}${mochaSgr(color, depth)}`;
+  const badge = (color: MochaColor): string => `1;${fg("base")};${mochaSgr(color, depth, true)}`;
+  return {
+    normal: fg("text"),
+    dim: fg("subtext0"),
+    muted: fg("subtext1"),
+    strong: fg("text", "1;"),
+    accent: fg("mauve"),
+    title: fg("text", "1;"),
+    brand: fg("mauve", "1;"),
+    tab: fg("subtext0"),
+    tabActive: badge("mauve"),
+    heading: fg("lavender", "1;"),
+    directory: fg("blue", "1;"),
+    symlink: fg("lavender"),
+    ok: fg("green"),
+    warn: fg("yellow"),
+    danger: fg("red", "1;"),
+    info: fg("blue"),
+    barUsed: fg("teal"),
+    barWarn: fg("yellow"),
+    barDanger: fg("red"),
+    barReserved: fg("subtext0"),
+    barEmpty: fg("overlay0"),
+    series1: fg("teal"),
+    series2: fg("mauve"),
+    series3: fg("blue"),
+    series4: fg("peach"),
+    series5: fg("green"),
+    series6: fg("subtext0"),
+    key: fg("mauve", "1;"),
+    border: fg("overlay0"),
+    band: fg("text"),
+    input: `${fg("text", "1;4;")};${mochaSgr("surface1", depth, true)}`,
+    badgeOk: badge("green"),
+    badgeWarn: badge("yellow"),
+    badgeDanger: badge("red"),
+    badgeInfo: badge("blue"),
+  };
+}
+
+const PALETTE_TRUECOLOR = mochaPalette("truecolor");
+const PALETTE_256 = mochaPalette("256");
+
+/** ANSI approximations retain Mocha's semantic colours and a dark surface. */
 const PALETTE_16: Readonly<Record<StyleName, string>> = {
-  normal: "",
-  dim: "2",
-  muted: "90",
-  strong: "1",
-  accent: "36",
-  title: "1",
-  brand: "1;36",
-  tab: "",
-  tabActive: "1;30;46",
-  heading: "1",
-  directory: "1;36",
-  symlink: "35",
-  ok: "32",
-  warn: "33",
-  danger: "1;31",
-  info: "36",
-  barUsed: "36",
-  barWarn: "33",
-  barDanger: "31",
-  barReserved: "90",
-  barEmpty: "90",
-  series1: "36",
-  series2: "35",
-  series3: "34",
-  series4: "33",
-  series5: "32",
-  series6: "90",
-  key: "1;36",
-  border: "90",
-  band: "",
-  input: "1;4",
-  badgeOk: "1;30;42",
-  badgeWarn: "1;30;43",
-  badgeDanger: "1;97;41",
-  badgeInfo: "1;30;46",
-};
-
-const PALETTE_256: Readonly<Record<StyleName, string>> = {
-  normal: "",
-  dim: "38;5;245",
-  muted: "38;5;243",
-  strong: "1",
-  accent: "38;5;33",
-  title: "1",
-  brand: "1;38;5;33",
-  tab: "38;5;244",
-  tabActive: "1;38;5;16;48;5;75",
-  heading: "1;38;5;244",
-  directory: "1;38;5;33",
-  symlink: "38;5;133",
-  ok: "38;5;35",
-  warn: "38;5;172",
-  danger: "1;38;5;160",
-  info: "38;5;32",
-  barUsed: "38;5;33",
-  barWarn: "38;5;172",
-  barDanger: "38;5;160",
-  barReserved: "38;5;244",
-  barEmpty: "38;5;246",
-  series1: "38;5;33",
-  series2: "38;5;133",
-  series3: "38;5;35",
-  series4: "38;5;172",
-  series5: "38;5;166",
-  series6: "38;5;244",
-  key: "1;38;5;33",
-  border: "38;5;246",
-  band: "",
-  input: "1;4",
-  badgeOk: "1;38;5;16;48;5;78",
-  badgeWarn: "1;38;5;16;48;5;214",
-  badgeDanger: "1;38;5;231;48;5;160",
-  badgeInfo: "1;38;5;16;48;5;110",
-};
-
-/** Foregrounds for text on a background Disktop set: always light on dark. */
-const ON_DARK_16: Partial<Record<StyleName, string>> = {
   normal: "97",
   dim: "37",
   muted: "37",
   strong: "1;97",
+  accent: "95",
   title: "1;97",
-  heading: "1;97",
-  tab: "97",
-  accent: "96",
-  brand: "1;96",
-  directory: "1;96",
-  key: "1;96",
-  barEmpty: "37",
-  border: "37",
-};
-
-const ON_DARK_256: Partial<Record<StyleName, string>> = {
-  normal: "38;5;255",
-  dim: "38;5;250",
-  muted: "38;5;247",
-  strong: "1;38;5;231",
-  title: "1;38;5;231",
-  heading: "1;38;5;250",
-  tab: "38;5;250",
-  accent: "38;5;75",
-  brand: "1;38;5;75",
-  directory: "1;38;5;117",
-  key: "1;38;5;75",
-  ok: "38;5;114",
-  warn: "38;5;214",
-  danger: "1;38;5;203",
-  info: "38;5;111",
-  barUsed: "38;5;75",
-  barWarn: "38;5;214",
-  barDanger: "38;5;203",
-  barEmpty: "38;5;242",
-  barReserved: "38;5;245",
-  series1: "38;5;75",
-  series2: "38;5;176",
-  series3: "38;5;114",
-  series4: "38;5;221",
-  series5: "38;5;209",
-  series6: "38;5;250",
-  symlink: "38;5;176",
-  border: "38;5;242",
+  brand: "1;95",
+  tab: "37",
+  tabActive: "1;30;105",
+  heading: "1;94",
+  directory: "1;94",
+  symlink: "95",
+  ok: "92",
+  warn: "93",
+  danger: "1;91",
+  info: "94",
+  barUsed: "96",
+  barWarn: "93",
+  barDanger: "91",
+  barReserved: "90",
+  barEmpty: "90",
+  series1: "96",
+  series2: "95",
+  series3: "94",
+  series4: "93",
+  series5: "92",
+  series6: "37",
+  key: "1;95",
+  border: "90",
+  band: "97",
+  input: "1;4;97",
+  badgeOk: "1;30;102",
+  badgeWarn: "1;30;103",
+  badgeDanger: "1;30;101",
+  badgeInfo: "1;30;104",
 };
 
 const NO_COLOR_ATTRIBUTES: Partial<Record<StyleName, string>> = {
@@ -201,14 +183,16 @@ const NO_COLOR_ATTRIBUTES: Partial<Record<StyleName, string>> = {
   input: "4",
 };
 
-function sgrFor(style: StyleName, theme: Theme, onDark: boolean): string {
+function sgrFor(style: StyleName, theme: Theme): string {
   switch (theme.color) {
     case "none":
       return NO_COLOR_ATTRIBUTES[style] ?? "";
     case "16":
-      return (onDark ? ON_DARK_16[style] : undefined) ?? PALETTE_16[style];
+      return PALETTE_16[style];
     case "256":
-      return (onDark ? ON_DARK_256[style] : undefined) ?? PALETTE_256[style];
+      return PALETTE_256[style];
+    case "truecolor":
+      return PALETTE_TRUECOLOR[style];
   }
 }
 
@@ -218,15 +202,22 @@ function selectionSgr(theme: Theme): string {
     case "none":
       return "7";
     case "16":
-      return "44";
+      return "100";
     case "256":
-      return "48;5;24";
+      return mochaSgr("surface0", "256", true);
+    case "truecolor":
+      return mochaSgr("surface0", "truecolor", true);
   }
 }
 
 /** The background laid under every span of the header band. */
 function bandSgr(theme: Theme): string {
-  return theme.color === "256" ? "48;5;236" : theme.color === "16" ? "40" : "";
+  return theme.color === "none" ? "" : theme.color === "16" ? "40" : mochaSgr("mantle", theme.color, true);
+}
+
+/** The base surface fills ordinary rows, including their trailing cells. */
+function baseSgr(theme: Theme): string {
+  return theme.color === "none" ? "" : theme.color === "16" ? "40" : mochaSgr("base", theme.color, true);
 }
 
 /**
@@ -235,8 +226,7 @@ function bandSgr(theme: Theme): string {
  * as the last line of defence; this is the only function that emits SGR.
  */
 export function serializeLine(line: ScreenLine, columns: number, theme: Theme): string {
-  const under = line.selected === true ? selectionSgr(theme) : line.fill === "band" ? bandSgr(theme) : "";
-  const onDark = under !== "" && theme.color !== "none";
+  const under = line.selected === true ? selectionSgr(theme) : line.fill === "band" ? bandSgr(theme) : baseSgr(theme);
   let out = "";
   let used = 0;
   for (const span of line.spans) {
@@ -248,12 +238,12 @@ export function serializeLine(line: ScreenLine, columns: number, theme: Theme): 
     if (text === "") {
       continue;
     }
-    const sgr = [under, sgrFor(span.style, theme, onDark)].filter((part) => part !== "").join(";");
+    const sgr = [under, sgrFor(span.style, theme)].filter((part) => part !== "").join(";");
     out += sgr === "" ? `${ESC}0m${text}` : `${ESC}0;${sgr}m${text}`;
     used += cellWidth(text);
   }
   if (used < columns) {
-    const fill = line.fill !== undefined && line.fill !== "band" ? sgrFor(line.fill, theme, onDark) : "";
+    const fill = line.fill !== undefined && line.fill !== "band" ? sgrFor(line.fill, theme) : "";
     const sgr = [under, fill].filter((part) => part !== "").join(";");
     out += `${sgr === "" ? `${ESC}0m` : `${ESC}0;${sgr}m`}${" ".repeat(columns - used)}`;
   }

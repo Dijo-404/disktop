@@ -8,6 +8,22 @@ import { rawPathFromUtf8 } from "../../dist/domain/paths.js";
 const SETTINGS = { crossFilesystems: false, accounting: "allocated", excludes: [] };
 const ROOT = rawPathFromUtf8("/home/example");
 
+test("exploration passes cancellation to the index and never starts a pre-cancelled query", async () => {
+  let queries = 0;
+  const controller = new AbortController();
+  const explore = createExploreService({
+    async query(_request, signal) {
+      queries += 1;
+      assert.equal(signal, controller.signal);
+      controller.abort();
+      return { entries: [] };
+    },
+  });
+  await assert.rejects(explore.page({ scanId: "scan-1" }, controller.signal), { name: "AbortError" });
+  await assert.rejects(explore.page({ scanId: "scan-1" }, controller.signal), { name: "AbortError" });
+  assert.equal(queries, 1);
+});
+
 function scannerEmitting(events) {
   return {
     // eslint-disable-next-line require-yield
