@@ -113,7 +113,12 @@ Keep a change focused on an owning module and its contracts. Include the relevan
 
 ## One initial publication
 
-`package.json` is the public `disktop@1.0.0` package: version `1.0.0`, `private: false`, and `files` limited to the compiled JavaScript, the four helpers and their `SHA256SUMS`, the CLI JSON schemas, `README.md`, `LICENSE`, and `CHANGELOG.md`. `tests/package/` holds the exact allowlist and fails on anything else. `1.0.0` must contain the complete Linux scope and pass the full Phase 8 checklist before publication. Create a reviewed `v1.0.0` tag only after the full acceptance matrix has evidence.
+`package.json` is the public `disktop@1.0.0` package: version `1.0.0`, `private: false`, and `files` limited to the compiled JavaScript, the four helpers and their `SHA256SUMS`, the CLI JSON schemas, `README.md`, `LICENSE`, `THIRD_PARTY_NOTICES`, and `CHANGELOG.md`. `tests/package/` holds the exact allowlist and fails on anything else. `1.0.0` must contain the complete Linux scope and pass the full Phase 8 checklist before publication. Create a reviewed `v1.0.0` tag only after the full acceptance matrix has evidence.
+
+After a native dependency or release toolchain update, run `npm run licenses:native`
+and review the full upstream attributions. `npm run licenses:check` verifies them
+against the locked dependency graphs. Release builds run that gate; `npm pack`
+also refuses stale or incomplete notices without needing a Rust toolchain.
 
 Being publishable is not the same as being published. `prepublishOnly` runs `scripts/prepublish-guard.mjs`, which refuses `npm publish` anywhere but `.github/workflows/publish.yml` dispatched on the default branch for the tag matching the version. It is a seatbelt against an accidental publish from a checkout, not a control: environment variables can be set by anyone and `--ignore-scripts` skips it. What controls publication is that the only token able to publish lives in the protected environment below. The workflow publishes the exact tarball it tested with `npm publish <tarball> --ignore-scripts`, and npm runs no lifecycle scripts for a tarball anyway, so the workflow runs the guard as an explicit step instead.
 

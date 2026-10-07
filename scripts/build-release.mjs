@@ -29,6 +29,7 @@ import { join, relative } from "node:path";
 import { fileURLToPath } from "node:url";
 import { inspectElf, targetMismatches } from "./elf.mjs";
 import { helperHello } from "./helper-hello.mjs";
+import { checkNativeNotices } from "./native-notices.mjs";
 import { CHECKSUM_FILE, GLIBC_FLOOR, RELEASE_TARGETS, binaryName, hostTarget, zigTarget } from "./release-targets.mjs";
 
 const ROOT = fileURLToPath(new URL("..", import.meta.url));
@@ -202,6 +203,7 @@ async function main(argv) {
     return;
   }
 
+  await checkNativeNotices(ROOT);
   const version = await packageVersions();
   const host = hostTarget();
   const zig = haveZigbuild();
