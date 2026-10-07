@@ -88,7 +88,7 @@ Phase 8's engineering pass is implemented and locally validated. Connected drive
 every persistent partition are visible, and the TUI uses Catppuccin Mocha with truecolor
 and terminal fallbacks. Every mutation, scan/index, resource-sensitive adapter and
 surface was reviewed and hardened with regression coverage. `npm run check` passes
-1,068 unit/contract, 128 integration, 13 recovery and 18 PTY checks; Rust format, Clippy
+1,070 unit/contract, 128 integration, 13 recovery and 18 PTY checks; Rust format, Clippy
 and 266 helper tests pass. Separate gates prove real filesystem faults, the systemd
 user timer and SSH restoration. All four release helpers build with verified checksums;
 the packed artifact passes clean installation on Node 24/26 and glibc/musl. The

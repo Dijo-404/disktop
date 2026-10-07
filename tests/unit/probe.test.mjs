@@ -150,12 +150,12 @@ test("reading text from a pipe or a device answers nothing at once instead of wa
   }
 });
 
-test("large directory sampling remains bounded and preserves the first sorted raw names", async () => {
+test("a listing at the entry bound is complete and sorted, and overflow never becomes a sampled list", async () => {
   const root = await sandbox();
   try {
     // Create in reverse order, across bounded batches, so the answer cannot
     // accidentally rely on directory enumeration order.
-    for (let end = 4608; end > 0; end -= 64) {
+    for (let end = 4096; end > 0; end -= 64) {
       await Promise.all(Array.from({ length: Math.min(64, end) }, (_, offset) =>
         writeFile(join(root, String(end - offset - 1).padStart(5, "0")), "")));
     }
@@ -166,6 +166,16 @@ test("large directory sampling remains bounded and preserves the first sorted ra
     // Repeated reads close their directory descriptors and return the same
     // bounded selection, rather than retaining the previous directory's rows.
     assert.deepEqual(await probe.list(rawPathFromUtf8(root)), listed);
+    await writeFile(join(root, "overflow"), "");
+    for (let repeat = 0; repeat < 3; repeat += 1) {
+      await assert.rejects(probe.list(rawPathFromUtf8(root)), (error) => {
+        assert.equal(error.code, "EOVERFLOW");
+        assert.ok(error.message.includes(root), "the failure names the directory that exceeded the bound");
+        assert.match(error.message, /4096/);
+        assert.match(error.message, /disktop scan/);
+        return true;
+      });
+    }
   } finally {
     await restoreAndRemove(root);
   }

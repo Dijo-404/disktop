@@ -51,7 +51,12 @@ export function createPathProbe(): PathProbe {
             if (entry === null) break;
             const name: unknown = entry.name;
             if (!Buffer.isBuffer(name)) throw new Error("The directory reader did not preserve raw name bytes");
-            retainName(names, name);
+            if (names.length === MAX_ENTRIES) {
+              throw Object.assign(new Error(
+                `Directory ${path.display} contains more than ${MAX_ENTRIES} entries; discovery cannot report a complete listing within its bound. Use 'disktop scan' and 'disktop explore' for larger directories.`,
+              ), { code: "EOVERFLOW" });
+            }
+            names.push(name);
           }
         } finally {
           await directory.close();
@@ -111,34 +116,6 @@ export function createPathProbe(): PathProbe {
 function isAbsent(error: unknown): boolean {
   const code = (error as NodeJS.ErrnoException).code;
   return code === "ENOENT" || code === "ENOTDIR";
-}
-
-/** Retain the same first sorted names as readdir+sort without retaining the full directory. */
-function retainName(heap: Buffer[], name: Buffer): void {
-  if (heap.length < MAX_ENTRIES) {
-    heap.push(name);
-    let index = heap.length - 1;
-    while (index > 0) {
-      const parent = (index - 1) >> 1;
-      if (Buffer.compare(heap[parent] as Buffer, name) >= 0) break;
-      heap[index] = heap[parent] as Buffer;
-      index = parent;
-    }
-    heap[index] = name;
-    return;
-  }
-  if (Buffer.compare(name, heap[0] as Buffer) >= 0) return;
-  let index = 0;
-  for (;;) {
-    const left = index * 2 + 1;
-    if (left >= heap.length) break;
-    const right = left + 1;
-    const largest = right < heap.length && Buffer.compare(heap[right] as Buffer, heap[left] as Buffer) > 0 ? right : left;
-    if (Buffer.compare(name, heap[largest] as Buffer) >= 0) break;
-    heap[index] = heap[largest] as Buffer;
-    index = largest;
-  }
-  heap[index] = name;
 }
 
 interface ModeReading {

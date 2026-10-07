@@ -99,7 +99,13 @@ Sizes are measured in one pass after discovery, by the same scan index `scan`
 and `explore` read, so every number in one result shares an accounting mode.
 Asking for sizes and getting none is an incomplete result, not a complete one.
 `--no-sizes` skips the pass on purpose, which is much faster, leaves directory
-footprints unknown, and stays complete.
+footprints unknown, and does not itself make discovery incomplete.
+
+Detectors inspect known directory structures within a 4,096-entry listing bound.
+A directory above that bound produces an explicit warning and an incomplete result,
+never a sampled count presented as exact. An affected manager preview is refused.
+Use `scan` and `explore` for larger directories; their native index streams entries
+without this discovery limit.
 
 Ctrl+C stops discovery at the next detector boundary. `clean` writes nothing
 while it runs; measuring sizes over a large home directory can take a while,
