@@ -2,12 +2,33 @@
 
 All notable changes to Disktop are recorded here. Versions follow [Semantic Versioning](https://semver.org/).
 
-## 1.0.0 — release notes
+## 1.0.0 — 2026-10-07
 
 Release notes for the initial public version. Everything below the Phase headings
 was built in internal phases that were never published. Publication and verification
 status is maintained in the
 [release record](https://github.com/Dijo-404/disktop/blob/main/docs/release-readiness.md).
+
+### Initial publication
+
+- `disktop@1.0.0` became publicly available at **18:05:58.620 UTC** on 2026-10-07;
+  the registry's `latest` tag points to `1.0.0`.
+- Released from tag `v1.0.0` at commit
+  [`3d64485`](https://github.com/Dijo-404/disktop/commit/3d6448560d19d75b27fce75765819d89f36be09e).
+  [CI](https://github.com/Dijo-404/disktop/actions/runs/37659556807) passed all 19 jobs.
+- The [protected publish run](https://github.com/Dijo-404/disktop/actions/runs/37661525351)
+  passed its build and artifact gates and successfully submitted `1.0.0` with provenance.
+  The run finished with a failure because its immediate registry check returned 404;
+  the version subsequently became available. The original run is not recorded as green.
+- The downloaded registry tarball matches the reviewed SHA-256
+  `a2deddd76c137e349370fb839b887baff14b3ec27c649f1ce809616bf8b39acd`
+  and contains 192 allowed files. A clean registry install, all ten packaged-consumer
+  checks without skips, npm signature/attestation audit and independent verification
+  of both registry signatures and provenance passed. Phase 8 is complete under the
+  dated manual-check deferral. A read-only remote verification recovery run is pending;
+  its result will be recorded separately from the original failed workflow.
+- These publication records update repository documentation after release. The tagged
+  source and npm artifact remain unchanged; `1.0.0` is not rebuilt or republished.
 
 ### Prepublication validation, 2026-10-07
 
@@ -30,8 +51,8 @@ were complete; Phase 8 (whole-product validation and the sole release) remained 
 - **Publication prerequisites:** green CI at the reviewed commit, including the ARM64
   runners, all automated safety and artifact gates, and protected workflow approval.
   After publishing, provenance and a registry install must be verified on clean accounts.
-- **Tester follow-up:** the release owner deferred real SMART health, ZFS, WSL and
-  non-cache manager mutation checks until after initial publication on 2026-10-07.
+- **Tester follow-up:** on 2026-10-07 the release owner deferred real SMART health,
+  ZFS, WSL and non-cache manager mutation checks until after initial publication.
   They remain unvalidated in the [support matrix](docs/support-matrix.md), with
   evidence requirements in the [tester guide](docs/tester-guide.md).
 - **Known limits, stated rather than hidden:** on Btrfs, reflinked and compressed files

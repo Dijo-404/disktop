@@ -1,14 +1,15 @@
 # Testing Disktop on real systems
 
-The release owner assigned the remaining SMART hardware health, ZFS, WSL and
-non-cache manager checks to testers after the initial `1.0.0` publication on
-2026-10-07. Their status remains **unvalidated** in the
+On 2026-10-07 the release owner assigned the remaining SMART hardware health, ZFS,
+WSL and non-cache manager checks to testers after initial publication.
+`disktop@1.0.0` is now available on npm. Those environments remain **unvalidated** in the
 [support matrix](support-matrix.md) until results are reviewed. Automated CI and
-the guarded publishing workflow still run their required checks.
+the guarded publishing workflow passed their release gates; postpublication
+verification is tracked separately in the [release record](release-readiness.md).
 
 ## Get the version under test
 
-Once `1.0.0` is available on npm, install it as an ordinary account:
+Install `1.0.0` from npm as an ordinary account:
 
 ```sh
 npm install -g disktop@1.0.0
@@ -22,7 +23,9 @@ Supported runtimes are Node 24.21.0+ within Node 24, or Node 26.10.0+ within Nod
 Full scanning and cleanup need Linux 5.6+ with `openat2` available. The package
 contains helpers for x86-64 and ARM64 on glibc and musl; it needs no Rust compiler.
 
-Before publication, use the exact tarball from a CI artifact or the release build.
+To test the tarball directly, use the reviewed release artifact or the
+[registry tarball](https://registry.npmjs.org/disktop/-/disktop-1.0.0.tgz).
+Its SHA-256 is `a2deddd76c137e349370fb839b887baff14b3ec27c649f1ce809616bf8b39acd`.
 Install it into a separate prefix and record its checksum:
 
 ```sh
@@ -33,7 +36,9 @@ npm install --prefix "$HOME/disktop-acceptance" --ignore-scripts \
 ```
 
 For a source build, follow [CONTRIBUTING.md](../CONTRIBUTING.md) and record
-`git rev-parse HEAD`. Use the installed command's absolute path when several
+`git rev-parse HEAD`. Released `v1.0.0` names commit
+`3d6448560d19d75b27fce75765819d89f36be09e`; later repository documentation is not
+part of that immutable source or npm artifact. Use the installed command's absolute path when several
 Disktop builds are present, so evidence identifies the artifact actually tested.
 
 ## Record useful evidence
