@@ -22,6 +22,7 @@
 /tmp/
 /reports-generated/
 /recordings/
+/videos/
 /*.tgz
 /*.tar.gz
 
