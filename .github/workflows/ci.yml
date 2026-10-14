@@ -115,7 +115,7 @@ jobs:
       # An artifact upload drops file modes, so the helpers travel as a tar.
       - name: Archive the helpers with their modes
         run: tar -cf disktop-helpers.tar -C vendor/bin SHA256SUMS disktop-fs-linux-x64-gnu disktop-fs-linux-x64-musl disktop-fs-linux-arm64-gnu disktop-fs-linux-arm64-musl
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: disktop-helpers
           path: disktop-helpers.tar
