@@ -185,29 +185,17 @@ environment unvalidated until a tester supplies the evidence described in the gu
 
 ### Mirror 1.0.0 to GitHub Packages
 
-`mirror-github-packages.yml` publishes `@dijo-404/disktop@1.0.0`, which is the npm
-tarball with only its package name changed. The
-[release record](docs/release-readiness.md#github-packages-mirror) describes what it
-checks. Pull requests that touch the workflow or its scripts run its read-only
-`prepare` job. Publishing it takes three steps:
+**`@dijo-404/disktop@1.0.0` is already published and public. Do not dispatch the
+mirror again, delete it or republish it.** It is the npm tarball with only its
+package name changed. `mirror-github-packages.yml` published it in
+[run 42503754817](https://github.com/Dijo-404/disktop/actions/runs/42503754817).
+The [release record](docs/release-readiness.md#github-packages-mirror) lists what was
+checked and the attestation. Pull requests that touch the workflow or its scripts
+still run its read-only `prepare` job. A dispatch would stop at the protected
+`npm-publish` approval, and GitHub Packages refuses a version that already exists.
 
-1. Dispatch it from `main`:
-
-   ```sh
-   gh workflow run mirror-github-packages.yml --ref main -f confirmation='MIRROR 1.0.0'
-   ```
-
-2. Approve the `npm-publish` deployment. The job reads no npm secret. It publishes
-   with the repository's `GITHUB_TOKEN`, then installs the mirror from GitHub
-   Packages and requires the same digest.
-3. GitHub makes a newly published package **private**. For anyone to install it,
-   open the package's settings, choose **Change visibility** and select
-   **Public**. GitHub cannot make a public package private again.
-
-GitHub Packages refuses a version that already exists, so a rerun cannot replace
-the mirror. Do not delete and republish it. Installing needs a token even for a
-public package: a personal access token (classic) with `read:packages`, entered
-as the password here:
+Installing needs a token even for a public package: a personal access token
+(classic) with `read:packages`, entered as the password here:
 
 ```sh
 npm login --scope=@dijo-404 --auth-type=legacy --registry=https://npm.pkg.github.com

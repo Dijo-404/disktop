@@ -36,6 +36,18 @@ npx disktop@1.0.0            # run without installing
 npm install -g disktop@1.0.0 # or install the `disktop` command
 ```
 
+The same release is also on
+[GitHub Packages](https://github.com/Dijo-404/disktop/pkgs/npm/disktop) as
+`@dijo-404/disktop`. It is identical to the npm package except for its name, and the
+command is still `disktop`. GitHub requires a token even for public packages: log
+in once, giving a personal access token (classic) with `read:packages` as the
+password.
+
+```sh
+npm login --scope=@dijo-404 --auth-type=legacy --registry=https://npm.pkg.github.com
+npm install -g @dijo-404/disktop@1.0.0
+```
+
 Requirements:
 
 | | |
