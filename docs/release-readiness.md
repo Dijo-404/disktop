@@ -42,6 +42,27 @@ These are postrelease repository records. The tagged source and npm tarball reta
 their original documentation; later documentation commits neither move `v1.0.0`
 nor replace its artifact. See [the publication record and verification procedure](../CONTRIBUTING.md#publish-100).
 
+## GitHub Packages mirror
+
+GitHub's npm registry accepts only owner-scoped names, so `disktop@1.0.0` is mirrored
+there as `@dijo-404/disktop@1.0.0` by
+[`mirror-github-packages.yml`](../.github/workflows/mirror-github-packages.yml). The
+mirror is neither a rebuild nor a new release. The workflow downloads the published
+tarball, requires the audited SHA-256 above and the registry's SHA-512, and changes
+only the `name` line of its `package.json`.
+[`scripts/mirror-github-package.mjs`](../scripts/mirror-github-package.mjs) refuses the
+result unless every other entry keeps its bytes and mode. The workflow then installs
+that file into a clean prefix and scans with its packaged helper. Only after these
+checks does the protected `npm-publish` job attest the file and publish it with the
+repository's `GITHUB_TOKEN`. The unchanged `repository` field links the package to
+this repository. GitHub Packages has no npm provenance, so a GitHub artifact
+attestation binds the mirror's digest to the publishing run.
+
+| Evidence | Recorded result |
+| --- | --- |
+| Mirror publication | **Not yet published.** The run, mirror digest, attestation and package visibility are recorded here once the protected job has run. |
+| Open advisories at mirroring | RustSec published RUSTSEC-2026-0391, -0398, -0403 and -0410 (plus unsoundness warnings) against `zstd` 0.14.0, `zstd-safe` 8.0.0 and `zstd-sys` 2.1.0 on 2026-10-16, after `1.0.0` passed its advisory gate. The helper in both the npm package and the mirror is that `1.0.0` build. It creates one encoder or decoder per operation over files it wrote itself, and does not use the seekable, dictionary, training, `StableInBuffer` or WebAssembly paths the advisories name. The release owner approved mirroring the unchanged artifact on 2026-11-08; a fix needs a separately authorised maintenance release. npm's open advisories at that date affected development dependencies only. |
+
 ## Executed gates
 
 | Gate | Result |
