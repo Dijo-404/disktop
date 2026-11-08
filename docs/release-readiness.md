@@ -61,6 +61,7 @@ attestation binds the mirror's digest to the publishing run.
 | Evidence | Recorded result |
 | --- | --- |
 | Mirror publication | **Not yet published.** The run, mirror digest, attestation and package visibility are recorded here once the protected job has run. |
+| Open advisories at mirroring | RustSec published RUSTSEC-2026-0391, -0398, -0403 and -0410 (plus unsoundness warnings) against `zstd` 0.14.0, `zstd-safe` 8.0.0 and `zstd-sys` 2.1.0 on 2026-10-16, after `1.0.0` passed its advisory gate. The helper in both the npm package and the mirror is that `1.0.0` build. It creates one encoder or decoder per operation over files it wrote itself, and does not use the seekable, dictionary, training, `StableInBuffer` or WebAssembly paths the advisories name. The release owner approved mirroring the unchanged artifact on 2026-11-08; a fix needs a separately authorised maintenance release. npm's open advisories at that date affected development dependencies only. |
 
 ## Executed gates
 
