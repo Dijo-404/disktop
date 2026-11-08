@@ -131,8 +131,8 @@ jobs:
           SHA256: ${{ needs.prepare.outputs.sha256 }}
         working-directory: ${{ runner.temp }}/mirror
         run: echo "$SHA256  dijo-404-disktop-1.0.0.tgz" | sha256sum --check --strict
-      # npm provenance is an npmjs.org feature; a GitHub artifact attestation
-      # binds the mirror's digest to this workflow run instead.
+      # Binds the mirror's digest to this workflow run for `gh attestation
+      # verify`. npm also signs its own provenance when it publishes below.
       - uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
         with:
           subject-path: ${{ runner.temp }}/mirror/dijo-404-disktop-1.0.0.tgz

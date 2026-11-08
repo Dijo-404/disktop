@@ -1,7 +1,9 @@
 # 1.0.0 release and validation
 
 `disktop@1.0.0` is publicly available on npm, with `latest` pointing to `1.0.0`.
-The registry records publication at **2026-10-07 18:05:58.620 UTC**.
+The registry records publication at **2026-10-07 18:05:58.620 UTC**. The same
+artifact, renamed `@dijo-404/disktop`, has been mirrored on GitHub Packages since
+2026-11-08 ([record](#github-packages-mirror)).
 Engineering and independent postpublication verification passed on 2026-10-07.
 
 **Release-owner decision, 2026-10-07:** the remaining real-environment checks for
@@ -55,12 +57,18 @@ result unless every other entry keeps its bytes and mode. The workflow then inst
 that file into a clean prefix and scans with its packaged helper. Only after these
 checks does the protected `npm-publish` job attest the file and publish it with the
 repository's `GITHUB_TOKEN`. The unchanged `repository` field links the package to
-this repository. GitHub Packages has no npm provenance, so a GitHub artifact
-attestation binds the mirror's digest to the publishing run.
+this repository. A GitHub artifact attestation binds the mirror's digest to the
+publishing run, and npm signed its own provenance statement while publishing.
 
 | Evidence | Recorded result |
 | --- | --- |
-| Mirror publication | **Not yet published.** The run, mirror digest, attestation and package visibility are recorded here once the protected job has run. |
+| Mirror publication | [Run 42503754817](https://github.com/Dijo-404/disktop/actions/runs/42503754817), dispatched from `main` at merge commit [`e67dc90`](https://github.com/Dijo-404/disktop/commit/e67dc90c4206f15639092b1a33bd2deeaa15f925). `prepare` passed, Dijo-404 approved the `npm-publish` deployment, and [`@dijo-404/disktop@1.0.0`](https://github.com/Dijo-404/disktop/pkgs/npm/disktop) was published to `https://npm.pkg.github.com/` at 2026-11-08 17:13 UTC. Both jobs passed. |
+| Mirror artifact | `dijo-404-disktop-1.0.0.tgz`, SHA-256 `1b23622bb611692677ce6d3d22c31bdc0b2dd3cc5dfd717dd6273cecf4ecb302`, integrity `sha512-0vOssSAgXCwbFpTf/7eRoaGM8fsfk4jLvEplxDY4mYSJK4ZDFDSXCjclYSxqWDoJDDE/LCzRS5tFc+FPiMenyg==`, 192 files. Apart from the `name` line of `package.json`, every entry has the bytes and mode of the npm tarball `a2deddd7…`; this was rechecked separately against the run's uploaded artifact. |
+| Pre-publication consumer | The same file installed into a clean prefix and reported `1.0.0`. Its packaged helper passed its checksum check and completed a scan. |
+| GitHub Packages consumer | The published package downloaded from GitHub Packages with the same SHA-256. A clean install resolved it from `npm.pkg.github.com` with matching integrity and reported `1.0.0`. |
+| Artifact attestation | [Attestation 65087055](https://github.com/Dijo-404/disktop/attestations/65087055): SLSA v1 build provenance, Rekor entry `3758350985`, integrated 17:13:41 UTC. A separate `gh attestation verify` confirmed the subject digest, the signer `mirror-github-packages.yml@refs/heads/main`, source commit `e67dc90`, the `workflow_dispatch` trigger and run 42503754817 attempt 1. |
+| npm provenance | `npm publish` signed a provenance statement from the job's OIDC identity: Rekor entry `3758351012`, integrated 17:13:43 UTC. Whether GitHub Packages serves it to `npm audit signatures` has not been checked. |
+| Visibility and link | The [package page](https://github.com/Dijo-404/disktop/pkgs/npm/disktop) is visible without signing in and links this repository. Installing still requires a GitHub token with `read:packages`. |
 | Open advisories at mirroring | RustSec published RUSTSEC-2026-0391, -0398, -0403 and -0410 (plus unsoundness warnings) against `zstd` 0.14.0, `zstd-safe` 8.0.0 and `zstd-sys` 2.1.0 on 2026-10-16, after `1.0.0` passed its advisory gate. The helper in both the npm package and the mirror is that `1.0.0` build. It creates one encoder or decoder per operation over files it wrote itself, and does not use the seekable, dictionary, training, `StableInBuffer` or WebAssembly paths the advisories name. The release owner approved mirroring the unchanged artifact on 2026-11-08; a fix needs a separately authorised maintenance release. npm's open advisories at that date affected development dependencies only. |
 
 ## Executed gates
