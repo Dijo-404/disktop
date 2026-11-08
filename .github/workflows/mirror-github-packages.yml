@@ -1,0 +1,173 @@
+name: Mirror 1.0.0 to GitHub Packages
+
+# Builds nothing and publishes nothing to npmjs.org. GitHub's npm registry
+# accepts only owner-scoped names, so `disktop@1.0.0` is mirrored there as
+# `@dijo-404/disktop@1.0.0`: the exact published tarball, checked against its
+# audited SHA-256 and the registry's SHA-512, with the name line of its
+# package.json changed and every other byte proven unchanged. The manifest's
+# repository field links the package to this repository.
+#
+# A pull request runs `prepare` only. Publication is manual: dispatch from main
+# with the confirmation text, then approve the npm-publish environment. GitHub
+# Packages refuses a version that already exists, so a rerun cannot replace it.
+on:
+  pull_request:
+    paths:
+      - .github/workflows/mirror-github-packages.yml
+      - scripts/mirror-github-package.mjs
+      - scripts/tarball.mjs
+      - scripts/verify-registry-release.mjs
+  workflow_dispatch:
+    inputs:
+      confirmation:
+        description: Type MIRROR 1.0.0 to publish @dijo-404/disktop@1.0.0 to GitHub Packages
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: disktop-github-packages-mirror
+  cancel-in-progress: false
+
+env:
+  EXPECTED_COMMIT: 3d6448560d19d75b27fce75765819d89f36be09e
+  EXPECTED_SHA256: a2deddd76c137e349370fb839b887baff14b3ec27c649f1ce809616bf8b39acd
+
+jobs:
+  prepare:
+    name: Derive and smoke test the mirror artifact
+    if: github.repository == 'Dijo-404/disktop'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    permissions:
+      contents: read
+    outputs:
+      sha256: ${{ steps.mirror.outputs.sha256 }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: '24'
+          package-manager-cache: false
+      - name: Download the exact published npm artifact
+        run: node scripts/verify-registry-release.mjs download "$RUNNER_TEMP/npm"
+      - name: Rename the package and prove nothing else changed
+        id: mirror
+        run: |
+          set -euo pipefail
+          node scripts/mirror-github-package.mjs pack "$RUNNER_TEMP/npm/disktop-1.0.0.tgz" "$RUNNER_TEMP/mirror" | tee -a "$GITHUB_OUTPUT"
+      - name: Install the mirror into a clean prefix and scan with its helper
+        env:
+          ARCHIVE: ${{ runner.temp }}/mirror/dijo-404-disktop-1.0.0.tgz
+        run: |
+          set -euo pipefail
+          consumer="$RUNNER_TEMP/consumer"
+          mkdir -p "$consumer/home" "$consumer/tree"
+          npm install --global --prefix "$consumer/prefix" --ignore-scripts --no-audit --no-fund "$ARCHIVE"
+          disktop() {
+            env HOME="$consumer/home" XDG_CONFIG_HOME="$consumer/home/config" XDG_DATA_HOME="$consumer/home/data" \
+              XDG_CACHE_HOME="$consumer/home/cache" XDG_STATE_HOME="$consumer/home/state" \
+              "$consumer/prefix/bin/disktop" "$@"
+          }
+          test "$(disktop --version)" = '1.0.0'
+          disktop --help > /dev/null
+          printf 'disktop\n' > "$consumer/tree/file"
+          disktop scan "$consumer/tree" --json > "$consumer/scan.json"
+          node -e 'const r = JSON.parse(require("node:fs").readFileSync(process.argv[1], "utf8")); if (r.status !== "complete" || r.exitCode !== 0) throw new Error("scan returned " + r.status);' "$consumer/scan.json"
+      - name: Confirm the mirror artifact is unchanged
+        env:
+          SHA256: ${{ steps.mirror.outputs.sha256 }}
+        working-directory: ${{ runner.temp }}/mirror
+        run: echo "$SHA256  dijo-404-disktop-1.0.0.tgz" | sha256sum --check --strict
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: disktop-github-packages
+          path: ${{ runner.temp }}/mirror/dijo-404-disktop-1.0.0.tgz
+          if-no-files-found: error
+          retention-days: 30
+
+  publish:
+    name: Publish @dijo-404/disktop@1.0.0
+    needs: prepare
+    if: >-
+      ${{ github.event_name == 'workflow_dispatch' &&
+          github.repository == 'Dijo-404/disktop' &&
+          github.ref_name == github.event.repository.default_branch &&
+          inputs.confirmation == 'MIRROR 1.0.0' }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    environment: npm-publish
+    permissions:
+      contents: read
+      packages: write
+      id-token: write
+      attestations: write
+    steps:
+      # Only the script that checks the clean install; nothing from the
+      # repository is installed or run before publication.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          sparse-checkout: |
+            scripts/mirror-github-package.mjs
+            scripts/tarball.mjs
+          sparse-checkout-cone-mode: false
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: '24'
+          registry-url: https://npm.pkg.github.com
+          scope: '@dijo-404'
+          package-manager-cache: false
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: disktop-github-packages
+          path: ${{ runner.temp }}/mirror
+      - name: Require the artifact prepare checked
+        env:
+          SHA256: ${{ needs.prepare.outputs.sha256 }}
+        working-directory: ${{ runner.temp }}/mirror
+        run: echo "$SHA256  dijo-404-disktop-1.0.0.tgz" | sha256sum --check --strict
+      # npm provenance is an npmjs.org feature; a GitHub artifact attestation
+      # binds the mirror's digest to this workflow run instead.
+      - uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
+        with:
+          subject-path: ${{ runner.temp }}/mirror/dijo-404-disktop-1.0.0.tgz
+      - name: Publish the mirror to GitHub Packages
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          ARCHIVE: ${{ runner.temp }}/mirror/dijo-404-disktop-1.0.0.tgz
+        run: npm publish "$ARCHIVE" --ignore-scripts
+      - name: Verify the published mirror from a clean install
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          ARCHIVE: ${{ runner.temp }}/mirror/dijo-404-disktop-1.0.0.tgz
+          SHA256: ${{ needs.prepare.outputs.sha256 }}
+        run: |
+          set -euo pipefail
+          # Newly published metadata can lag the upload. Retry only this read:
+          # publication above must never be repeated by this loop.
+          for attempt in $(seq 1 32); do
+            if version="$(npm view @dijo-404/disktop@1.0.0 version --fetch-retries=0 --fetch-timeout=10000)"; then
+              test "$version" = '1.0.0'
+              break
+            fi
+            if [ "$attempt" -eq 32 ]; then
+              echo '::error::@dijo-404/disktop@1.0.0 remained unavailable after 32 registry checks.'
+              exit 1
+            fi
+            echo "GitHub Packages metadata is not available yet; retry $attempt of 32 in 10 seconds."
+            sleep 10
+          done
+          check="$RUNNER_TEMP/mirror-check"
+          mkdir -p "$check/download" "$check/consumer"
+          npm pack @dijo-404/disktop@1.0.0 --ignore-scripts --pack-destination "$check/download"
+          echo "$SHA256  $check/download/dijo-404-disktop-1.0.0.tgz" | sha256sum --check --strict
+          cd "$check/consumer"
+          printf '%s\n' '{"name":"disktop-mirror-verification","private":true,"version":"1.0.0"}' > package.json
+          npm install --ignore-scripts --save-exact --no-audit --no-fund @dijo-404/disktop@1.0.0
+          node "$GITHUB_WORKSPACE/scripts/mirror-github-package.mjs" installed "$ARCHIVE" "$check/consumer"
+          test "$("$check/consumer/node_modules/.bin/disktop" --version)" = '1.0.0'

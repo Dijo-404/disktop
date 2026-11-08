@@ -42,6 +42,26 @@ These are postrelease repository records. The tagged source and npm tarball reta
 their original documentation; later documentation commits neither move `v1.0.0`
 nor replace its artifact. See [the publication record and verification procedure](../CONTRIBUTING.md#publish-100).
 
+## GitHub Packages mirror
+
+GitHub's npm registry accepts only owner-scoped names, so `disktop@1.0.0` is mirrored
+there as `@dijo-404/disktop@1.0.0` by
+[`mirror-github-packages.yml`](../.github/workflows/mirror-github-packages.yml). The
+mirror is neither a rebuild nor a new release. The workflow downloads the published
+tarball, requires the audited SHA-256 above and the registry's SHA-512, and changes
+only the `name` line of its `package.json`.
+[`scripts/mirror-github-package.mjs`](../scripts/mirror-github-package.mjs) refuses the
+result unless every other entry keeps its bytes and mode. The workflow then installs
+that file into a clean prefix and scans with its packaged helper. Only after these
+checks does the protected `npm-publish` job attest the file and publish it with the
+repository's `GITHUB_TOKEN`. The unchanged `repository` field links the package to
+this repository. GitHub Packages has no npm provenance, so a GitHub artifact
+attestation binds the mirror's digest to the publishing run.
+
+| Evidence | Recorded result |
+| --- | --- |
+| Mirror publication | **Not yet published.** The run, mirror digest, attestation and package visibility are recorded here once the protected job has run. |
+
 ## Executed gates
 
 | Gate | Result |

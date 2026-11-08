@@ -35,7 +35,7 @@ body:
     id: version
     attributes:
       label: Version and artifact identity
-      description: Include disktop --version and the installation method. For source or CI builds give the exact commit; for a tarball give its SHA-256. Identify the npm package version when installed from the registry.
+      description: Include disktop --version and the installation method. For source or CI builds give the exact commit; for a tarball give its SHA-256. When installed from a registry, name the package and version (disktop from npm, or @dijo-404/disktop from GitHub Packages).
     validations:
       required: true
   - type: textarea

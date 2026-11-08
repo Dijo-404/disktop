@@ -183,6 +183,41 @@ Publication records are maintained in repository documentation after release.
 They do not modify the tagged source or published package. Keep every deferred
 environment unvalidated until a tester supplies the evidence described in the guide.
 
+### Mirror 1.0.0 to GitHub Packages
+
+`mirror-github-packages.yml` publishes `@dijo-404/disktop@1.0.0`, which is the npm
+tarball with only its package name changed. The
+[release record](docs/release-readiness.md#github-packages-mirror) describes what it
+checks. Pull requests that touch the workflow or its scripts run its read-only
+`prepare` job. Publishing it takes three steps:
+
+1. Dispatch it from `main`:
+
+   ```sh
+   gh workflow run mirror-github-packages.yml --ref main -f confirmation='MIRROR 1.0.0'
+   ```
+
+2. Approve the `npm-publish` deployment. The job reads no npm secret. It publishes
+   with the repository's `GITHUB_TOKEN`, then installs the mirror from GitHub
+   Packages and requires the same digest.
+3. GitHub makes a newly published package **private**. For anyone to install it,
+   open the package's settings, choose **Change visibility** and select
+   **Public**. GitHub cannot make a public package private again.
+
+GitHub Packages refuses a version that already exists, so a rerun cannot replace
+the mirror. Do not delete and republish it. Installing needs a token even for a
+public package: a personal access token (classic) with `read:packages`, entered
+as the password here:
+
+```sh
+npm login --scope=@dijo-404 --auth-type=legacy --registry=https://npm.pkg.github.com
+npm install -g @dijo-404/disktop@1.0.0
+gh attestation verify dijo-404-disktop-1.0.0.tgz --repo Dijo-404/disktop
+```
+
+The last command checks a downloaded copy of the mirror tarball. Get the copy
+with `npm pack @dijo-404/disktop@1.0.0`.
+
 ## Tests that need a second filesystem
 
 `disktop clean plan --operation move` refuses a destination on the source's own

@@ -26,11 +26,11 @@ import { createRequire } from "node:module";
 import { tmpdir } from "node:os";
 import { dirname, join, relative } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
-import { gunzipSync } from "node:zlib";
 import { after, before, test } from "node:test";
 import { inspectElf, targetMismatches } from "../../scripts/elf.mjs";
 import { helperHello } from "../../scripts/helper-hello.mjs";
 import { RELEASE_TARGETS, binaryName } from "../../scripts/release-targets.mjs";
+import { readTarball } from "../../scripts/tarball.mjs";
 import { compileBundle } from "../support/schemas.mjs";
 
 const ROOT = fileURLToPath(new URL("../../", import.meta.url));
@@ -80,37 +80,6 @@ function run(command, args, { cwd = state.work, timeout = 5 * MINUTES } = {}) {
 
 function sha256(bytes) {
   return createHash("sha256").update(bytes).digest("hex");
-}
-
-/** A minimal ustar reader: npm pack writes regular files, with PAX headers for long names. */
-function readTarball(path) {
-  const bytes = gunzipSync(readFileSync(path));
-  const entries = [];
-  let pending = {};
-  for (let offset = 0; offset + 512 <= bytes.length; ) {
-    const header = bytes.subarray(offset, offset + 512);
-    if (header.every((byte) => byte === 0)) {
-      break;
-    }
-    const field = (start, length) => header.subarray(start, start + length).toString("utf8").replace(/\0.*$/s, "");
-    const size = Number.parseInt(field(124, 12).trim() || "0", 8);
-    const type = String.fromCharCode(header[156] || 48);
-    const data = bytes.subarray(offset + 512, offset + 512 + size);
-    offset += 512 + Math.ceil(size / 512) * 512;
-
-    if (type === "x" || type === "g") {
-      for (const record of data.toString("utf8").split("\n").filter(Boolean)) {
-        const [, key, value] = /^\d+ ([^=]+)=(.*)$/s.exec(record) ?? [];
-        if (type === "x" && key === "path") pending.path = value;
-      }
-      continue;
-    }
-    const prefix = field(345, 155);
-    const name = pending.path ?? (prefix === "" ? field(0, 100) : `${prefix}/${field(0, 100)}`);
-    entries.push({ name, type, mode: Number.parseInt(field(100, 8).trim(), 8) & 0o7777, size, data: Buffer.from(data) });
-    pending = {};
-  }
-  return entries;
 }
 
 function filesUnder(directory, predicate) {

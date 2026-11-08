@@ -13,6 +13,7 @@ import { test } from "node:test";
 import { CHECKSUM_FILE, HELPER_TARGETS, helperBinaryName } from "../../dist/native/locator.js";
 import { publishRefusal, repositorySlug } from "../../scripts/prepublish-guard.mjs";
 import * as release from "../../scripts/release-targets.mjs";
+import { workflowBlock } from "../support/workflows.mjs";
 
 const read = (path) => readFileSync(path, "utf8");
 const manifest = JSON.parse(read("package.json"));
@@ -21,16 +22,6 @@ const HELPER_NAME = /disktop-fs-linux-[a-z0-9]+-[a-z0-9]+/g;
 
 function namedHelpers(text) {
   return [...new Set(text.match(HELPER_NAME) ?? [])].sort();
-}
-
-/** One YAML job or step, bounded by the next declaration at its indentation. */
-function workflowBlock(text, header, indentation) {
-  const start = text.indexOf(`${header}\n`);
-  assert.ok(start >= 0, `missing workflow declaration: ${header.trim()}`);
-  const afterHeader = start + header.length + 1;
-  const tail = text.slice(afterHeader);
-  const next = new RegExp(`^ {0,${indentation}}\\S`, "m").exec(tail)?.index ?? tail.length;
-  return text.slice(start, afterHeader + next);
 }
 
 test("the locator and the release build name the same four helpers and checksum file", () => {
